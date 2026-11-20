@@ -16,6 +16,8 @@
 //    created with vm_remap. Finally x16 = 0 (JIT26Detach) lets the debugger go.
 #include "soul_internal.h"
 #include <errno.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,8 +105,32 @@ static int init_legacy(size_t size, char *msg, size_t msglen) {
     return 1;
 }
 
+// If no debugger script handles the brk, the kernel delivers SIGTRAP to us:
+// catch it so a missing StikDebug script does not crash the whole app.
+static sigjmp_buf g_trap_jb;
+static void trap_handler(int sig) { (void)sig; siglongjmp(g_trap_jb, 1); }
+
+static void *guarded_prepare(size_t size, int *trapped) {
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = trap_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTRAP, &sa, &old);
+    void *volatile rx = NULL;
+    *trapped = 0;
+    if (sigsetjmp(g_trap_jb, 1) == 0) rx = soul_jit26_prepare_region(NULL, size);
+    else *trapped = 1;
+    sigaction(SIGTRAP, &old, NULL);
+    return rx;
+}
+
 static int init_txm(size_t size, char *msg, size_t msglen) {
-    void *rx = soul_jit26_prepare_region(NULL, size);
+    int trapped = 0;
+    void *rx = guarded_prepare(size, &trapped);
+    if (trapped) {
+        snprintf(msg, msglen, "Hata ayıklayıcı JIT isteğini yanıtlamadı (StikDebug betiği çalışmıyor). StikDebug'da Soul için universal.js atayın.");
+        return 0;
+    }
     if (!rx || (uintptr_t)rx == 0xE0000069) {
         snprintf(msg, msglen, "StikDebug JIT bölgesi hazırlamadı. StikDebug'da 'Always Run Scripts' açık olmalı ve Soul için universal.js seçilmeli.");
         return 0;

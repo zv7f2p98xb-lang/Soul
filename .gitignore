@@ -4,3 +4,6 @@ SoulCore/build/
 DerivedData/
 .DS_Store
 *.ipa
+Soul.xcodeproj/
+App/Samples/
+Payload/

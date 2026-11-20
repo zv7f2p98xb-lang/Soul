@@ -178,7 +178,7 @@ HLE(k32_SetConsoleTextAttribute) {
     char seq[32];
     int n = (a == 7) ? snprintf(seq, sizeof seq, "\x1b[0m") : snprintf(seq, sizeof seq, "\x1b[%d;%dm", fg, bg);
     int stream;
-    if (handle_is_console(ARG(0), &stream) && stream) con_write(stream, seq, (size_t)n);
+    if (a != hs()->con_attr && handle_is_console(ARG(0), &stream) && stream) con_write(stream, seq, (size_t)n);
     hs()->con_attr = a;
     RET(1);
 }
