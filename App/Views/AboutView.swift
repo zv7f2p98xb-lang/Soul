@@ -20,14 +20,15 @@ struct AboutView: View {
                 Bullet(ok: true, "Dosya okuma/yazma, klasör listeleme, klavye girdisi, renkli konsol çıktısı")
                 Bullet(ok: true, "Programla gelen x64 DLL'ler, statik C++ çalışma zamanı, setjmp/longjmp, TLS")
                 Bullet(ok: true, "Windows mesaj kutuları (MessageBox) iPad uyarısı olarak gösterilir")
+                Bullet(ok: true, "Çoklu iş parçacığı: CreateThread, kritik bölgeler, olaylar, semaforlar, koşul değişkenleri")
 
                 Text("Henüz çalışmayanlar").font(.title2.weight(.semibold))
                 Bullet(ok: false, "Pencereli (GUI) programlar ve oyunlar: GDI/Direct3D/OpenGL çizimi yok")
                 Bullet(ok: false, "32-bit (x86) programlar, .NET programları, kurulum sihirbazları (.msi)")
-                Bullet(ok: false, "Çoklu iş parçacığı (CreateThread), C++ istisnaları (throw), AVX komutları")
+                Bullet(ok: false, "C++ istisnaları (throw), AVX komutları, alt süreç başlatma (CreateProcess)")
 
                 Text("Madeira ile fark").font(.title2.weight(.semibold))
-                Text("Madeira gibi projeler Steam oyunlarını çalıştırmak için Wine (Windows API'nin neredeyse tamamı), FEX-Emu (olgun bir x86→ARM64 JIT) ve DXMT (Direct3D 11 → Metal) yığınını birleştirir. Soul ise sıfırdan yazılmış, küçük ve anlaşılır bir çekirdek: aynı temel fikri (JIT + API taklidi) uygular ama şimdilik konsol programlarını hedefler. Yol haritası: iş parçacıkları, GDI pencereleri, ardından Direct3D → Metal.")
+                Text("Madeira gibi projeler Steam oyunlarını çalıştırmak için Wine (Windows API'nin neredeyse tamamı), FEX-Emu (olgun bir x86→ARM64 JIT) ve DXMT (Direct3D 11 → Metal) yığınını birleştirir. Soul ise sıfırdan yazılmış, küçük ve anlaşılır bir çekirdek: aynı temel fikri (JIT + API taklidi) uygular ama şimdilik konsol programlarını hedefler. Yol haritası: GDI pencereleri, dokunmatik/klavye girdisi, ardından Direct3D → Metal.")
                     .foregroundStyle(.secondary)
             }
             .padding(24)
