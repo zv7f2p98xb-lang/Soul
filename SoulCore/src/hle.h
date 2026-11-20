@@ -75,6 +75,8 @@ typedef struct HObj {
     long count;
     void *ptr;
     size_t len;
+    uint32_t owner;      // mutex owner thread id
+    uint32_t recursion;  // mutex recursion count
 } HObj;
 
 #define MAX_HANDLES 1024

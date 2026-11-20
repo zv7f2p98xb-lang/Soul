@@ -1,0 +1,22 @@
+module=C:\winapi.exe
+cwd=C:\
+read 12 bytes: Soul Win32
+size=12
+find=ok w32test.dat
+attr after delete=ffffffff err=0
+env=merhaba windir=C:\windows
+utf: 19 22 Çay şeker İstanbul
+WriteConsoleW: ğüşöç
+longjmp returned 42
+tls=15
+slept=1
+qpc=1
+arch=9 page=4096
+virtualalloc=7
+heap=0 9
+wsprintf=12-ab-ff
+argc=2 argv1=hello
+
+┌─ Soul ─
+│ Merhaba iPad!
+└─

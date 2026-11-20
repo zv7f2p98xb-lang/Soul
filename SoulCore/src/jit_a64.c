@@ -390,6 +390,70 @@ static int translate(J *j, const Slot *s) {
                 store_rm(j, in, T2, size);
                 return 0;
             }
+            if ((sub == 6 || sub == 7) && size >= 4 && j->jc->insn_used < j->jc->insn_cap) { // DIV / IDIV
+                int sf = size == 8, sgn = sub == 7;
+                if (in->mod != 3) emit_ea(j, in, 1);
+                load_rm(j, in, T1, size);                  // divisor
+                load_reg(j, in, T0, RAX, 8);
+                load_reg(j, in, T2, RDX, 8);
+                uint32_t *slow[4];
+                int ns = 0;
+                if (sf) {
+                    if (sgn) {
+                        em(e, a_asr(1, T3, T0, 63));
+                        em(e, a_addsub_reg(1, 1, 1, XZR, T3, T2, 0, 0)); // rdx must be the sign extension of rax
+                        slow[ns++] = e->p; em(e, a_bcond(C_NE, 0));
+                        em(e, a_addsub_imm(1, 0, 1, XZR, T1, 1, 0));    // cmn x1, #1 (divisor -1 may overflow)
+                        slow[ns++] = e->p; em(e, a_bcond(C_EQ, 0));
+                    } else {
+                        slow[ns++] = e->p; em(e, a_cbnz(1, T2, 0));      // 128-bit dividend
+                    }
+                    slow[ns++] = e->p; em(e, a_cbz(1, T1, 0));           // #DE
+                    em(e, sgn ? a_sdiv(1, T3, T0, T1) : a_udiv(1, T3, T0, T1));
+                    em(e, a_msub(1, T4, T3, T1, T0));
+                    em(e, a_str_imm(3, T3, R_ST, gpr_off(RAX)));
+                    em(e, a_str_imm(3, T4, R_ST, gpr_off(RDX)));
+                } else {
+                    em(e, a_mov(0, T0, T0));
+                    em(e, a_logic_reg(1, 1, 0, T0, T0, T2, 0, 32));    // x0 = edx:eax
+                    slow[ns++] = e->p; em(e, a_cbz(0, T1, 0));
+                    if (sgn) {
+                        em(e, a_sxt(T1, T1, 32));
+                        em(e, a_sdiv(1, T3, T0, T1));
+                        em(e, a_sxt(5, T3, 32));
+                        em(e, a_addsub_reg(1, 1, 1, XZR, 5, T3, 0, 0)); // quotient must fit in 32 bits
+                        slow[ns++] = e->p; em(e, a_bcond(C_NE, 0));
+                    } else {
+                        em(e, a_mov(0, T1, T1));
+                        em(e, a_udiv(1, T3, T0, T1));
+                        em(e, a_lsr(1, 5, T3, 32));
+                        slow[ns++] = e->p; em(e, a_cbnz(1, 5, 0));
+                    }
+                    em(e, a_msub(1, T4, T3, T1, T0));
+                    store_reg(j, in, T3, RAX, 4);
+                    store_reg(j, in, T4, RDX, 4);
+                }
+                uint32_t *skip = e->p;
+                em(e, a_b(0));
+                uint32_t *slow_at = e->p;
+                X86Insn *copy = &j->jc->insns[j->jc->insn_used++];
+                *copy = *in;
+                em(e, a_mov(1, 0, R_ST));
+                mov_imm(j, 1, (uint64_t)(uintptr_t)copy);
+                call_helper(j, (void *)jit_h_exec);           // interpreter raises #DE or handles 128-bit cases
+                uint32_t *done = e->p;
+                if (!e->overflow) {
+                    for (int k = 0; k < ns; k++) {
+                        uint32_t ins = *slow[k];
+                        int32_t off = (int32_t)(slow_at - slow[k]);
+                        if ((ins & 0xFF000000u) == 0x54000000u) *slow[k] = a_bcond((int)(ins & 0xF), off);
+                        else *slow[k] = (ins & 0xFF00001Fu) | (((uint32_t)off & 0x7FFFF) << 5);
+                    }
+                    *skip = a_b((int32_t)(done - skip));
+                }
+                j->nat = NK_NONE;
+                return 0;
+            }
             if (sub == 3 && size >= 4) { // NEG
                 if (in->mod != 3) emit_ea(j, in, 1);
                 load_rm(j, in, T1, size);

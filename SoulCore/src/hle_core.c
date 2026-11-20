@@ -294,6 +294,16 @@ void con_write(int stream, const char *data, size_t len) {
 size_t con_read(char *buf, size_t max, int line_mode) {
     SoulProcess *p = g_proc;
     con_flush();
+    SoulThread *self = soul_cur_thread();
+    int release = self != NULL;
+    if (release) {
+        // do not block other guest threads while waiting for the keyboard
+        pthread_mutex_lock(&p->in_mu);
+        int ready = p->in_len > 0 || p->in_closed || p->terminate;
+        pthread_mutex_unlock(&p->in_mu);
+        if (ready) release = 0;
+    }
+    if (release) gil_unlock(self);
     pthread_mutex_lock(&p->in_mu);
     while (p->in_len == 0 && !p->in_closed && !p->terminate) pthread_cond_wait(&p->in_cv, &p->in_mu);
     size_t n = 0;
@@ -308,6 +318,7 @@ size_t con_read(char *buf, size_t max, int line_mode) {
         p->in_len -= n;
     }
     pthread_mutex_unlock(&p->in_mu);
+    if (release) gil_lock(self);
     return n;
 }
 

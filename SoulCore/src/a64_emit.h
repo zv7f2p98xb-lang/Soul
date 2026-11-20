@@ -52,6 +52,9 @@ static inline uint32_t a_bfi(int sf, int rd, int rn, int lsb, int width) { int w
 // variable shifts: op2 0 LSLV, 1 LSRV, 2 ASRV
 static inline uint32_t a_shiftv(int sf, int op2, int rd, int rn, int rm) { return SF(sf) | 0x1AC02000u | ((uint32_t)rm << 16) | ((uint32_t)op2 << 10) | ((uint32_t)rn << 5) | (uint32_t)rd; }
 static inline uint32_t a_mul(int sf, int rd, int rn, int rm) { return SF(sf) | 0x1B007C00u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
+static inline uint32_t a_msub(int sf, int rd, int rn, int rm, int ra) { return SF(sf) | 0x1B008000u | ((uint32_t)rm << 16) | ((uint32_t)ra << 10) | ((uint32_t)rn << 5) | (uint32_t)rd; }
+static inline uint32_t a_udiv(int sf, int rd, int rn, int rm) { return SF(sf) | 0x1AC00800u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
+static inline uint32_t a_sdiv(int sf, int rd, int rn, int rm) { return SF(sf) | 0x1AC00C00u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
 static inline uint32_t a_smulh(int rd, int rn, int rm) { return 0x9B407C00u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
 static inline uint32_t a_csel(int sf, int rd, int rn, int rm, int cond) { return SF(sf) | 0x1A800000u | ((uint32_t)rm << 16) | ((uint32_t)cond << 12) | ((uint32_t)rn << 5) | (uint32_t)rd; }
 static inline uint32_t a_cset(int sf, int rd, int cond) { return SF(sf) | 0x1A9F07E0u | ((uint32_t)(cond ^ 1) << 12) | (uint32_t)rd; }

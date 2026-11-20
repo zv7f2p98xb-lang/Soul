@@ -1275,9 +1275,28 @@ HLE(crt__create_locale) { static uint64_t loc[4]; RET(loc); }
 HLE_STUB_RET(crt__free_locale, 0)
 HLE(crt__get_current_locale) { static uint64_t loc[4]; RET(loc); }
 HLE(crt__getpid) { RET(4242); }
-HLE(crt__beginthreadex) { soul_log("[crt] Çoklu iş parçacığı (_beginthreadex) henüz desteklenmiyor\n"); g_errno = EAGAIN; RET(0); }
-HLE(crt__beginthread) { soul_log("[crt] Çoklu iş parçacığı (_beginthread) henüz desteklenmiyor\n"); RET((uint64_t)-1); }
-HLE(crt__sleep) { usleep((useconds_t)(uint32_t)ARG(0) * 1000); RET(0); }
+uint64_t k32_create_thread(X86State *st, uint64_t stack, uint64_t fn, uint64_t arg, uint32_t flags, uint64_t tid_out);
+// _beginthreadex(security, stack, start, arg, initflag, thrdaddr)
+HLE(crt__beginthreadex) {
+    uint64_t h = k32_create_thread(st, ARG(1), ARG(2), ARG(3), (uint32_t)hle_arg(st, 4), hle_arg(st, 5));
+    if (!h) g_errno = EAGAIN;
+    RET(h);
+}
+// _beginthread(start, stack, arg): the start routine returns void
+HLE(crt__beginthread) {
+    uint64_t h = k32_create_thread(st, ARG(1), ARG(0), ARG(2), 0, 0);
+    RET(h ? h : (uint64_t)-1);
+}
+HLE(crt__endthreadex) { soul_exit_thread(st, (uint32_t)ARG(0)); }
+HLE(crt__endthread) { soul_exit_thread(st, 0); }
+HLE(crt__Thrd_yield) { soul_yield(); RET(0); }
+HLE(crt__sleep) {
+    uint32_t ms = (uint32_t)ARG(0);
+    double deadline = soul_now() + ms / 1000.0;
+    if (!ms) soul_yield();
+    while (ms && !g_proc->terminate && soul_now() < deadline) gil_wait((int64_t)((deadline - soul_now()) * 1000.0) + 1);
+    RET(0);
+}
 
 // setjmp / longjmp (Win64 _JUMP_BUFFER layout)
 HLE(crt__setjmp) {
@@ -1613,6 +1632,7 @@ const HleEntry hle_crt_table[] = {
     { "_configthreadlocale", crt__configthreadlocale, NULL }, { "_create_locale", crt__create_locale, NULL }, { "_free_locale", crt__free_locale, NULL },
     { "_get_current_locale", crt__get_current_locale, NULL }, { "_getpid", crt__getpid, NULL }, { "_beginthreadex", crt__beginthreadex, NULL },
     { "_beginthread", crt__beginthread, NULL }, { "_sleep", crt__sleep, NULL },
+    { "_endthreadex", crt__endthreadex, NULL }, { "_endthread", crt__endthread, NULL }, { "_Thrd_yield", crt__Thrd_yield, NULL },
     { "_setjmp", crt__setjmp, NULL }, { "setjmp", crt__setjmp, NULL }, { "_setjmpex", crt__setjmp, NULL }, { "longjmp", crt_longjmp, NULL }, { "_longjmp", crt_longjmp, NULL },
     // time
     { "time", crt_time64, NULL }, { "_time64", crt_time64, NULL }, { "_time32", crt_time32, NULL }, { "clock", crt_clock, NULL }, { "difftime", crt_difftime, NULL },

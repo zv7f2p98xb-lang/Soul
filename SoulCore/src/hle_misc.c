@@ -23,7 +23,13 @@ static void random_bytes(void *buf, size_t n) {
 static int message_box(const char *title, const char *text, unsigned type) {
     SoulProcess *p = g_proc;
     con_flush();
-    if (p->opts.message_box) return p->opts.message_box(p->opts.ctx, title ? title : "", text ? text : "", type);
+    if (p->opts.message_box) {
+        SoulThread *self = soul_cur_thread();
+        if (self) gil_unlock(self); // the UI may take a while; let other guest threads run
+        int r = p->opts.message_box(p->opts.ctx, title ? title : "", text ? text : "", type);
+        if (self) gil_lock(self);
+        return r;
+    }
     char buf[2048];
     int n = snprintf(buf, sizeof buf, "\n┌─ %s ─\n│ %s\n└─\n", title ? title : "", text ? text : "");
     con_write(1, buf, (size_t)n);

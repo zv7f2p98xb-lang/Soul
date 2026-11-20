@@ -22,7 +22,24 @@ struct SoulThread {
     int skip_ret;         // set by HLE functions that redirect control flow
     uint32_t cur_thunk;   // id of the HLE thunk being executed
     uint64_t block_rip;   // start of the JIT block being executed (diagnostics)
+    // multithreading
+    uint32_t tid;
+    int is_main;
+    int suspended;
+    volatile int finished;
+    uint32_t exit_code;
+    uint64_t start_fn, start_arg;
+    pthread_t host;
+    uint8_t *teb_block;
+    size_t teb_size;
+    void *stack_mem;
+    size_t stack_size;
+    uint64_t fls[128];
+    struct SoulThread *next;
 };
+
+#define SOUL_MAX_TLS_MODULES 32
+typedef struct TlsTemplate { uint64_t start; size_t raw, zero; int index; uint64_t callbacks; uint64_t module_base; } TlsTemplate;
 
 typedef void (*HleFn)(X86State *st);
 
@@ -74,11 +91,36 @@ struct SoulProcess {
     volatile int terminate;
     void *hle_state;          // owned by hle_core.c
     pthread_t guest_thread;   // host thread running the guest
+
+    // threads: guest code runs under one global interpreter lock (GIL)
+    pthread_mutex_t gil;
+    pthread_cond_t gil_cv;     // broadcast whenever a guest sync object changes
+    volatile int gil_waiters;
+    SoulThread *gil_owner;
+    SoulThread *threads;       // additional guest threads
+    uint32_t next_tid;
+    volatile int exit_requested;
+    int requested_code;
+    uint64_t retired_jit, retired_interp; // instruction counts of finished threads
+    TlsTemplate tls[SOUL_MAX_TLS_MODULES];
+    int tls_count;
+    pthread_t ticker;
+    int ticker_running;
 };
 
 extern SoulProcess *g_proc;
 
 // runtime.c
+SoulThread *soul_cur_thread(void);
+void gil_lock(SoulThread *t);
+void gil_unlock(SoulThread *t);
+void gil_notify(void);                       // wake threads waiting on guest sync objects
+int gil_wait(int64_t timeout_ms);            // 0 = woken, 1 = timeout (GIL must be held)
+void soul_yield(void);
+SoulThread *soul_thread_create(X86State *st, uint64_t fn, uint64_t arg, size_t stack, int suspended);
+void soul_thread_resume(SoulThread *t);
+void soul_exit_thread(X86State *st, uint32_t code) __attribute__((noreturn));
+void pe_init_thread_tls(SoulProcess *p, X86State *st, uint64_t teb, int attach_callbacks);
 void soul_fatal(X86State *st, const char *fmt, ...) __attribute__((noreturn, format(printf, 2, 3)));
 void soul_exit_process(X86State *st, int code) __attribute__((noreturn));
 void soul_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

@@ -47,6 +47,8 @@ static uint64_t put_str(uint64_t buf, uint64_t cap, const char *s, int wide) {
     return n;
 }
 
+static uint32_t cur_tid_k32(void) { SoulThread *t = soul_cur_thread(); return t ? t->tid : 4243; }
+
 // ---- console / std handles ------------------------------------------------------------------
 
 HLE(k32_GetStdHandle) {
@@ -802,13 +804,22 @@ HLE(k32_TerminateProcess) {
 HLE(k32_GetCurrentProcess) { RET((uint64_t)-1); }
 HLE(k32_GetCurrentThread) { RET((uint64_t)-2); }
 HLE(k32_GetCurrentProcessId) { RET(4242); }
-HLE(k32_GetCurrentThreadId) { RET(4243); }
+HLE(k32_GetCurrentThreadId) { RET(cur_tid_k32()); }
 HLE(k32_GetProcessId) { RET(4242); }
-HLE(k32_GetThreadId) { RET(4243); }
+HLE(k32_GetThreadId) {
+    if (ARG(0) == (uint64_t)-2) { RET(cur_tid_k32()); return; }
+    HObj *o = h_get(ARG(0));
+    RET(o && o->type == H_THREAD && o->ptr ? ((SoulThread *)o->ptr)->tid : 0);
+}
 HLE(k32_GetLastError) { RET(get_last_error(st)); }
 HLE(k32_SetLastError) { set_last_error(st, (uint32_t)ARG(0)); RET(0); }
 HLE(k32_GetExitCodeProcess) { mem_wr(ARG(1), 4, 259); RET(1); }
-HLE(k32_GetExitCodeThread) { mem_wr(ARG(1), 4, 259); RET(1); }
+HLE(k32_GetExitCodeThread) {
+    HObj *o = h_get(ARG(0));
+    SoulThread *t = o && o->type == H_THREAD ? o->ptr : NULL;
+    mem_wr(ARG(1), 4, t && t->finished ? t->exit_code : 259);
+    RET(1);
+}
 HLE(k32_GetVersion) { RET((19045u << 16) | (0u << 8) | 10u); }
 static void version_ex(X86State *st) {
     uint8_t *b = PTR(0);
@@ -902,9 +913,20 @@ HLE(k32_CreateProcessA) { soul_log("[api] Yeni süreç başlatma (CreateProcess)
 // ---- time ------------------------------------------------------------------------------------
 
 static double unix_now(void) { struct timeval tv; gettimeofday(&tv, NULL); return (double)tv.tv_sec + tv.tv_usec / 1e6; }
-HLE(k32_Sleep) { con_flush(); uint32_t ms = (uint32_t)ARG(0); if (ms) usleep((useconds_t)ms * 1000); RET(0); }
-HLE(k32_SleepEx) { con_flush(); uint32_t ms = (uint32_t)ARG(0); if (ms && ms != 0xFFFFFFFF) usleep((useconds_t)ms * 1000); RET(0); }
-HLE_STUB_RET(k32_SwitchToThread, 0)
+static void sleep_ms(uint32_t ms) {
+    con_flush();
+    if (ms == 0) { soul_yield(); return; }
+    double deadline = ms == 0xFFFFFFFF ? -1.0 : soul_now() + ms / 1000.0;
+    while (!g_proc->terminate) {
+        double now = soul_now();
+        if (deadline >= 0 && now >= deadline) break;
+        int64_t left = deadline < 0 ? 1000 : (int64_t)((deadline - now) * 1000.0) + 1;
+        gil_wait(left);
+    }
+}
+HLE(k32_Sleep) { sleep_ms((uint32_t)ARG(0)); RET(0); }
+HLE(k32_SleepEx) { sleep_ms((uint32_t)ARG(0)); RET(0); }
+HLE(k32_SwitchToThread) { soul_yield(); RET(1); }
 HLE(k32_GetTickCount) { RET((uint32_t)(soul_now() * 1000.0)); }
 HLE(k32_GetTickCount64) { RET((uint64_t)(soul_now() * 1000.0)); }
 HLE(k32_QueryPerformanceCounter) { mem_wr(ARG(0), 8, (uint64_t)(soul_now() * 10000000.0)); RET(1); }
@@ -935,38 +957,157 @@ HLE(k32_SystemTimeToFileTime) {
 HLE(k32_GetTimeZoneInformation) { memset(PTR(0), 0, 172); RET(0); }
 HLE(k32_GetDynamicTimeZoneInformation) { memset(PTR(0), 0, 432); RET(0); }
 
-// ---- synchronisation (single guest thread) -------------------------------------------------------
+// ---- synchronisation ----------------------------------------------------------------------------
+// Guest threads run one at a time under the GIL, so these objects only need to
+// block (gil_wait releases the GIL) and to be woken up (gil_notify).
 
-HLE_STUB_RET(k32_InitializeCriticalSection, 0)
-HLE_STUB_RET(k32_InitializeCriticalSectionEx, 1)
-HLE_STUB_RET(k32_EnterCriticalSection, 0)
-HLE_STUB_RET(k32_LeaveCriticalSection, 0)
-HLE_STUB_RET(k32_TryEnterCriticalSection, 1)
+static uint32_t cur_tid(void) { SoulThread *t = soul_cur_thread(); return t ? t->tid : 4243; }
+
+// Waits until notified or the deadline (<0: infinite) passes. Returns 1 on timeout.
+static int wait_until(double deadline, int poll_input) {
+    if (g_proc->terminate) return 1;
+    if (deadline < 0 && !poll_input) { gil_wait(-1); return 0; }
+    double now = soul_now();
+    if (deadline >= 0 && now >= deadline) return 1;
+    int64_t ms = deadline < 0 ? 20 : (int64_t)((deadline - now) * 1000.0) + 1;
+    if (poll_input && ms > 20) ms = 20;
+    gil_wait(ms);
+    return deadline >= 0 && soul_now() >= deadline;
+}
+static double deadline_for(uint32_t ms) { return ms == 0xFFFFFFFF ? -1.0 : soul_now() + ms / 1000.0; }
+
+static void deadlock(X86State *st, const char *what) {
+    soul_fatal(st, "Kilitlenme: program, başka iş parçacığı yokken hiçbir zaman serbest kalmayacak bir %s bekliyor", what);
+}
+
+// critical sections: RTL_CRITICAL_SECTION { DebugInfo, LockCount, RecursionCount, OwningThread, LockSemaphore, SpinCount }
+static void cs_enter(X86State *st, uint64_t cs) {
+    uint32_t me = cur_tid();
+    for (;;) {
+        uint64_t owner = mem_rd(cs + 16, 8);
+        if (owner == 0 || owner == me) {
+            mem_wr(cs + 16, 8, me);
+            mem_wr(cs + 12, 4, mem_rd(cs + 12, 4) + 1);
+            return;
+        }
+        if (g_proc->terminate) return;
+        if (!g_proc->threads) deadlock(st, "kritik bölge");
+        wait_until(-1, 0);
+    }
+}
+static void cs_leave(uint64_t cs) {
+    int32_t rec = (int32_t)mem_rd(cs + 12, 4) - 1;
+    if (rec <= 0) { mem_wr(cs + 12, 4, 0); mem_wr(cs + 16, 8, 0); gil_notify(); }
+    else mem_wr(cs + 12, 4, (uint32_t)rec);
+}
+HLE(k32_InitializeCriticalSection) { uint64_t spin = mem_rd(ARG(0) + 32, 8); memset(PTR(0), 0, 40); (void)spin; RET(0); }
+HLE(k32_InitializeCriticalSectionEx) { memset(PTR(0), 0, 40); mem_wr(ARG(0) + 32, 8, (uint32_t)ARG(1)); RET(1); }
+HLE(k32_EnterCriticalSection) { cs_enter(st, ARG(0)); RET(0); }
+HLE(k32_LeaveCriticalSection) { cs_leave(ARG(0)); RET(0); }
+HLE(k32_TryEnterCriticalSection) {
+    uint64_t cs = ARG(0), owner = mem_rd(cs + 16, 8);
+    uint32_t me = cur_tid();
+    if (owner && owner != me) { RET(0); return; }
+    mem_wr(cs + 16, 8, me);
+    mem_wr(cs + 12, 4, mem_rd(cs + 12, 4) + 1);
+    RET(1);
+}
 HLE_STUB_RET(k32_DeleteCriticalSection, 0)
-HLE_STUB_RET(k32_InitializeSRWLock, 0)
-HLE_STUB_RET(k32_AcquireSRWLock, 0)
-HLE_STUB_RET(k32_TryAcquireSRWLock, 1)
-HLE_STUB_RET(k32_InitializeConditionVariable, 0)
-HLE_STUB_RET(k32_WakeConditionVariable, 0)
-HLE(k32_SleepConditionVariable) { set_last_error(st, 1460); RET(0); } // ERROR_TIMEOUT
+
+// slim reader/writer locks: 0 = free, 1 = exclusive, 2*n = n shared owners
+static void srw_acquire(X86State *st, uint64_t l, int shared) {
+    for (;;) {
+        uint64_t v = mem_rd(l, 8);
+        if (shared ? v != 1 : v == 0) { mem_wr(l, 8, shared ? v + 2 : 1); return; }
+        if (g_proc->terminate) return;
+        if (!g_proc->threads) deadlock(st, "SRW kilidi");
+        wait_until(-1, 0);
+    }
+}
+static void srw_release(uint64_t l, int shared) {
+    uint64_t v = mem_rd(l, 8);
+    if (shared) v = v >= 2 ? v - 2 : 0; else v = 0;
+    mem_wr(l, 8, v);
+    if (v == 0) gil_notify();
+}
+HLE(k32_InitializeSRWLock) { mem_wr(ARG(0), 8, 0); RET(0); }
+HLE(k32_AcquireSRWLockExclusive) { srw_acquire(st, ARG(0), 0); RET(0); }
+HLE(k32_AcquireSRWLockShared) { srw_acquire(st, ARG(0), 1); RET(0); }
+HLE(k32_ReleaseSRWLockExclusive) { srw_release(ARG(0), 0); RET(0); }
+HLE(k32_ReleaseSRWLockShared) { srw_release(ARG(0), 1); RET(0); }
+HLE(k32_TryAcquireSRWLockExclusive) { uint64_t v = mem_rd(ARG(0), 8); if (v) { RET(0); return; } mem_wr(ARG(0), 8, 1); RET(1); }
+HLE(k32_TryAcquireSRWLockShared) { uint64_t v = mem_rd(ARG(0), 8); if (v == 1) { RET(0); return; } mem_wr(ARG(0), 8, v + 2); RET(1); }
+
+// condition variables: the guest word is a wake-up generation counter
+HLE(k32_InitializeConditionVariable) { mem_wr(ARG(0), 8, 0); RET(0); }
+HLE(k32_WakeConditionVariable) { mem_wr(ARG(0), 8, mem_rd(ARG(0), 8) + 1); gil_notify(); RET(0); }
+static int cv_sleep(X86State *st, uint64_t cv, uint32_t ms) {
+    uint64_t gen = mem_rd(cv, 8);
+    double dl = deadline_for(ms);
+    int timeout = 0;
+    while (mem_rd(cv, 8) == gen) {
+        if (g_proc->terminate) { timeout = 1; break; }
+        if (ms == 0xFFFFFFFF && !g_proc->threads) deadlock(st, "koşul değişkeni");
+        if (wait_until(dl, 0)) { timeout = 1; break; }
+    }
+    return timeout;
+}
+HLE(k32_SleepConditionVariableCS) {
+    uint64_t cv = ARG(0), cs = ARG(1);
+    uint32_t rec = (uint32_t)mem_rd(cs + 12, 4);
+    mem_wr(cs + 12, 4, 0); mem_wr(cs + 16, 8, 0);
+    gil_notify();
+    int timeout = cv_sleep(st, cv, (uint32_t)ARG(2));
+    cs_enter(st, cs);
+    mem_wr(cs + 12, 4, rec ? rec : 1);
+    if (timeout) { set_last_error(st, 1460); RET(0); return; }
+    RET(1);
+}
+HLE(k32_SleepConditionVariableSRW) {
+    uint64_t cv = ARG(0), l = ARG(1);
+    int shared = ((uint32_t)ARG(3) & 1) != 0;
+    srw_release(l, shared);
+    int timeout = cv_sleep(st, cv, (uint32_t)ARG(2));
+    srw_acquire(st, l, shared);
+    if (timeout) { set_last_error(st, 1460); RET(0); return; }
+    RET(1);
+}
+HLE(k32_WaitOnAddress) {
+    uint64_t addr = ARG(0), cmp = ARG(1), size = ARG(2);
+    double dl = deadline_for((uint32_t)ARG(3));
+    while (memcmp(PTR(0), PTR(1), size) == 0) {
+        if (g_proc->terminate) break;
+        if ((uint32_t)ARG(3) == 0xFFFFFFFF && !g_proc->threads) deadlock(st, "adres değişikliği");
+        if (wait_until(dl, 0)) { set_last_error(st, 1460); RET(0); return; }
+    }
+    (void)addr; (void)cmp;
+    RET(1);
+}
+HLE(k32_WakeByAddress) { gil_notify(); RET(0); }
+
 HLE(k32_InitOnceExecuteOnce) {
     uint64_t once = ARG(0);
     if (mem_rd(once, 8) == 0) {
+        mem_wr(once, 8, 1);
         uint64_t args[3] = { once, ARG(2), ARG(3) };
         uint64_t r = soul_guest_call(st, ARG(1), 3, args) & 0xFFFFFFFF;
-        if (!r) { RET(0); return; }
+        if (!r) { mem_wr(once, 8, 0); gil_notify(); RET(0); return; }
         mem_wr(once, 8, 2);
+        gil_notify();
     }
+    while (mem_rd(once, 8) == 1 && !g_proc->terminate) wait_until(-1, 0);
     RET(1);
 }
 HLE(k32_InitOnceBeginInitialize) {
     uint64_t once = ARG(0);
+    while (mem_rd(once, 8) == 1 && !g_proc->terminate) wait_until(-1, 0);
     int done = mem_rd(once, 8) == 2;
+    if (!done) mem_wr(once, 8, 1);
     if (ARG(2)) mem_wr(ARG(2), 4, done ? 0 : 1);
     if (ARG(3)) mem_wr(ARG(3), 8, 0);
     RET(1);
 }
-HLE(k32_InitOnceComplete) { mem_wr(ARG(0), 8, 2); RET(1); }
+HLE(k32_InitOnceComplete) { mem_wr(ARG(0), 8, ((uint32_t)ARG(1) & 4) ? 0 : 2); gil_notify(); RET(1); }
 
 static uint64_t make_sync(HType t, int signaled, int manual, long count) {
     HObj *o;
@@ -977,12 +1118,23 @@ static uint64_t make_sync(HType t, int signaled, int manual, long count) {
 HLE(k32_CreateEventA) { RET(make_sync(H_EVENT, (int)ARG(2), (int)ARG(1), 0)); }
 HLE(k32_CreateEventW) { RET(make_sync(H_EVENT, (int)ARG(2), (int)ARG(1), 0)); }
 HLE(k32_CreateEventExW) { uint32_t f = (uint32_t)ARG(2); RET(make_sync(H_EVENT, (f & 2) != 0, (f & 1) != 0, 0)); }
-HLE(k32_SetEvent) { HObj *o = h_get(ARG(0)); if (o) o->signaled = 1; RET(o != NULL); }
+HLE(k32_SetEvent) { HObj *o = h_get(ARG(0)); if (o) { o->signaled = 1; gil_notify(); } RET(o != NULL); }
 HLE(k32_ResetEvent) { HObj *o = h_get(ARG(0)); if (o) o->signaled = 0; RET(o != NULL); }
-HLE(k32_CreateMutexA) { RET(make_sync(H_MUTEX, !ARG(1), 0, 0)); }
-HLE(k32_CreateMutexW) { RET(make_sync(H_MUTEX, !ARG(1), 0, 0)); }
-HLE(k32_CreateMutexExW) { RET(make_sync(H_MUTEX, !((uint32_t)ARG(2) & 1), 0, 0)); }
-HLE(k32_ReleaseMutex) { HObj *o = h_get(ARG(0)); if (o) o->signaled = 1; RET(o != NULL); }
+static uint64_t make_mutex(int owned) {
+    HObj *o;
+    uint64_t h = h_alloc(H_MUTEX, &o);
+    if (o && owned) { o->owner = cur_tid(); o->recursion = 1; }
+    return h;
+}
+HLE(k32_CreateMutexA) { RET(make_mutex(ARG(1) != 0)); }
+HLE(k32_CreateMutexW) { RET(make_mutex(ARG(1) != 0)); }
+HLE(k32_CreateMutexExW) { RET(make_mutex(((uint32_t)ARG(2) & 1) != 0)); }
+HLE(k32_ReleaseMutex) {
+    HObj *o = h_get(ARG(0));
+    if (!o || o->type != H_MUTEX || o->owner != cur_tid()) FAIL(288); // ERROR_NOT_OWNER
+    if (--o->recursion == 0) { o->owner = 0; gil_notify(); }
+    RET(1);
+}
 HLE(k32_CreateSemaphoreA) { RET(make_sync(H_SEMAPHORE, ARG(1) > 0, 0, (long)(int32_t)ARG(1))); }
 HLE(k32_CreateSemaphoreW) { RET(make_sync(H_SEMAPHORE, ARG(1) > 0, 0, (long)(int32_t)ARG(1))); }
 HLE(k32_CreateSemaphoreExW) { RET(make_sync(H_SEMAPHORE, ARG(1) > 0, 0, (long)(int32_t)ARG(1))); }
@@ -992,51 +1144,110 @@ HLE(k32_ReleaseSemaphore) {
     if (ARG(2)) mem_wr(ARG(2), 4, (uint64_t)o->count);
     o->count += (long)(int32_t)ARG(1);
     o->signaled = o->count > 0;
+    gil_notify();
     RET(1);
 }
-static uint32_t wait_one(X86State *st, uint64_t h, uint32_t timeout) {
-    HObj *o = h_get(h);
-    if (h == (uint64_t)-1 || h == (uint64_t)-2) { return 0x102; }
-    if (!o) { set_last_error(st, ERROR_INVALID_HANDLE); return 0xFFFFFFFF; }
+
+// 1 if the object is signalled (does not consume it)
+static int obj_ready(HObj *o) {
     switch (o->type) {
-    case H_EVENT:
-        if (o->signaled) { if (!o->manual) o->signaled = 0; return 0; }
-        break;
-    case H_MUTEX:
-        o->signaled = 0;
-        return 0;
-    case H_SEMAPHORE:
-        if (o->count > 0) { o->count--; o->signaled = o->count > 0; return 0; }
-        break;
-    case H_CONIN:
-        if (con_has_input()) return 0;
-        break;
-    default:
-        return 0;
+    case H_EVENT: return o->signaled;
+    case H_MUTEX: return o->owner == 0 || o->owner == cur_tid();
+    case H_SEMAPHORE: return o->count > 0;
+    case H_THREAD: return o->ptr && ((SoulThread *)o->ptr)->finished;
+    case H_CONIN: return con_has_input();
+    default: return 1;
     }
-    if (timeout && timeout != 0xFFFFFFFF) { con_flush(); usleep((useconds_t)(timeout > 100 ? 100 : timeout) * 1000); }
-    if (timeout == 0xFFFFFFFF) {
-        if (o->type == H_CONIN) { char c; (void)c; while (!con_has_input() && !g_proc->terminate) usleep(20000); return 0; }
-        soul_fatal(st, "Program hiçbir zaman tetiklenmeyecek bir nesneyi bekliyor (tek iş parçacığı kilitlenmesi)");
-    }
-    return 0x102; // WAIT_TIMEOUT
 }
-HLE(k32_WaitForSingleObject) { RET(wait_one(st, ARG(0), (uint32_t)ARG(1))); }
-HLE(k32_WaitForSingleObjectEx) { RET(wait_one(st, ARG(0), (uint32_t)ARG(1))); }
+static void obj_consume(HObj *o) {
+    switch (o->type) {
+    case H_EVENT: if (!o->manual) o->signaled = 0; break;
+    case H_MUTEX: o->owner = cur_tid(); o->recursion++; break;
+    case H_SEMAPHORE: o->count--; o->signaled = o->count > 0; break;
+    default: break;
+    }
+}
+static int can_be_signalled_later(HObj *o) {
+    // with a single guest thread only console input (from the UI) can still arrive
+    return g_proc->threads != NULL || o->type == H_CONIN;
+}
+
+static uint32_t wait_objects(X86State *st, uint32_t n, const uint64_t *hs_, int all, uint32_t ms) {
+    HObj *objs[64];
+    if (n == 0 || n > 64) { set_last_error(st, ERROR_INVALID_PARAMETER); return 0xFFFFFFFF; }
+    int poll = 0, later = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (hs_[i] == (uint64_t)-1) { objs[i] = NULL; continue; } // the current process: never signalled while running
+        if (hs_[i] == (uint64_t)-2) { objs[i] = NULL; continue; }
+        objs[i] = h_get(hs_[i]);
+        if (!objs[i]) { set_last_error(st, ERROR_INVALID_HANDLE); return 0xFFFFFFFF; }
+        if (objs[i]->type == H_CONIN) poll = 1;
+        if (can_be_signalled_later(objs[i])) later = 1;
+    }
+    double dl = deadline_for(ms);
+    for (;;) {
+        if (all) {
+            int ok = 1;
+            for (uint32_t i = 0; i < n; i++) if (!objs[i] || !obj_ready(objs[i])) { ok = 0; break; }
+            if (ok) { for (uint32_t i = 0; i < n; i++) obj_consume(objs[i]); return 0; }
+        } else {
+            for (uint32_t i = 0; i < n; i++) if (objs[i] && obj_ready(objs[i])) { obj_consume(objs[i]); return i; }
+        }
+        if (g_proc->terminate) return 0xFFFFFFFF;
+        if (ms == 0) return 0x102;
+        if (ms == 0xFFFFFFFF && !later) deadlock(st, "nesne");
+        if (wait_until(dl, poll)) return 0x102; // WAIT_TIMEOUT
+    }
+}
+HLE(k32_WaitForSingleObject) { uint64_t h = ARG(0); RET(wait_objects(st, 1, &h, 0, (uint32_t)ARG(1))); }
+HLE(k32_WaitForSingleObjectEx) { uint64_t h = ARG(0); RET(wait_objects(st, 1, &h, 0, (uint32_t)ARG(1))); }
 HLE(k32_WaitForMultipleObjects) {
     uint32_t n = (uint32_t)ARG(0);
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t r = wait_one(st, mem_rd(ARG(1) + 8u * i, 8), 0);
-        if (r == 0 && !ARG(2)) { RET(i); return; }
+    uint64_t hs_[64];
+    for (uint32_t i = 0; i < n && i < 64; i++) hs_[i] = mem_rd(ARG(1) + 8u * i, 8);
+    RET(wait_objects(st, n, hs_, ARG(2) != 0, (uint32_t)ARG(3)));
+}
+HLE(k32_DuplicateHandle) {
+    uint64_t h = ARG(1);
+    if (h == (uint64_t)-2) { // GetCurrentThread(): make a real handle
+        HObj *o;
+        uint64_t nh = h_alloc(H_THREAD, &o);
+        o->ptr = soul_cur_thread();
+        h = nh;
     }
-    RET(ARG(2) ? 0 : 0x102);
+    if (ARG(3)) mem_wr(ARG(3), 8, h);
+    RET(1);
 }
-HLE(k32_DuplicateHandle) { if (ARG(3)) mem_wr(ARG(3), 8, ARG(1)); RET(1); }
-HLE(k32_CreateThread) {
-    soul_log("[api] Program yeni bir iş parçacığı (CreateThread) oluşturmak istedi; çoklu iş parçacığı henüz desteklenmiyor\n");
-    FAIL(ERROR_NOT_SUPPORTED);
+
+// threads
+uint64_t k32_create_thread(X86State *st, uint64_t stack, uint64_t fn, uint64_t arg, uint32_t flags, uint64_t tid_out) {
+    SoulThread *t = soul_thread_create(st, fn, arg, (size_t)stack, (flags & 4) != 0);
+    if (!t) { set_last_error(st, ERROR_NOT_ENOUGH_MEMORY); return 0; }
+    HObj *o;
+    uint64_t h = h_alloc(H_THREAD, &o);
+    o->ptr = t;
+    if (tid_out) mem_wr(tid_out, 4, t->tid);
+    if (g_proc->verbose) soul_log("[iş parçacığı] #%u oluşturuldu (başlangıç 0x%llx)\n", t->tid, (unsigned long long)fn);
+    return h;
 }
-HLE(k32_ExitThread) { int code = (int)ARG(0); crt_run_atexit(st); soul_exit_process(st, code); }
+HLE(k32_CreateThread) { RET(k32_create_thread(st, ARG(1), ARG(2), ARG(3), (uint32_t)hle_arg(st, 4), hle_arg(st, 5))); }
+HLE(k32_CreateRemoteThread) { RET(k32_create_thread(st, ARG(2), ARG(3), hle_arg(st, 4), (uint32_t)hle_arg(st, 5), hle_arg(st, 6))); }
+HLE(k32_ResumeThread) {
+    HObj *o = h_get(ARG(0));
+    if (!o || o->type != H_THREAD || !o->ptr) FAIL(ERROR_INVALID_HANDLE);
+    SoulThread *t = o->ptr;
+    uint32_t prev = t->suspended ? 1 : 0;
+    soul_thread_resume(t);
+    RET(prev);
+}
+HLE_STUB_RET(k32_SuspendThread, 0)
+HLE(k32_TerminateThread) { FAIL(ERROR_NOT_SUPPORTED); }
+HLE(k32_ExitThread) {
+    int code = (int)ARG(0);
+    SoulThread *t = soul_cur_thread();
+    if (!t || t->is_main) { crt_run_atexit(st); soul_exit_process(st, code); }
+    soul_exit_thread(st, (uint32_t)code);
+}
 
 // TLS: TEB+0x1480 holds 64 slots
 HLE(k32_TlsAlloc) {
@@ -1051,8 +1262,8 @@ HLE(k32_TlsGetValue) { uint64_t i = (uint32_t)ARG(0); set_last_error(st, 0); RET
 HLE(k32_TlsSetValue) { uint64_t i = (uint32_t)ARG(0); if (i >= 64) FAIL(ERROR_INVALID_PARAMETER); mem_wr(st->gs_base + 0x1480 + i * 8, 8, ARG(1)); RET(1); }
 HLE(k32_FlsAlloc) { HleState *h = hs(); if (h->fls_next >= 128) { RET(0xFFFFFFFF); return; } RET(h->fls_next++); }
 HLE_STUB_RET(k32_FlsFree, 1)
-HLE(k32_FlsGetValue) { uint64_t i = (uint32_t)ARG(0); RET(i < 128 ? hs()->fls_values[i] : 0); }
-HLE(k32_FlsSetValue) { uint64_t i = (uint32_t)ARG(0); if (i >= 128) FAIL(ERROR_INVALID_PARAMETER); hs()->fls_values[i] = ARG(1); RET(1); }
+HLE(k32_FlsGetValue) { uint64_t i = (uint32_t)ARG(0); RET(i < 128 ? st->thread->fls[i] : 0); }
+HLE(k32_FlsSetValue) { uint64_t i = (uint32_t)ARG(0); if (i >= 128) FAIL(ERROR_INVALID_PARAMETER); st->thread->fls[i] = ARG(1); RET(1); }
 
 // Interlocked singly linked lists
 HLE(k32_InitializeSListHead) { memset(PTR(0), 0, 16); RET(0); }
@@ -1533,12 +1744,15 @@ const HleEntry hle_kernel32_table[] = {
     { "InitializeCriticalSectionEx", k32_InitializeCriticalSectionEx, NULL }, { "EnterCriticalSection", k32_EnterCriticalSection, NULL },
     { "LeaveCriticalSection", k32_LeaveCriticalSection, NULL }, { "TryEnterCriticalSection", k32_TryEnterCriticalSection, NULL },
     { "DeleteCriticalSection", k32_DeleteCriticalSection, NULL }, { "InitializeSRWLock", k32_InitializeSRWLock, NULL },
-    { "AcquireSRWLockExclusive", k32_AcquireSRWLock, NULL }, { "AcquireSRWLockShared", k32_AcquireSRWLock, NULL },
-    { "ReleaseSRWLockExclusive", k32_AcquireSRWLock, NULL }, { "ReleaseSRWLockShared", k32_AcquireSRWLock, NULL },
-    { "TryAcquireSRWLockExclusive", k32_TryAcquireSRWLock, NULL }, { "TryAcquireSRWLockShared", k32_TryAcquireSRWLock, NULL },
+    { "AcquireSRWLockExclusive", k32_AcquireSRWLockExclusive, NULL }, { "AcquireSRWLockShared", k32_AcquireSRWLockShared, NULL },
+    { "ReleaseSRWLockExclusive", k32_ReleaseSRWLockExclusive, NULL }, { "ReleaseSRWLockShared", k32_ReleaseSRWLockShared, NULL },
+    { "TryAcquireSRWLockExclusive", k32_TryAcquireSRWLockExclusive, NULL }, { "TryAcquireSRWLockShared", k32_TryAcquireSRWLockShared, NULL },
+    { "WaitOnAddress", k32_WaitOnAddress, NULL }, { "WakeByAddressSingle", k32_WakeByAddress, NULL }, { "WakeByAddressAll", k32_WakeByAddress, NULL },
+    { "ResumeThread", k32_ResumeThread, NULL }, { "SuspendThread", k32_SuspendThread, NULL }, { "TerminateThread", k32_TerminateThread, NULL },
+    { "CreateRemoteThread", k32_CreateRemoteThread, NULL },
     { "InitializeConditionVariable", k32_InitializeConditionVariable, NULL }, { "WakeConditionVariable", k32_WakeConditionVariable, NULL },
-    { "WakeAllConditionVariable", k32_WakeConditionVariable, NULL }, { "SleepConditionVariableCS", k32_SleepConditionVariable, NULL },
-    { "SleepConditionVariableSRW", k32_SleepConditionVariable, NULL }, { "InitOnceExecuteOnce", k32_InitOnceExecuteOnce, NULL },
+    { "WakeAllConditionVariable", k32_WakeConditionVariable, NULL }, { "SleepConditionVariableCS", k32_SleepConditionVariableCS, NULL },
+    { "SleepConditionVariableSRW", k32_SleepConditionVariableSRW, NULL }, { "InitOnceExecuteOnce", k32_InitOnceExecuteOnce, NULL },
     { "InitOnceBeginInitialize", k32_InitOnceBeginInitialize, NULL }, { "InitOnceComplete", k32_InitOnceComplete, NULL },
     { "CreateEventA", k32_CreateEventA, NULL }, { "CreateEventW", k32_CreateEventW, NULL }, { "CreateEventExW", k32_CreateEventExW, NULL },
     { "SetEvent", k32_SetEvent, NULL }, { "ResetEvent", k32_ResetEvent, NULL }, { "CreateMutexA", k32_CreateMutexA, NULL }, { "CreateMutexW", k32_CreateMutexW, NULL },

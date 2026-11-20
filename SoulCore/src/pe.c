@@ -297,16 +297,26 @@ PEModule *pe_load_dependency(SoulProcess *p, const char *dll, char *err, size_t 
     return pe_load(p, found, winp, err, errlen);
 }
 
-// Run TLS callbacks and DllMain for DLLs (dependencies first), then TLS for the exe.
+// Static TLS: every module with a TLS directory gets an index; each guest thread
+// gets its own copy of the module's TLS template in TEB->ThreadLocalStoragePointer.
+static uint8_t *tls_block(const TlsTemplate *t) {
+    uint8_t *blk = calloc(1, t->raw + t->zero + 16);
+    if (t->raw) memcpy(blk, (void *)(uintptr_t)t->start, t->raw);
+    return blk;
+}
+
 static void init_tls(SoulProcess *p, X86State *st, PEModule *m, int index) {
-    if (!m->tls_rva) return;
+    if (!m->tls_rva || p->tls_count >= SOUL_MAX_TLS_MODULES) return;
     TlsDir64 *td = (TlsDir64 *)(uintptr_t)(m->base + m->tls_rva);
-    size_t raw = (size_t)(td->EndAddressOfRawData - td->StartAddressOfRawData);
-    size_t total = raw + td->SizeOfZeroFill;
-    uint8_t *blk = calloc(1, total + 16);
-    if (raw) memcpy(blk, (void *)(uintptr_t)td->StartAddressOfRawData, raw);
-    uint64_t *slots = (uint64_t *)(uintptr_t)mem_rd(p->main_thread.teb + 0x58, 8);
-    slots[index] = (uint64_t)(uintptr_t)blk;
+    TlsTemplate *t = &p->tls[p->tls_count++];
+    t->start = td->StartAddressOfRawData;
+    t->raw = (size_t)(td->EndAddressOfRawData - td->StartAddressOfRawData);
+    t->zero = td->SizeOfZeroFill;
+    t->index = index;
+    t->callbacks = td->AddressOfCallBacks;
+    t->module_base = m->base;
+    uint64_t *slots = (uint64_t *)(uintptr_t)mem_rd(st->gs_base + 0x58, 8);
+    slots[index] = (uint64_t)(uintptr_t)tls_block(t);
     if (td->AddressOfIndex) mem_wr(td->AddressOfIndex, 4, (uint64_t)index);
     if (td->AddressOfCallBacks) {
         for (uint64_t *cb = (uint64_t *)(uintptr_t)td->AddressOfCallBacks; *cb; cb++) {
@@ -316,17 +326,37 @@ static void init_tls(SoulProcess *p, X86State *st, PEModule *m, int index) {
     }
 }
 
+void pe_init_thread_tls(SoulProcess *p, X86State *st, uint64_t teb, int attach) {
+    uint64_t *slots = (uint64_t *)(uintptr_t)mem_rd(teb + 0x58, 8);
+    for (int i = 0; i < p->tls_count; i++) slots[p->tls[i].index] = (uint64_t)(uintptr_t)tls_block(&p->tls[i]);
+    if (!attach) return;
+    for (int i = 0; i < p->tls_count; i++) {
+        if (!p->tls[i].callbacks) continue;
+        for (uint64_t *cb = (uint64_t *)(uintptr_t)p->tls[i].callbacks; *cb; cb++) {
+            uint64_t args[3] = { p->tls[i].module_base, 2 /* DLL_THREAD_ATTACH */, 0 };
+            soul_guest_call(st, *cb, 3, args);
+        }
+    }
+    for (PEModule *m = p->modules; m; m = m->next) {
+        if (m->is_dll && m->entry && m->initialized) {
+            uint64_t args[3] = { m->base, 2, 0 };
+            soul_guest_call(st, m->entry, 3, args);
+        }
+    }
+}
+
+// Run TLS callbacks and DllMain for DLLs (dependencies first), then TLS for the exe.
 int pe_run_initializers(SoulProcess *p, X86State *st) {
-    // modules list is in reverse load order: walk to collect them in load order reversed (deps last loaded)
     PEModule *list[256];
     int n = 0;
     for (PEModule *m = p->modules; m && n < 256; m = m->next) list[n++] = m;
-    int tls_index = 1;
     for (int i = 0; i < n; i++) { // deepest dependencies were inserted last => at head
         PEModule *m = list[i];
         if (m == p->main_module || m->initialized) continue;
         m->initialized = 1;
-        init_tls(p, st, m, tls_index++);
+        int index = 1;
+        for (int k = 0; k < p->tls_count; k++) if (p->tls[k].index >= index) index = p->tls[k].index + 1;
+        init_tls(p, st, m, index);
         if (m->is_dll && m->entry) {
             if (p->verbose) soul_log("[yükleyici] DllMain: %s\n", m->name);
             uint64_t args[3] = { m->base, 1, 0 };

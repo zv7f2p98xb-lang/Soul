@@ -1,9 +1,50 @@
 [
-  { "file": "Merhaba.exe", "name": "Merhaba", "description": "Renkli konsol çıktısı ve Windows sistem bilgisi.", "args": "" },
-  { "file": "HesapMakinesi.exe", "name": "Hesap Makinesi", "description": "Klavyeden girdi okuyan etkileşimli hesap makinesi.", "args": "" },
-  { "file": "SayiTahmin.exe", "name": "Sayı Tahmin", "description": "Küçük bir oyun; sonunda Windows MessageBox gösterir.", "args": "" },
-  { "file": "Mandelbrot.exe", "name": "Mandelbrot", "description": "Kayan nokta yoğun renkli fraktal çizimi.", "args": "" },
-  { "file": "Benchmark.exe", "name": "JIT Benchmark", "description": "JIT hızını ölçen tamsayı, bellek ve kayan nokta testleri.", "args": "" },
-  { "file": "SistemBilgisi.exe", "name": "Sistem Bilgisi", "description": "CPUID, Windows sürümü, klasörler ve bellek bilgisi.", "args": "--ornek arguman" },
-  { "file": "CppDemo.exe", "name": "C++ Demo", "description": "STL, sanal işlevler ve lambdalar kullanan C++ programı.", "args": "" }
+  {
+    "file": "Merhaba.exe",
+    "name": "Merhaba",
+    "description": "Renkli konsol çıktısı ve Windows sistem bilgisi.",
+    "args": ""
+  },
+  {
+    "file": "HesapMakinesi.exe",
+    "name": "Hesap Makinesi",
+    "description": "Klavyeden girdi okuyan etkileşimli hesap makinesi.",
+    "args": ""
+  },
+  {
+    "file": "SayiTahmin.exe",
+    "name": "Sayı Tahmin",
+    "description": "Küçük bir oyun; sonunda Windows MessageBox gösterir.",
+    "args": ""
+  },
+  {
+    "file": "Mandelbrot.exe",
+    "name": "Mandelbrot",
+    "description": "Kayan nokta yoğun renkli fraktal çizimi.",
+    "args": ""
+  },
+  {
+    "file": "Benchmark.exe",
+    "name": "JIT Benchmark",
+    "description": "JIT hızını ölçen tamsayı, bellek ve kayan nokta testleri.",
+    "args": ""
+  },
+  {
+    "file": "SistemBilgisi.exe",
+    "name": "Sistem Bilgisi",
+    "description": "CPUID, Windows sürümü, klasörler ve bellek bilgisi.",
+    "args": "--ornek arguman"
+  },
+  {
+    "file": "IsParcaciklari.exe",
+    "name": "İş Parçacıkları",
+    "description": "CreateThread, kritik bölge ve olaylarla çoklu iş parçacığı.",
+    "args": ""
+  },
+  {
+    "file": "CppDemo.exe",
+    "name": "C++ Demo",
+    "description": "STL, sanal işlevler ve lambdalar kullanan C++ programı.",
+    "args": ""
+  }
 ]

@@ -1,0 +1,8 @@
+counter=80000 wait=0 exitcodes=60 distinct_ids=1
+tls main=100 threads=100,101,102,103
+spin finished=1
+producer/consumer sum=125250
+before release passed=0
+after release passed=3
+suspended wait=258
+resumed wait=0

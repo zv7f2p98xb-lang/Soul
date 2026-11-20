@@ -12,6 +12,7 @@ $CC -O2 -s -o "$OUT/SayiTahmin.exe" tahmin.c
 $CC -O2 -s -o "$OUT/Mandelbrot.exe" mandelbrot.c
 $CC -O2 -s -o "$OUT/Benchmark.exe" benchmark.c
 $CC -O2 -s -o "$OUT/SistemBilgisi.exe" sistem.c
+$CC -O2 -s -o "$OUT/IsParcaciklari.exe" isparcaciklari.c
 $CXX -O2 -s -static -o "$OUT/CppDemo.exe" cppdemo.cpp
 cp samples.json "$OUT/samples.json"
 ls -la "$OUT"
