@@ -56,6 +56,12 @@ final class AppSettings: ObservableObject {
             "consoleFontSize": 14.0,
             "forceDarkMode": false,
         ])
+        // Older builds switched permanently to the legacy method after a crash during
+        // JIT setup; on TXM iPads that yields a JIT that faults. Reset once.
+        if !defaults.bool(forKey: "settingsMigratedV2") {
+            defaults.set(JITMethod.automatic.rawValue, forKey: "jitMethod")
+            defaults.set(true, forKey: "settingsMigratedV2")
+        }
         jitMethod = JITMethod(rawValue: defaults.integer(forKey: "jitMethod")) ?? .automatic
         useJIT = defaults.bool(forKey: "useJIT")
         jitMemoryMB = defaults.integer(forKey: "jitMemoryMB")

@@ -318,6 +318,14 @@ final class SessionManager: ObservableObject {
             "sayitahmin.exe": (1...100).map(String.init).joined(separator: "\n") + "\n",
         ]
         Task { @MainActor in
+            // give the JIT setup (started by JITManager.bootstrap) a chance to finish first
+            let jitDeadline = Date().addingTimeInterval(15)
+            while Date() < jitDeadline {
+                let jit = JITManager.shared
+                jit.refresh()
+                if jit.isAvailable || (!jit.isPreparing && !jit.isDebugged) { break }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
             let dir = SoulPaths.root.appendingPathComponent("autorun", isDirectory: true)
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

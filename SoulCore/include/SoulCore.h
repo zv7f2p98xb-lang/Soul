@@ -68,6 +68,8 @@ int soul_jit_is_debugged(void);      // 1 if a debugger has set CS_DEBUGGED
 int soul_jit_init(SoulJitMode mode, size_t size, char *msg, size_t msglen);
 int soul_jit_available(void);        // 1 if executable memory is ready
 const char *soul_jit_method(void);   // human readable description
+const char *soul_jit_log(void);      // step by step log of the JIT setup (for diagnostics)
+uint32_t soul_jit_cs_flags(void);    // raw csops(CS_OPS_STATUS) flags (iOS)
 int soul_host_is_arm64(void);
 
 // ---- PE inspection -------------------------------------------------------

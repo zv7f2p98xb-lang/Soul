@@ -37,7 +37,7 @@ Soul, Windows için derlenmiş **64-bit (x64) programları** Apple Silicon (M se
 - **Callout:** JIT'in doğal olarak çeviremediği her kontrol-akışı-dışı komut (x87, nadir SSE…) blok terk edilmeden yorumlayıcıya devredilir. Paketlenmiş SSE2 aritmetiği NEON'a, DIV/IDIV `sdiv/udiv/msub`'a çevrilir.
 - **Blok zincirleme:** Blok çıkışları hızlı arama tablosunu satır içinde yoklayıp doğrudan sonraki çevrilmiş bloğa atlar; C dağıtıcısına dönülmez.
 - **İş parçacıkları:** Her misafir iş parçacığı kendi x86 durumu, TEB'i, yığını ve TLS kopyasıyla ayrı bir ana iş parçacığında çalışır. Misafir kodu küresel bir kilit (GIL) altında yürür; bir zamanlayıcı her ~4 ms'de zaman dilimi verir, engelleyici API'ler (Sleep, Wait*, kritik bölge, SRW, koşul değişkeni, konsol girdisi, MessageBox) kilidi bırakır.
-- **iOS JIT:** iPadOS 17–18'de hata ayıklayıcı `CS_DEBUGGED` koyduktan sonra RW/RX ayna eşleme kullanılır. **iPadOS 26 + M3 (TXM)** cihazlarda Soul, StikDebug'ın `universal.js` betiğinin anladığı `brk #0xf00d` / `x16 = 1` (JIT26PrepareRegion) çağrısıyla RX bölge ister, `vm_remap` ile RW aynasını oluşturur ve `x16 = 0` ile hata ayıklayıcıyı bırakır. Betik yoksa SIGTRAP yakalanır, uygulama çökmez.
+- **iOS JIT:** StikDebug, Soul başladıktan *sonra* bağlandığı için Soul `CS_DEBUGGED` bayrağını sürekli yoklar ve bayrak görünür görünmez JIT belleğini arka planda hazırlar. **iPadOS 26+ (TXM)** cihazlarda StikDebug'ın `universal.js` betiğinin anladığı `brk #0xf00d` / `x16 = 1` (JIT26PrepareRegion) çağrısıyla RX bölge istenir ve `vm_remap` + `vm_protect` ile RW aynası oluşturulur; çalıştırma izni ayıklayıcıya bağlı olabileceğinden ayıklayıcı ayrılmaz. Olmazsa klasik yönteme (RW/RX ayna) geçilir. Her iki yolda da bellek, küçük bir deneme fonksiyonu yazılıp çalıştırılarak doğrulanır; kurulumdaki tüm hatalar yakalanır, böylece bozuk bir JIT asla kullanılmaz ve uygulama çökmez. Adımlar *JIT Durumu → JIT günlüğü* bölümünde görünür.
 
 ## iPad Air M3'e kurulum
 
@@ -45,7 +45,7 @@ Soul, Windows için derlenmiş **64-bit (x64) programları** Apple Silicon (M se
 2. **Yan yükleyin:** SideStore, AltStore veya Sideloadly ile kendi Apple kimliğinizle imzalayıp yükleyin (geliştirici imzası `get-task-allow` ekler — JIT için şart).
 3. **StikDebug'ı kurun:** eşleştirme (pairing) dosyasını içe aktarın, LocalDevVPN'i açın.
 4. **iPadOS 26 (TXM):** StikDebug ayarlarında *Always Run Scripts* ve *Picture in Picture*'ı açın, *Scripts* bölümünde **Soul için `universal.js`** atayın.
-5. **StikDebug → Enable JIT → Soul.** Soul'da *JIT Durumu* ekranı "JIT etkin" göstermelidir. JIT olmadan da çalışır ama yorumlayıcı modunda (yavaş).
+5. Soul'da **JIT Durumu → "StikDebug ile JIT'i etkinleştir"** düğmesine basın (StikDebug'ı Soul + `universal.js` ile açar) ya da StikDebug'da **Enable JIT → Soul** seçin, sonra Soul'a geri dönün. Birkaç saniye içinde "JIT etkin" görünmelidir; görünmezse *Tanılama bilgisini kopyala* ile günlüğü paylaşın. JIT olmadan da çalışır ama yorumlayıcı modunda (yavaş).
 
 ## Kullanım
 

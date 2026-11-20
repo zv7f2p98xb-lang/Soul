@@ -20,7 +20,7 @@ double soul_now(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-const char *soul_version(void) { return "SoulCore 0.3.0"; }
+const char *soul_version(void) { return "SoulCore 0.3.1"; }
 
 int soul_host_is_arm64(void) {
 #if defined(__aarch64__) || defined(__arm64__)

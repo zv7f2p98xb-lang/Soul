@@ -8,10 +8,11 @@ struct SoulApp: App {
     @StateObject private var jit = JITManager.shared
     @StateObject private var library = ProgramLibrary.shared
     @StateObject private var sessions = SessionManager.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        // JIT memory must be prepared as early as possible: on iPadOS 26 StikDebug's
-        // script is waiting for our "prepare region" request right after launch.
+        // Start watching for the debugger: StikDebug attaches after launch and its
+        // iPadOS 26 script then waits for our "prepare region" request.
         JITManager.shared.bootstrap()
     }
 
@@ -26,6 +27,10 @@ struct SoulApp: App {
                     library.importItems([url])
                 }
                 .preferredColorScheme(settings.forceDarkMode ? .dark : nil)
+        }
+        .onChange(of: scenePhase) {
+            // coming back from StikDebug: the debugger may have attached meanwhile
+            if scenePhase == .active { jit.checkNow() }
         }
     }
 }

@@ -22,7 +22,7 @@ struct LibraryView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if !jit.isAvailable { JITBanner() }
+                if !jit.isAvailable && !jit.isPreparing { JITBanner() }
                 if library.programs.filter({ !$0.isSample }).isEmpty && search.isEmpty { EmptyLibraryCard { showImporter = true } }
                 if !userPrograms.isEmpty { section(title: "Programlarım", items: userPrograms) }
                 if !samples.isEmpty { section(title: "Örnek Programlar", items: samples) }
@@ -175,7 +175,7 @@ struct JITBanner: View {
                     .font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer()
-            Button("StikDebug'ı Aç") { jit.openStikDebug() }.buttonStyle(.borderedProminent).tint(.orange)
+            Button("JIT'i Etkinleştir") { jit.openStikDebug() }.buttonStyle(.borderedProminent).tint(.orange)
         }
         .padding()
         .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 16))
