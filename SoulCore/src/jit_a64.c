@@ -612,6 +612,17 @@ static int translate(J *j, const Slot *s) {
             }
             return 0;
         }
+        case 0xD3: { // SHL/SHR/SAR r/m, CL (only when the resulting flags are dead)
+            int sub = in->reg & 7, size = osz;
+            if (need || size < 4 || (sub != 4 && sub != 5 && sub != 6 && sub != 7)) return -1;
+            if (in->mod != 3) emit_ea(j, in, 1);
+            load_rm(j, in, T0, size);
+            load_reg(j, in, T1, RCX, 8);   // LSLV/LSRV/ASRV mask the count like x86 does
+            int sf = size == 8;
+            em(e, a_shiftv(sf, sub == 5 ? 1 : sub == 7 ? 2 : 0, T2, T0, T1));
+            store_rm(j, in, T2, size);
+            return 0;
+        }
         case 0xC3:
             em(e, a_ldr_imm(3, T4, R_ST, gpr_off(RSP)));
             em(e, a_ldr_imm(3, T2, T4, 0));
