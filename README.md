@@ -2,7 +2,7 @@
 
 Soul, Windows için derlenmiş **64-bit (x64) programları** Apple Silicon (M serisi) iPad'lerde — örneğin **iPad Air M3** — çalıştıran bir iPadOS uygulamasıdır. Programın x86-64 makine kodu çalışma anında **ARM64 koduna çevrilir (JIT)** ve doğrudan M çipinde çalışır; Windows API çağrıları ise iOS üzerinde yeniden yazılmış bir uyumluluk katmanı tarafından karşılanır.
 
-> Durum: **konsol programları çalışıyor** (C, C++, MinGW/MSVC derlemeleri; dosya, klavye, renkli konsol, MessageBox, **çoklu iş parçacığı**). Pencereli (GUI) programlar, DirectX oyunları ve 32-bit programlar **henüz yok** — ayrıntılar aşağıda.
+> Durum: **konsol ve pencereli (GUI) programlar çalışıyor** — C/C++ (MinGW, MSVC/UCRT) programları; dosya, klavye, renkli konsol, çoklu iş parçacığı, **Win32 pencereleri, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler ve diyaloglar**. DirectX/OpenGL oyunları ve 32-bit programlar **henüz yok** — ayrıntılar aşağıda.
 >
 > Ölçüm (CI'da Apple Silicon üzerinde iOS simülatörü, JIT açık): JIT Benchmark örneği **329 milyon x86 komutunu 0,18 sn'de** çalıştırdı (~1,8 milyar komut/sn), yorumlayıcıya göre ~20 kat hızlı.
 
@@ -15,8 +15,10 @@ Soul, Windows için derlenmiş **64-bit (x64) programları** Apple Silicon (M se
 ┌──────────────────────────┐   ┌───────────────────────────────────────────┐
 │ PE yükleyici (pe.c)      │──▶│ Win32 / CRT katmanı (hle_*.c)              │
 │ relocation, import, TLS, │   │ kernel32, msvcrt, UCRT (api-ms-win-crt-*), │
-│ DllMain, x64 DLL'ler     │   │ vcruntime, user32, advapi32, shell32, ...  │
-└──────────────────────────┘   └───────────────────────────────────────────┘
+│ DllMain, kaynaklar,      │   │ vcruntime, advapi32, shell32, ...          │
+│ x64 DLL'ler              │   │ user32.c / controls.c / gdi.c: pencereler, │
+└──────────────────────────┘   │ mesajlar, denetimler, diyaloglar, GDI      │
+                               └───────────────────────────────────────────┘
    │                                      ▲  int3 "SC" köprüsü (thunk)
    ▼                                      │
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -29,7 +31,7 @@ Soul, Windows için derlenmiş **64-bit (x64) programları** Apple Silicon (M se
 └──────────────────────────────────────────────────────────────────────────┘
    │
    ▼
- SwiftUI iPad uygulaması (App/): kitaplık, kurulum, konsol, JIT durumu
+ SwiftUI iPad uygulaması (App/): kitaplık, kurulum, konsol, pencere masaüstü, JIT durumu
 ```
 
 - **Kimlik eşlemeli bellek:** Misafir adresleri doğrudan ana süreç adresleridir (Box64/FEX'teki gibi), bu yüzden bellek erişimleri JIT kodunda tek bir ARM64 `ldr/str` olur.
@@ -37,6 +39,7 @@ Soul, Windows için derlenmiş **64-bit (x64) programları** Apple Silicon (M se
 - **Callout:** JIT'in doğal olarak çeviremediği her kontrol-akışı-dışı komut (x87, nadir SSE…) blok terk edilmeden yorumlayıcıya devredilir. Paketlenmiş SSE2 aritmetiği NEON'a, DIV/IDIV `sdiv/udiv/msub`'a çevrilir.
 - **Blok zincirleme:** Blok çıkışları hızlı arama tablosunu satır içinde yoklayıp doğrudan sonraki çevrilmiş bloğa atlar; C dağıtıcısına dönülmez.
 - **İş parçacıkları:** Her misafir iş parçacığı kendi x86 durumu, TEB'i, yığını ve TLS kopyasıyla ayrı bir ana iş parçacığında çalışır. Misafir kodu küresel bir kilit (GIL) altında yürür; bir zamanlayıcı her ~4 ms'de zaman dilimi verir, engelleyici API'ler (Sleep, Wait*, kritik bölge, SRW, koşul değişkeni, konsol girdisi, MessageBox) kilidi bırakır.
+- **Pencereler (GUI):** Her üst düzey pencerenin istemci alanı için 32-bit bir çerçeve arabelleği tutulur; alt pencereler (denetimler) üst pencerenin arabelleğine kendi konumlarında çizilir. Pencere başlığı, kapatma düğmesi ve menü çubuğu iPad tarafında (SwiftUI) çizilir; programın menüleri yerel iPad menüleri olarak açılır. Mesaj kuyruğu, `WM_PAINT`/geçersiz bölge mantığı, zamanlayıcılar, odak/etkinleştirme, `DefWindowProc`, alt sınıflama (`SetWindowLongPtr`), ANSI(UTF-8)/Unicode dönüşümleri ve modal diyalog döngüleri Win32'deki gibi çalışır. GDI; kalem/fırça, şekiller, DIB bölümleri, `BitBlt/StretchBlt/AlphaBlend`, bölge kırpma ve gömülü DejaVu yazı tipleriyle kenar yumuşatmalı metin çizer. Hazır denetimler: Button (düğme, onay kutusu, radyo, grup), Static, Edit (tek/çok satır, seçim, pano), ListBox, ComboBox, ilerleme çubuğu; kaynaklardan diyalog, menü, dizge, bit eşlem ve kısayol tabloları yüklenir.
 - **iOS JIT:** StikDebug, Soul başladıktan *sonra* bağlandığı için Soul `CS_DEBUGGED` bayrağını sürekli yoklar ve bayrak görünür görünmez JIT belleğini arka planda hazırlar. **iPadOS 26+ (TXM)** cihazlarda StikDebug'ın `universal.js` betiğinin anladığı `brk #0xf00d` / `x16 = 1` (JIT26PrepareRegion) çağrısıyla RX bölge istenir ve `vm_remap` + `vm_protect` ile RW aynası oluşturulur; çalıştırma izni ayıklayıcıya bağlı olabileceğinden ayıklayıcı ayrılmaz. Olmazsa klasik yönteme (RW/RX ayna) geçilir. Her iki yolda da bellek, küçük bir deneme fonksiyonu yazılıp çalıştırılarak doğrulanır; kurulumdaki tüm hatalar yakalanır, böylece bozuk bir JIT asla kullanılmaz ve uygulama çökmez. Adımlar *JIT Durumu → JIT günlüğü* bölümünde görünür.
 
 ## iPad Air M3'e kurulum
@@ -51,21 +54,23 @@ Soul, Windows için derlenmiş **64-bit (x64) programları** Apple Silicon (M se
 
 - **Program ekle (+):** bir `.exe` ya da program klasörü (DLL'leri/verileriyle) seçin, Dosyalar'dan sürükleyip bırakın ya da Dosyalar'da `.exe`'ye "Soul ile aç" deyin. Program `C:\Program Files\<Ad>\` altına kurulur.
 - **C: sürücüsü:** Dosyalar › iPad'imde › Soul › Soul › `drive_c`. Programların yazdığı dosyalar buradadır; buraya kopyaladığınız programları *C: sürücüsünü tara* ile kitaplığa ekleyebilirsiniz.
+- **Pencereli programlar:** program pencereleri bir masaüstünde gösterilir ve ekrana sığacak şekilde ölçeklenir. Dokunma sol tıktır (sürükleme = basılı tutup çekme), **uzun basış sağ tıktır**, iki parmakla kaydırma fare tekerleğidir; araç çubuğundaki *Sağ tık* modu tüm dokunuşları sağ tıka çevirir. iPad'e bağlı fare/izleme dörtgeni ve donanım klavyesi doğrudan çalışır (⌘ kısayolları Ctrl olarak gönderilir). Metin kutusuna dokununca ekran klavyesi açılır; *Klavye* düğmesiyle istendiğinde de açılabilir. Yeniden boyutlandırılabilir pencerelerde ⤢ düğmesi pencereyi ekran boyutuna getirir. Programın `printf` çıktısı *Konsol çıktısı* sayfasındadır.
 - **Konsol:** çıktı renkli gösterilir, alt satırdan programa klavye girdisi gönderilir; *Ctrl+Z* girdi sonudur. Üst çubukta çalışma süresi, MIPS, JIT oranı ve API çağrısı sayısı görünür.
-- **Örnekler:** Merhaba, Hesap Makinesi, Sayı Tahmin, Mandelbrot, JIT Benchmark, Sistem Bilgisi, İş Parçacıkları, C++ Demo.
+- **Örnekler:** pencereli — Çizim, Saat, Hesap Makinesi (GUI), Not Defteri, Yılan, Mayın Tarlası; konsol — Merhaba, Hesap Makinesi, Sayı Tahmin, Mandelbrot, JIT Benchmark, Sistem Bilgisi, İş Parçacıkları, C++ Demo.
 
 ## Uyumluluk
 
 | Çalışır | Henüz çalışmaz |
 |---|---|
-| 64-bit konsol programları (MinGW, MSVC/UCRT) | GUI pencereleri (GDI/USER), DirectX/OpenGL oyunları |
+| 64-bit konsol programları (MinGW, MSVC/UCRT) | DirectX / OpenGL / Vulkan oyunları (3B grafik) |
+| Pencereli programlar: user32 pencereleri, GDI, denetimler, menüler, diyaloglar | Ortak denetimlerin çoğu (ağaç/liste görünümü, sekmeler), Dosya Aç/Kaydet diyalogları |
 | Dosya/klasör API'leri, ortam değişkenleri, zaman | 32-bit (x86) ve .NET programları, `.msi` kurulumları |
 | printf/scanf ailesi, C++ STL (statik libstdc++) | Alt süreç başlatma (`CreateProcess`, `system`) |
 | setjmp/longjmp, TLS, programla gelen x64 DLL'ler | C++ istisnaları (`throw`), SEH, AVX |
 | MessageBox, renkli konsol (SetConsoleTextAttribute) | Ağ (Winsock), kayıt defteri yazma, ses |
 | CreateThread, kritik bölge, SRW, koşul değişkeni, olay/mutex/semafor | Gerçek paralel çalışma (iş parçacıkları sırayla çalışır) |
 
-Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 → Metal) yığınını kullanır; Soul aynı temel fikri (JIT + API taklidi) sıfırdan, küçük bir çekirdekle uygular. Yol haritası: GDI pencereleri (SwiftUI/Metal yüzeyine çizim) → dokunmatik/klavye girdisi → Direct3D → Metal.
+Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 → Metal) yığınını kullanır; Soul aynı temel fikri (JIT + API taklidi) sıfırdan, küçük bir çekirdekle uygular. Yol haritası: Direct3D → Metal, ses (waveOut/XAudio2), ortak denetimler ve dosya diyalogları.
 
 ## Geliştirme
 
@@ -78,6 +83,10 @@ SoulCore/tests/run_tests.sh                 # yerel derlemeyle karşılaştırma
 make -C SoulCore arm64
 SoulCore/tests/run_tests.sh qemu-aarch64 build/arm64/soulrun
 SoulCore/tests/win32/run_win32_tests.sh     # Win32 API, C++ ve iş parçacığı testleri
+SoulCore/tests/gui/run_gui_tests.sh         # pencere/denetim/diyalog testi (betikle tıklama, yazma, menü)
+
+# Pencereli bir programı betikle sürmek ve ekran görüntüsü almak
+SoulCore/build/native/soulrun --gui-script betik.txt program.exe   # komutlar: waitwin, click, drag, key, text, menu, dump, pixel ...
 
 # Bir .exe'yi komut satırından çalıştırmak
 SoulCore/build/native/soulrun --stats program.exe arg1 arg2   # --no-jit, -v, -vv, --profile

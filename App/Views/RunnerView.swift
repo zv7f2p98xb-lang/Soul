@@ -6,14 +6,28 @@ struct RunnerView: View {
 
     var body: some View {
         if let session = sessions.current {
-            ConsoleScreen(session: session)
+            SessionScreen(session: session, gui: session.gui)
         } else {
             ContentUnavailableView {
-                Label("Çalışan program yok", systemImage: "terminal")
+                Label("Çalışan program yok", systemImage: "macwindow")
             } description: {
-                Text("Kitaplıktan bir program seçip çalıştırın. Programın konsol çıktısı burada görünür ve klavyeden girdi gönderebilirsiniz.")
+                Text("Kitaplıktan bir program seçip çalıştırın. Pencereli programların pencereleri, konsol programlarının çıktısı burada görünür.")
             }
-            .navigationTitle("Konsol")
+            .navigationTitle("Program")
+        }
+    }
+}
+
+/// Windowed programs get the desktop view, console programs the terminal.
+struct SessionScreen: View {
+    @ObservedObject var session: EngineSession
+    @ObservedObject var gui: GuiModel
+
+    var body: some View {
+        if session.program.isGUI || gui.everHadWindow {
+            GuiScreen(session: session, gui: gui)
+        } else {
+            ConsoleScreen(session: session)
         }
     }
 }
@@ -67,13 +81,7 @@ struct ConsoleScreen: View {
                 }
             }
         }
-        .alert(session.messageBox?.title ?? "", isPresented: Binding(get: { session.messageBox != nil }, set: { _ in }), presenting: session.messageBox) { box in
-            ForEach(box.choices) { choice in
-                Button(choice.title, role: choice.isCancel ? .cancel : nil) { session.answerMessageBox(choice.id) }
-            }
-        } message: { box in
-            Text(box.text)
-        }
+        .messageBoxAlert(session: session)
         .onAppear { inputFocused = session.isRunning }
     }
 

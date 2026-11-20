@@ -1,5 +1,41 @@
 [
   {
+    "file": "Cizim.exe",
+    "name": "Çizim",
+    "description": "Pencereli çizim programı: renk seçip parmakla çizin, resmi kaydedin.",
+    "args": ""
+  },
+  {
+    "file": "Saat.exe",
+    "name": "Saat",
+    "description": "Zamanlayıcı ve çift tamponlu GDI ile çizilen analog saat.",
+    "args": ""
+  },
+  {
+    "file": "HesapMakinesiGUI.exe",
+    "name": "Hesap Makinesi (GUI)",
+    "description": "Düğmeli Windows hesap makinesi; dokunarak veya klavyeyle.",
+    "args": ""
+  },
+  {
+    "file": "NotDefteri.exe",
+    "name": "Not Defteri",
+    "description": "Çok satırlı metin düzenleyici: menüler, kısayollar, dosya kaydetme.",
+    "args": ""
+  },
+  {
+    "file": "Yilan.exe",
+    "name": "Yılan",
+    "description": "Klasik yılan oyunu; ok tuşları veya dokunarak yön verin.",
+    "args": ""
+  },
+  {
+    "file": "MayinTarlasi.exe",
+    "name": "Mayın Tarlası",
+    "description": "Mayın bulma oyunu; uzun basış veya bayrak modu ile işaretleyin.",
+    "args": ""
+  },
+  {
     "file": "Merhaba.exe",
     "name": "Merhaba",
     "description": "Renkli konsol çıktısı ve Windows sistem bilgisi.",

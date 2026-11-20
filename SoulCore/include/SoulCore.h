@@ -62,7 +62,7 @@ void soul_process_destroy(SoulProcess *p);
 // 255) the size of its client area. Windows have no non-client area: the app
 // draws the title bar, close button and menu bar itself. Coordinates passed to
 // soul_gui_event are client coordinates of the given top-level window.
-enum {
+typedef enum SoulGuiEventType {
     SOUL_GUI_MOUSE_DOWN = 1,   // data: 0 left, 1 right, 2 middle
     SOUL_GUI_MOUSE_UP = 2,
     SOUL_GUI_MOUSE_MOVE = 3,
@@ -75,13 +75,13 @@ enum {
     SOUL_GUI_POPUP_RESULT = 10,// data: chosen popup item id (0 = cancelled)
     SOUL_GUI_MENU_OPEN = 11,   // the app is about to show the menu bar menus
     SOUL_GUI_ACTIVATE = 12,    // the user tapped the window
-};
-enum { SOUL_MOD_SHIFT = 1, SOUL_MOD_CTRL = 2, SOUL_MOD_ALT = 4 };
-enum {
+} SoulGuiEventType;
+typedef enum SoulModifier { SOUL_MOD_SHIFT = 1, SOUL_MOD_CTRL = 2, SOUL_MOD_ALT = 4 } SoulModifier;
+typedef enum SoulWindowFlag {
     SOUL_WIN_CAPTION = 1, SOUL_WIN_RESIZABLE = 2, SOUL_WIN_DIALOG = 4, SOUL_WIN_ACTIVE = 8, SOUL_WIN_DISABLED = 16,
     SOUL_WIN_WANTS_TEXT = 32, SOUL_WIN_HAS_MENU = 64, SOUL_WIN_MAXIMIZED = 128, SOUL_WIN_CLOSABLE = 256,
-};
-enum { SOUL_MENU_POPUP = 1, SOUL_MENU_SEPARATOR = 2, SOUL_MENU_CHECKED = 4, SOUL_MENU_DISABLED = 8, SOUL_MENU_RADIO = 16 };
+} SoulWindowFlag;
+typedef enum SoulMenuFlag { SOUL_MENU_POPUP = 1, SOUL_MENU_SEPARATOR = 2, SOUL_MENU_CHECKED = 4, SOUL_MENU_DISABLED = 8, SOUL_MENU_RADIO = 16 } SoulMenuFlag;
 
 typedef struct SoulWindowInfo {
     uint64_t hwnd;

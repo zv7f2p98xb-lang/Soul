@@ -19,7 +19,7 @@ struct ContentView: View {
                     }
                     NavigationLink(value: SidebarItem.console) {
                         HStack {
-                            Label("Konsol", systemImage: "terminal.fill")
+                            Label("Program", systemImage: "macwindow")
                             Spacer()
                             if sessions.current?.isRunning == true {
                                 Circle().fill(.green).frame(width: 8, height: 8)

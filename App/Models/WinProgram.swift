@@ -24,7 +24,11 @@ struct WinProgram: Identifiable, Codable, Hashable {
 
     var compatibilityNote: String? {
         if !is64Bit { return "32-bit (x86) programlar henüz desteklenmiyor." }
-        if isGUI { return "Grafik arayüzlü (GUI) program: pencere çizimi henüz desteklenmiyor, yalnızca konsol çıktısı ve mesaj kutuları görünür." }
+        let imports = importsSummary.lowercased()
+        if ["d3d9", "d3d10", "d3d11", "d3d12", "dxgi", "opengl32", "vulkan"].contains(where: { imports.contains($0) }) {
+            return "Bu program DirectX/OpenGL kullanıyor; 3B grafik henüz desteklenmiyor. Pencere ve GDI çizimleri çalışır."
+        }
+        if imports.contains("mscoree") { return ".NET programları henüz desteklenmiyor." }
         return nil
     }
 }

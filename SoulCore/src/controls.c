@@ -1,6 +1,7 @@
 // SoulCore - built-in Win32 controls (Button, Static, Edit, ListBox, ComboBox, progress bar) and dialogs.
 #include "gui.h"
 #include <ctype.h>
+#include <strings.h>
 
 #define ARGI(n) ((int32_t)hle_arg(st, (n)))
 #define LOWORD(v) ((uint32_t)(v) & 0xFFFF)

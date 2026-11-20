@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 /// A Windows MessageBox request coming from the guest program.
 struct MessageBoxRequest: Identifiable {
@@ -57,6 +58,8 @@ final class EngineSession: ObservableObject, Identifiable {
     @Published private(set) var stats = SoulStats()
     @Published private(set) var jitEnabled = false
     @Published var messageBox: MessageBoxRequest?
+    /// Windows of a graphical (GUI) program.
+    let gui = GuiModel()
     /// Used by automated test runs: MessageBoxes are answered with the first choice.
     var autoAnswerMessageBoxes = false
 
@@ -108,6 +111,7 @@ final class EngineSession: ObservableObject, Identifiable {
         opts.ctx = Unmanaged.passUnretained(self).toOpaque()
         opts.output = soulOutputCallback
         opts.message_box = soulMessageBoxCallback
+        opts.gui_enabled = 1
 
         var err = [CChar](repeating: 0, count: 1024)
         var proc: OpaquePointer?
@@ -120,6 +124,10 @@ final class EngineSession: ObservableObject, Identifiable {
         }
         process = proc
         phase = .running
+        gui.session = self
+        let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.size ?? CGSize(width: 1180, height: 820)
+        soul_gui_set_screen(proc, Int32(max(1024, screen.width - 24)), Int32(max(700, screen.height - 150)))
+        gui.start()
         let mode = useJIT ? "JIT (x86-64 → ARM64)" : "yorumlayıcı"
         appendLocal("▶︎ \(program.windowsPath) — \(mode)\n", kind: 3)
 
@@ -146,6 +154,7 @@ final class EngineSession: ObservableObject, Identifiable {
 
     private func finish(code: Int32, error: String, stats final: SoulStats) {
         flushOutput()
+        gui.stop()
         statsTimer?.invalidate()
         statsTimer = nil
         stats = final
@@ -156,6 +165,15 @@ final class EngineSession: ObservableObject, Identifiable {
             appendLocal("\n■ Program sonlandı (çıkış kodu \(code)).\n", kind: 3)
         }
         messageBox = nil
+    }
+
+    /// Runs body with the live process (under the session lock); nil once the program has ended.
+    @discardableResult
+    func withProcess<T>(_ body: (OpaquePointer) -> T) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let p = process else { return nil }
+        return body(p)
     }
 
     func stop() {
@@ -337,6 +355,16 @@ final class SessionManager: ObservableObject {
                 }
                 let session = launch(program)
                 session.autoAnswerMessageBoxes = true
+                if program.isGUI {
+                    let hold = UserDefaults.standard.bool(forKey: "SoulAutoRunHold") && name == names.last
+                    let result = await runGUI(session, name: name, dir: dir, hold: hold)
+                    let st = session.stats
+                    let stats = String(format: "jit=%@ seconds=%.3f jit_insns=%llu interp_insns=%llu blocks=%llu api=%llu",
+                                       session.jitEnabled ? "on" : "off", st.seconds, st.jit_insns, st.interp_insns, st.jit_blocks, st.api_calls)
+                    summary += "\(name)\t\(result)\t\(stats)\n"
+                    try? (session.consoleText + "\n\n" + stats + "\n").write(to: dir.appendingPathComponent(name + ".log"), atomically: true, encoding: .utf8)
+                    continue
+                }
                 if let input = inputs[name.lowercased()] { session.send(input.trimmingCharacters(in: .newlines)) }
                 let deadline = Date().addingTimeInterval(180)
                 while session.isRunning && Date() < deadline {
@@ -360,5 +388,47 @@ final class SessionManager: ObservableObject {
             try? summary.write(to: dir.appendingPathComponent("summary.txt"), atomically: true, encoding: .utf8)
             try? "done".write(to: dir.appendingPathComponent("done"), atomically: true, encoding: .utf8)
         }
+    }
+
+    /// Runs a windowed program: waits for its window, plays a little scripted input,
+    /// saves a picture of the windows and (unless holding) closes it again.
+    private func runGUI(_ session: EngineSession, name: String, dir: URL, hold: Bool) async -> String {
+        let gui = session.gui
+        let deadline = Date().addingTimeInterval(30)
+        while session.isRunning && gui.windows.isEmpty && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        let count = gui.windows.count
+        if let w = gui.windows.last {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            let down = Int32(SOUL_GUI_MOUSE_DOWN.rawValue), up = Int32(SOUL_GUI_MOUSE_UP.rawValue), move = Int32(SOUL_GUI_MOUSE_MOVE.rawValue)
+            switch name.lowercased() {
+            case "hesapmakinesigui.exe":
+                gui.send(w.id, Int32(SOUL_GUI_TEXT.rawValue), text: "12*3=")
+            case "notdefteri.exe":
+                gui.send(w.id, Int32(SOUL_GUI_TEXT.rawValue), text: "iPad'de Soul ile yazıldı!")
+            case "cizim.exe":
+                for (color, y0) in [(1, 140), (4, 260), (7, 380)] {
+                    gui.send(w.id, down, x: Int32(24 + color * 40), y: 22); gui.send(w.id, up, x: Int32(24 + color * 40), y: 22)
+                    gui.send(w.id, down, x: 80, y: Int32(y0))
+                    for k in 0...40 { gui.send(w.id, move, x: Int32(80 + k * 16), y: Int32(Double(y0) + sin(Double(k) / 4) * 50)) }
+                    gui.send(w.id, up, x: 720, y: Int32(y0))
+                }
+            case "mayintarlasi.exe":
+                gui.send(w.id, down, x: 200, y: 250); gui.send(w.id, up, x: 200, y: 250)
+            default: break
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if let png = gui.snapshot()?.pngData() { try? png.write(to: dir.appendingPathComponent(name + ".png")) }
+        }
+        var failure: String?
+        if case .failed(let message) = session.phase { failure = message }
+        if !hold && session.isRunning {
+            session.stop()
+            let end = Date().addingTimeInterval(5)
+            while session.isRunning && Date() < end { try? await Task.sleep(nanoseconds: 100_000_000) }
+        }
+        if let failure { return "FAILED \(failure)" }
+        return count > 0 ? "GUI OK windows=\(count)" : "FAILED no window"
     }
 }

@@ -14,5 +14,12 @@ $CC -O2 -s -o "$OUT/Benchmark.exe" benchmark.c
 $CC -O2 -s -o "$OUT/SistemBilgisi.exe" sistem.c
 $CC -O2 -s -o "$OUT/IsParcaciklari.exe" isparcaciklari.c
 $CXX -O2 -s -static -o "$OUT/CppDemo.exe" cppdemo.cpp
+# windowed (GUI) samples
+$CC -O2 -s -mwindows -o "$OUT/Cizim.exe" cizim.c
+$CC -O2 -s -mwindows -o "$OUT/Saat.exe" saat.c -lm
+$CC -O2 -s -mwindows -o "$OUT/HesapMakinesiGUI.exe" hesapgui.c
+$CC -O2 -s -mwindows -o "$OUT/NotDefteri.exe" notdefteri.c
+$CC -O2 -s -mwindows -o "$OUT/Yilan.exe" yilan.c
+$CC -O2 -s -mwindows -o "$OUT/MayinTarlasi.exe" mayin.c
 cp samples.json "$OUT/samples.json"
 ls -la "$OUT"

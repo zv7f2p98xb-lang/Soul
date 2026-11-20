@@ -460,22 +460,35 @@ static int draw_run(Target *t, FontSel fs, const char *s, int len, int x, int y,
         const SoulGlyph *g = glyph_for(fs.face, cp);
         if (!g) continue;
         int gx0 = (int)lroundf(pen + g->x0 * sc), gy0 = y + (int)lroundf(g->y0 * sc);
-        int gw = (int)lroundf(g->w * sc), gh = (int)lroundf(g->h * sc);
+        int gw = (int)ceilf(g->w * sc), gh = (int)ceilf(g->h * sc);
         const uint8_t *bits = soul_font_bits + g->off;
         for (int yy = 0; yy < gh; yy++) {
             int py = gy0 + yy;
             if (py < t->y0 || py >= t->y1) continue;
-            int sy = sc == 1.0f ? yy : (int)(yy / sc);
-            if (sy >= g->h) sy = g->h - 1;
+            float fy = sc == 1.0f ? (float)yy : (yy + 0.5f) / sc - 0.5f;
             for (int xx = 0; xx < gw; xx++) {
                 int pxx = gx0 + xx;
                 if (pxx < t->x0 || pxx >= t->x1) continue;
-                int sx = sc == 1.0f ? xx : (int)(xx / sc);
-                if (sx >= g->w) sx = g->w - 1;
-                int idx = sy * g->w + sx;
-                uint32_t a = (idx & 1) ? (bits[idx >> 1] >> 4) : (bits[idx >> 1] & 15);
+                uint32_t a;
+                if (sc == 1.0f) {
+                    int idx = yy * g->w + xx;
+                    a = ((idx & 1) ? (bits[idx >> 1] >> 4) : (bits[idx >> 1] & 15)) * 17u;
+                } else { // bilinear sampling of the 4-bit coverage
+                    float fx = (xx + 0.5f) / sc - 0.5f;
+                    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+                    float ax = fx - (float)x0, ay = fy - (float)y0;
+                    float acc = 0;
+                    for (int k = 0; k < 4; k++) {
+                        int sx = x0 + (k & 1), sy = y0 + (k >> 1);
+                        if (sx < 0 || sy < 0 || sx >= g->w || sy >= g->h) continue;
+                        int idx = sy * g->w + sx;
+                        float v = (float)((idx & 1) ? (bits[idx >> 1] >> 4) : (bits[idx >> 1] & 15));
+                        acc += v * ((k & 1) ? ax : 1 - ax) * ((k >> 1) ? ay : 1 - ay);
+                    }
+                    a = (uint32_t)(acc * 17.0f + 0.5f);
+                    if (a > 255) a = 255;
+                }
                 if (!a) continue;
-                a *= 17;
                 if (a >= 250) { put_px(t, 13, pxx, py, fg); continue; }
                 uint32_t d = surf_get(&t->s, pxx, py);
                 uint32_t r = (fr * a + ((d >> 16) & 255) * (255 - a)) / 255;
@@ -1152,10 +1165,52 @@ HLE(g_PolylineTo) {
 }
 HLE(g_Polygon) { Dc *dc = dc_get(ARG(0)); int n = ARGI(2); if (!dc || n < 2) { RET(0); return; } int32_t *p = read_points(ARG(1), n); draw_polygon(dc, p, n, 1); free(p); RET(1); }
 HLE(g_Rectangle) { Dc *dc = dc_get(ARG(0)); if (dc) draw_rect(dc, ARGI(1), ARGI(2), ARGI(3), ARGI(4)); RET(dc != NULL); }
-HLE(g_RoundRect) { Dc *dc = dc_get(ARG(0)); if (dc) draw_rect(dc, ARGI(1), ARGI(2), ARGI(3), ARGI(4)); RET(dc != NULL); }
+// Polygon approximation of an elliptic arc from the start radial to the end radial (counter-clockwise).
+static int arc_points(int l, int tp, int r, int b, int xs, int ys, int xe, int ye, int32_t *pts, int max) {
+    double cx = (l + r) / 2.0, cy = (tp + b) / 2.0, rx = (r - l) / 2.0, ry = (b - tp) / 2.0;
+    double a0 = atan2(-(ys - cy), xs - cx), a1 = atan2(-(ye - cy), xe - cx);
+    if (a1 <= a0) a1 += 2 * M_PI;
+    int n = (int)((a1 - a0) / (2 * M_PI) * 96) + 2;
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++) {
+        double a = a0 + (a1 - a0) * i / (n - 1);
+        pts[2 * i] = (int32_t)lround(cx + rx * cos(a));
+        pts[2 * i + 1] = (int32_t)lround(cy - ry * sin(a));
+    }
+    return n;
+}
+static void draw_round_rect(Dc *dc, int l, int tp, int r, int b, int ew, int eh) {
+    if (ew < 2 || eh < 2) { draw_rect(dc, l, tp, r, b); return; }
+    if (ew > r - l) ew = r - l;
+    if (eh > b - tp) eh = b - tp;
+    int32_t pts[2 * 4 * 26];
+    int n = 0;
+    double rx = ew / 2.0, ry = eh / 2.0;
+    const double cxs[4] = { r - rx, l + rx, l + rx, r - rx }, cys[4] = { tp + ry, tp + ry, b - ry, b - ry };
+    for (int q = 0; q < 4; q++)
+        for (int i = 0; i <= 24; i += 3) {
+            double a = (q * 90 + i * 90.0 / 24) * M_PI / 180;
+            pts[2 * n] = (int32_t)lround(cxs[q] + rx * cos(a) - (q == 0 || q == 3 ? 1 : 0));
+            pts[2 * n + 1] = (int32_t)lround(cys[q] - ry * sin(a) - (q >= 2 ? 1 : 0));
+            n++;
+        }
+    draw_polygon(dc, pts, n, 1);
+}
+HLE(g_RoundRect) { Dc *dc = dc_get(ARG(0)); if (dc) draw_round_rect(dc, ARGI(1), ARGI(2), ARGI(3), ARGI(4), (int)(int32_t)hle_arg(st, 5), (int)(int32_t)hle_arg(st, 6)); RET(dc != NULL); }
 HLE(g_Ellipse) { Dc *dc = dc_get(ARG(0)); if (dc) draw_ellipse(dc, ARGI(1), ARGI(2), ARGI(3), ARGI(4)); RET(dc != NULL); }
-HLE(g_Pie) { Dc *dc = dc_get(ARG(0)); if (dc) draw_ellipse(dc, ARGI(1), ARGI(2), ARGI(3), ARGI(4)); RET(dc != NULL); }
-HLE(g_Arc) { RET(1); }
+static void arc_shape(X86State *st, int kind) { // 0 arc, 1 pie, 2 chord
+    Dc *dc = dc_get(ARG(0));
+    if (!dc) { RET(0); return; }
+    int32_t pts[2 * 100];
+    int n = arc_points(ARGI(1), ARGI(2), ARGI(3), ARGI(4), (int)(int32_t)hle_arg(st, 5), (int)(int32_t)hle_arg(st, 6),
+                       (int)(int32_t)hle_arg(st, 7), (int)(int32_t)hle_arg(st, 8), pts, 98);
+    if (kind == 1) { pts[2 * n] = (ARGI(1) + ARGI(3)) / 2; pts[2 * n + 1] = (ARGI(2) + ARGI(4)) / 2; n++; }
+    draw_polygon(dc, pts, n, kind != 0);
+    RET(1);
+}
+HLE(g_Pie) { arc_shape(st, 1); }
+HLE(g_Chord) { arc_shape(st, 2); }
+HLE(g_Arc) { arc_shape(st, 0); }
 
 static void text_out(X86State *st, int wide, int ext) {
     Dc *dc = dc_get(ARG(0));
@@ -1445,7 +1500,7 @@ const HleEntry hle_gdi32_table[] = {
     { "SetPixel", g_SetPixel, NULL }, { "SetPixelV", g_SetPixel, NULL }, { "GetPixel", g_GetPixel, NULL }, { "MoveToEx", g_MoveToEx, NULL },
     { "GetCurrentPositionEx", g_GetCurrentPositionEx, NULL }, { "LineTo", g_LineTo, NULL }, { "Polyline", g_Polyline, NULL },
     { "PolylineTo", g_PolylineTo, NULL }, { "Polygon", g_Polygon, NULL }, { "Rectangle", g_Rectangle, NULL }, { "RoundRect", g_RoundRect, NULL },
-    { "Ellipse", g_Ellipse, NULL }, { "Pie", g_Pie, NULL }, { "Chord", g_Pie, NULL }, { "Arc", g_Arc, NULL }, { "ArcTo", g_Arc, NULL },
+    { "Ellipse", g_Ellipse, NULL }, { "Pie", g_Pie, NULL }, { "Chord", g_Chord, NULL }, { "Arc", g_Arc, NULL }, { "ArcTo", g_Arc, NULL },
     { "TextOutA", g_TextOutA, NULL }, { "TextOutW", g_TextOutW, NULL }, { "ExtTextOutA", g_ExtTextOutA, NULL }, { "ExtTextOutW", g_ExtTextOutW, NULL },
     { "GetTextExtentPoint32A", g_GetTextExtentPoint32A, NULL }, { "GetTextExtentPoint32W", g_GetTextExtentPoint32W, NULL },
     { "GetTextExtentPointA", g_GetTextExtentPoint32A, NULL }, { "GetTextExtentPointW", g_GetTextExtentPoint32W, NULL },

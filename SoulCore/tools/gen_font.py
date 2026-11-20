@@ -8,8 +8,9 @@ from PIL import Image, ImageDraw, ImageFont
 FONT_DIR, OUT = sys.argv[1], sys.argv[2]
 SIZES = [10, 13, 17, 24, 34]  # em size in pixels
 FACES = [("DejaVuSans.ttf", 0), ("DejaVuSans-Bold.ttf", 1), ("DejaVuSansMono.ttf", 2)]  # 2 = monospace
-CODES = list(range(32, 127)) + list(range(160, 256)) + [0x11E, 0x11F, 0x130, 0x131, 0x15E, 0x15F, 0x2013, 0x2014,
-         0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x20AC, 0x2190, 0x2191, 0x2192, 0x2193, 0x25B2, 0x25BC]
+CODES = list(range(32, 127)) + list(range(160, 0x180)) + [0x3C0, 0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+         0x2026, 0x20AC, 0x20BA, 0x2122, 0x2190, 0x2191, 0x2192, 0x2193, 0x2212, 0x221A, 0x221E, 0x2260, 0x2264, 0x2265,
+         0x232B, 0x25B2, 0x25B6, 0x25BC, 0x25C0, 0x25CF, 0x2713, 0x2715]
 
 data = bytearray()
 fonts = []
@@ -18,8 +19,12 @@ for fname, bold in FACES:
         f = ImageFont.truetype(f"{FONT_DIR}/{fname}", size)
         ascent, descent = f.getmetrics()
         glyphs = []
+        missing = bytes(f.getmask(chr(0xE000))), f.getbbox(chr(0xE000))
         for cp in CODES:
             ch = chr(cp)
+            if cp > 0x17F and (bytes(f.getmask(ch)), f.getbbox(ch)) == missing:
+                continue  # not in this font: GDI falls back to '?'
+
             adv = int(round(f.getlength(ch)))
             bbox = f.getbbox(ch)  # relative to origin at ascent-top
             x0, y0, x1, y1 = bbox
