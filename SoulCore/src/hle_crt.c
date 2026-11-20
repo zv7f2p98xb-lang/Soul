@@ -1097,7 +1097,7 @@ void crt_run_atexit(X86State *st) {
 HLE(crt_atexit) { push_atexit(ARG(0)); RET(0); }
 HLE(crt__onexit) { push_atexit(ARG(0)); RET(ARG(0)); }
 HLE(crt___dllonexit) { push_atexit(ARG(0)); RET(ARG(0)); }
-HLE(crt_exit) { crt_run_atexit(st); soul_exit_process(st, (int)ARG(0)); }
+HLE(crt_exit) { int code = (int)ARG(0); crt_run_atexit(st); soul_exit_process(st, code); }
 HLE(crt__exit) { crt_flush_all(); soul_exit_process(st, (int)ARG(0)); }
 HLE(crt__cexit) { crt_run_atexit(st); RET(0); }
 HLE_STUB_RET(crt__c_exit, 0)

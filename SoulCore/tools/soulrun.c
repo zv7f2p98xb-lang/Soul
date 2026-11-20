@@ -7,6 +7,8 @@
 #include <unistd.h>
 
 static SoulProcess *g_p;
+extern uint64_t g_interp_hist[4 * 256];
+extern int g_interp_profile;
 static int g_quiet_log;
 
 static void on_output(void *ctx, int stream, const char *data, size_t len) {
@@ -33,7 +35,9 @@ int main(int argc, char **argv) {
     for (; i < argc && argv[i][0] == '-'; i++) {
         if (!strcmp(argv[i], "--no-jit")) jit = 0;
         else if (!strcmp(argv[i], "-v")) verbose = 1;
+        else if (!strcmp(argv[i], "-vv")) verbose = 2;
         else if (!strcmp(argv[i], "--stats")) stats = 1;
+        else if (!strcmp(argv[i], "--profile")) { stats = 1; g_interp_profile = 1; }
         else if (!strcmp(argv[i], "--quiet")) g_quiet_log = 1;
         else if (!strcmp(argv[i], "--drive") && i + 1 < argc) drive = argv[++i];
         else { fprintf(stderr, "bilinmeyen seçenek %s\n", argv[i]); return 2; }
@@ -80,6 +84,15 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[soulrun] çıkış=%d süre=%.3fs jit_blok=%llu jit_komut=%llu yorum_komut=%llu api=%llu kod=%lluKB\n",
                 code, s.seconds, (unsigned long long)s.jit_blocks, (unsigned long long)s.jit_insns,
                 (unsigned long long)s.interp_insns, (unsigned long long)s.api_calls, (unsigned long long)(s.jit_code_bytes / 1024));
+    }
+    if (g_interp_profile) {
+        for (int k = 0; k < 15; k++) {
+            int best = -1;
+            for (int m = 0; m < 4 * 256; m++) if (g_interp_hist[m] && (best < 0 || g_interp_hist[m] > g_interp_hist[best])) best = m;
+            if (best < 0) break;
+            fprintf(stderr, "  yorumlanan %s%02x: %llu\n", best >= 256 ? (best >= 512 ? "0f38/3a " : "0f ") : "", best & 0xFF, (unsigned long long)g_interp_hist[best]);
+            g_interp_hist[best] = 0;
+        }
     }
     soul_process_destroy(g_p);
     return code;

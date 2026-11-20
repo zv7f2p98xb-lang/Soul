@@ -860,6 +860,9 @@ void x86_exec(X86State *st, const X86Insn *in) {
     }
 }
 
+uint64_t g_interp_hist[4 * 256];
+int g_interp_profile;
+
 void x86_interp_step(X86State *st) {
     X86Insn in;
     const uint8_t *code = (const uint8_t *)(uintptr_t)st->rip;
@@ -867,5 +870,6 @@ void x86_interp_step(X86State *st) {
         soul_fatal(st, "Çözülemeyen komut @%016llx: %02x %02x %02x %02x %02x (AVX/VEX desteklenmiyor olabilir)",
                    (unsigned long long)st->rip, code[0], code[1], code[2], code[3], code[4]);
     }
+    if (__builtin_expect(g_interp_profile, 0)) g_interp_hist[in.map * 256 + in.op]++;
     x86_exec(st, &in);
 }

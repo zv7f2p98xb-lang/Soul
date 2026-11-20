@@ -794,7 +794,7 @@ static void startup_info(X86State *st, int wide) {
 }
 HLE(k32_GetStartupInfoA) { startup_info(st, 0); }
 HLE(k32_GetStartupInfoW) { startup_info(st, 1); }
-HLE(k32_ExitProcess) { crt_run_atexit(st); soul_exit_process(st, (int)ARG(0)); }
+HLE(k32_ExitProcess) { int code = (int)ARG(0); crt_run_atexit(st); soul_exit_process(st, code); }
 HLE(k32_TerminateProcess) {
     if (ARG(0) == (uint64_t)-1) { crt_flush_all(); soul_exit_process(st, (int)ARG(1)); }
     RET(0);
@@ -1036,7 +1036,7 @@ HLE(k32_CreateThread) {
     soul_log("[api] Program yeni bir iş parçacığı (CreateThread) oluşturmak istedi; çoklu iş parçacığı henüz desteklenmiyor\n");
     FAIL(ERROR_NOT_SUPPORTED);
 }
-HLE(k32_ExitThread) { crt_run_atexit(st); soul_exit_process(st, (int)ARG(0)); }
+HLE(k32_ExitThread) { int code = (int)ARG(0); crt_run_atexit(st); soul_exit_process(st, code); }
 
 // TLS: TEB+0x1480 holds 64 slots
 HLE(k32_TlsAlloc) {

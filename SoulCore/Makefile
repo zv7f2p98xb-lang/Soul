@@ -3,7 +3,7 @@
 #   make arm64      -> aarch64 cross build (run with qemu-aarch64 to exercise the JIT)
 CC ?= cc
 CFLAGS ?= -O2 -g
-CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-format-truncation -Iinclude -D_GNU_SOURCE
+override CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-format-truncation -Iinclude -D_GNU_SOURCE
 SRC := $(wildcard src/*.c)
 ASM := $(wildcard src/*.S)
 BUILD ?= build/native

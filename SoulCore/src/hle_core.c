@@ -114,6 +114,9 @@ void hle_invoke(X86State *st, uint32_t id) {
     th->skip_ret = 0;
     th->cur_thunk = id;
     g_hs.api_calls++;
+    if (__builtin_expect(g_proc->verbose > 1, 0))
+        soul_log("[api] %s!%s rcx=%llx rdx=%llx r8=%llx\n", t->dll ? t->dll : "", t->name ? t->name : "?",
+                 (unsigned long long)st->gpr[RCX], (unsigned long long)st->gpr[RDX], (unsigned long long)st->gpr[R8]);
     t->fn(st);
     th->cur_thunk = prev;
     if (!th->skip_ret) st->rip = pop64(st);
