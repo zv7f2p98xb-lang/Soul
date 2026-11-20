@@ -57,6 +57,8 @@ final class EngineSession: ObservableObject, Identifiable {
     @Published private(set) var stats = SoulStats()
     @Published private(set) var jitEnabled = false
     @Published var messageBox: MessageBoxRequest?
+    /// Used by automated test runs: MessageBoxes are answered with the first choice.
+    var autoAnswerMessageBoxes = false
 
     private let console = ConsoleModel()
     private let lock = NSLock()
@@ -193,6 +195,11 @@ final class EngineSession: ObservableObject, Identifiable {
     // MARK: message boxes (called on the guest thread)
 
     func presentMessageBox(title: String, text: String, type: UInt32) -> Int32 {
+        if autoAnswerMessageBoxes {
+            let line = "[MessageBox] \(title): \(text)\n"
+            enqueueOutput(kind: 3, bytes: Array(line.utf8))
+            return MessageBoxRequest(title: title, text: text, type: type).choices.first?.id ?? 1
+        }
         let sem = DispatchSemaphore(value: 0)
         lock.lock()
         boxSemaphore = sem
@@ -293,5 +300,57 @@ final class SessionManager: ObservableObject {
     func clear() {
         if let current, current.isRunning { return }
         current = nil
+    }
+
+    // MARK: automated runs (used by CI on the iOS simulator)
+
+    /// `-SoulAutoRun "A.exe,B.exe"` runs the listed programs one after another and writes
+    /// their console output to Documents/Soul/autorun/<name>.log plus a summary file.
+    private var autoRunStarted = false
+
+    func startAutoRunIfRequested() {
+        guard !autoRunStarted else { return }
+        autoRunStarted = true
+        guard let list = UserDefaults.standard.string(forKey: "SoulAutoRun"), !list.isEmpty else { return }
+        let names = list.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        let inputs: [String: String] = [
+            "hesapmakinesi.exe": "6 * 7\n2 ^ 16\nsqrt 81\nq\n",
+            "sayitahmin.exe": (1...100).map(String.init).joined(separator: "\n") + "\n",
+        ]
+        Task { @MainActor in
+            let dir = SoulPaths.root.appendingPathComponent("autorun", isDirectory: true)
+            try? FileManager.default.removeItem(at: dir)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var summary = ""
+            for name in names {
+                guard let program = ProgramLibrary.shared.programs.first(where: { $0.fileName.lowercased() == name.lowercased() }) else {
+                    summary += "\(name)\tMISSING\n"
+                    continue
+                }
+                let session = launch(program)
+                session.autoAnswerMessageBoxes = true
+                if let input = inputs[name.lowercased()] { session.send(input.trimmingCharacters(in: .newlines)) }
+                let deadline = Date().addingTimeInterval(180)
+                while session.isRunning && Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
+                if session.isRunning { session.stop(); try? await Task.sleep(nanoseconds: 1_000_000_000) }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                let st = session.stats
+                let result: String
+                switch session.phase {
+                case .finished(let code): result = "EXIT \(code)"
+                case .failed(let message): result = "FAILED \(message)"
+                default: result = "TIMEOUT"
+                }
+                let stats = String(format: "jit=%@ seconds=%.3f jit_insns=%llu interp_insns=%llu blocks=%llu api=%llu",
+                                   session.jitEnabled ? "on" : "off", st.seconds, st.jit_insns, st.interp_insns, st.jit_blocks, st.api_calls)
+                summary += "\(name)\t\(result)\t\(stats)\n"
+                try? (session.consoleText + "\n\n" + stats + "\n").write(to: dir.appendingPathComponent(name + ".log"), atomically: true, encoding: .utf8)
+            }
+            summary += "JIT: \(JITManager.shared.method)\n"
+            try? summary.write(to: dir.appendingPathComponent("summary.txt"), atomically: true, encoding: .utf8)
+            try? "done".write(to: dir.appendingPathComponent("done"), atomically: true, encoding: .utf8)
+        }
     }
 }

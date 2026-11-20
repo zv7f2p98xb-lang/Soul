@@ -62,5 +62,6 @@ struct ContentView: View {
         .onReceive(sessions.$current) { session in
             if session != nil { selection = .console }
         }
+        .task { sessions.startAutoRunIfRequested() }
     }
 }

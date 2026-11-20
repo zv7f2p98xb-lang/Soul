@@ -3,7 +3,7 @@
 // writes the result back into x0.
 #if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
 #include <TargetConditionals.h>
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     .text
     .p2align 2
     .globl _soul_jit26_prepare_region

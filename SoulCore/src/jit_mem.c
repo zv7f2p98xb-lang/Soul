@@ -26,12 +26,14 @@
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
+#include <dlfcn.h>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
 #include <sys/sysctl.h>
 #endif
 
 static uint8_t *g_rw, *g_rx;
+static void (*g_wp)(int); // pthread_jit_write_protect_np (simulator)
 static size_t g_size;
 static char g_method[256] = "JIT kapalı";
 
@@ -57,7 +59,9 @@ extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 #endif
 
 int soul_jit_is_debugged(void) {
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if defined(__APPLE__) && TARGET_OS_SIMULATOR
+    return 1; // the simulator is a macOS process: MAP_JIT works without a debugger
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
     uint32_t flags = 0;
     if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof flags) != 0) return 0;
     return (flags & CS_DEBUGGED) != 0;
@@ -66,7 +70,7 @@ int soul_jit_is_debugged(void) {
 #endif
 }
 
-#if defined(__APPLE__) && TARGET_OS_IPHONE && (defined(__arm64__) || defined(__aarch64__))
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR && (defined(__arm64__) || defined(__aarch64__))
 extern void *soul_jit26_prepare_region(void *addr, size_t len); // jit26_arm64.S
 extern void soul_jit26_detach(void);
 
@@ -158,7 +162,20 @@ int soul_jit_init(SoulJitMode mode, size_t size, char *msg, size_t msglen) {
     }
     if (size == 0) size = 64u << 20;
     size = (size + 0x3FFF) & ~(size_t)0x3FFF;
-#if defined(__APPLE__) && TARGET_OS_IPHONE && (defined(__arm64__) || defined(__aarch64__))
+#if defined(__APPLE__) && TARGET_OS_SIMULATOR
+    (void)mode;
+    g_wp = (void (*)(int))dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np");
+    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    if (p == MAP_FAILED || !g_wp) {
+        if (p != MAP_FAILED) munmap(p, size);
+        snprintf(msg, msglen, "Simülatörde MAP_JIT kullanılamadı");
+        return 0;
+    }
+    g_rw = g_rx = p; g_size = size;
+    snprintf(g_method, sizeof g_method, "Simülatör MAP_JIT - %zu MB", size >> 20);
+    snprintf(msg, msglen, "%s", g_method);
+    return 1;
+#elif defined(__APPLE__) && TARGET_OS_IPHONE && (defined(__arm64__) || defined(__aarch64__))
     if (!soul_jit_is_debugged()) {
         snprintf(g_method, sizeof g_method, "JIT etkin değil (StikDebug ile başlatın)");
         snprintf(msg, msglen, "%s", g_method);
@@ -189,10 +206,14 @@ int soul_jit_init(SoulJitMode mode, size_t size, char *msg, size_t msglen) {
 void jitmem_begin_write(void) {
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
     pthread_jit_write_protect_np(0);
+#else
+    if (g_wp) g_wp(0);
 #endif
 }
 void jitmem_end_write(void) {
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
     pthread_jit_write_protect_np(1);
+#else
+    if (g_wp) g_wp(1);
 #endif
 }

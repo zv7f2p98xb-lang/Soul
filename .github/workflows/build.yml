@@ -61,6 +61,7 @@ jobs:
           codesign -d --entitlements :- Payload/Soul.app || true
           zip -qry Soul.ipa Payload
           ls -la Soul.ipa
+          ls Payload/Soul.app/Samples
       - uses: actions/upload-artifact@v4
         with:
           name: Soul-ipa
@@ -70,3 +71,60 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: Soul.ipa
+
+  simulator:
+    name: iPad simulator smoke test (real Apple Silicon JIT)
+    runs-on: macos-15
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: samples
+          path: App/Samples
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build for the simulator
+        run: |
+          set -o pipefail
+          xcodebuild -project Soul.xcodeproj -scheme Soul -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build/sim \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO build | tail -n 20
+          codesign --force --sign - build/sim/Build/Products/Release-iphonesimulator/Soul.app
+      - name: Boot an iPad simulator
+        run: |
+          xcrun simctl list devicetypes | grep -i ipad || true
+          TYPE=$(xcrun simctl list devicetypes | grep -i "iPad Air" | grep -i "M3" | head -1 | sed -E 's/.*\((com\.apple[^)]*)\).*/\1/')
+          [ -z "$TYPE" ] && TYPE=$(xcrun simctl list devicetypes | grep -i "iPad Air" | tail -1 | sed -E 's/.*\((com\.apple[^)]*)\).*/\1/')
+          [ -z "$TYPE" ] && TYPE=$(xcrun simctl list devicetypes | grep -i "iPad" | tail -1 | sed -E 's/.*\((com\.apple[^)]*)\).*/\1/')
+          RUNTIME=$(xcrun simctl list runtimes | grep -i "iOS" | tail -1 | sed -E 's/.* - (com\.apple[^ ]*).*/\1/')
+          echo "device type: $TYPE  runtime: $RUNTIME"
+          UDID=$(xcrun simctl create SoulTest "$TYPE" "$RUNTIME")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+      - name: Run sample programs inside the app
+        run: |
+          xcrun simctl install "$UDID" build/sim/Build/Products/Release-iphonesimulator/Soul.app
+          xcrun simctl launch "$UDID" com.soulemu.Soul -SoulAutoRun "Merhaba.exe,SistemBilgisi.exe,HesapMakinesi.exe,SayiTahmin.exe,CppDemo.exe,Benchmark.exe,Mandelbrot.exe"
+          DATA=$(xcrun simctl get_app_container "$UDID" com.soulemu.Soul data)
+          for i in $(seq 1 300); do [ -f "$DATA/Documents/Soul/autorun/done" ] && break; sleep 1; done
+          mkdir -p sim-results
+          cp -R "$DATA/Documents/Soul/autorun/." sim-results/ || true
+          sleep 2
+          xcrun simctl io "$UDID" screenshot sim-results/console.png
+          xcrun simctl terminate "$UDID" com.soulemu.Soul || true
+          xcrun simctl launch "$UDID" com.soulemu.Soul
+          sleep 6
+          xcrun simctl io "$UDID" screenshot sim-results/library.png
+          echo "===== summary"; cat sim-results/summary.txt
+          for f in sim-results/*.log; do echo "===== $f"; cat "$f"; done
+          test -f sim-results/summary.txt
+          ! grep -E "FAILED|TIMEOUT|MISSING" sim-results/summary.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: simulator-results
+          path: sim-results/
