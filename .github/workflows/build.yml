@@ -23,12 +23,16 @@ jobs:
         run: SoulCore/tests/run_tests.sh
       - name: Win32 / C++ / threads tests (interpreter)
         run: SoulCore/tests/win32/run_win32_tests.sh
+      - name: GUI (windows, controls, dialogs) tests (interpreter)
+        run: SoulCore/tests/gui/run_gui_tests.sh
       - name: Build soulrun (arm64, JIT)
         run: make -C SoulCore arm64
       - name: Differential tests (JIT under qemu-aarch64)
         run: SoulCore/tests/run_tests.sh qemu-aarch64 build/arm64/soulrun
       - name: Win32 / C++ / threads tests (JIT under qemu-aarch64)
         run: SoulCore/tests/win32/run_win32_tests.sh qemu-aarch64 ../../build/arm64/soulrun
+      - name: GUI tests (JIT under qemu-aarch64)
+        run: SoulCore/tests/gui/run_gui_tests.sh qemu-aarch64 build/arm64/soulrun
       - name: Build sample Windows programs
         run: SoulCore/samples/build_samples.sh "$GITHUB_WORKSPACE/samples-out"
       - uses: actions/upload-artifact@v4

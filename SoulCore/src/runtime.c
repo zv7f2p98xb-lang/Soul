@@ -20,7 +20,7 @@ double soul_now(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-const char *soul_version(void) { return "SoulCore 0.3.1"; }
+const char *soul_version(void) { return "SoulCore 0.4.0"; }
 
 int soul_host_is_arm64(void) {
 #if defined(__aarch64__) || defined(__arm64__)
@@ -536,8 +536,6 @@ int soul_process_create(const SoulLaunchOptions *o, SoulProcess **out, char *err
     setup_peb(p);
     make_teb(p, &p->main_thread);
 
-    if (m->subsystem == 2)
-        soul_log("[Soul] Not: Bu bir grafik arayüzlü (GUI) Windows programı. Soul şu anda pencere çizimini desteklemiyor; konsol çıktısı ve mesaj kutuları gösterilecek.\n");
     if (o->jit_enabled && jitmem_ready()) p->jit = jit_create(p);
     p->use_jit = p->jit != NULL;
     *out = p;

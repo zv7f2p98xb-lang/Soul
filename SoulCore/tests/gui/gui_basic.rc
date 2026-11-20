@@ -1,0 +1,38 @@
+#pragma code_page(65001)
+#include <windows.h>
+#define IDD_ABOUT 100
+#define IDC_NAME 1001
+#define IDC_AGREE 1002
+#define IDM_MAIN 200
+
+IDM_MAIN MENU
+BEGIN
+    POPUP "&Dosya"
+    BEGIN
+        MENUITEM "&Yeni\tCtrl+N", 201
+        MENUITEM SEPARATOR
+        MENUITEM "Çı&kış", 202
+    END
+    POPUP "&Yardım"
+    BEGIN
+        MENUITEM "&Hakkında...", 301
+        MENUITEM "Seçenek", 302, CHECKED
+    END
+END
+
+IDD_ABOUT DIALOGEX 0, 0, 200, 96
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Hakkında"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "Soul GUI test programı", -1, 10, 8, 180, 10
+    EDITTEXT        IDC_NAME, 10, 24, 180, 14, ES_AUTOHSCROLL
+    AUTOCHECKBOX    "Kabul ediyorum", IDC_AGREE, 10, 44, 120, 10
+    DEFPUSHBUTTON   "Tamam", IDOK, 86, 74, 50, 14
+    PUSHBUTTON      "İptal", IDCANCEL, 140, 74, 50, 14
+END
+
+STRINGTABLE
+BEGIN
+    1 "Kaynak dizgesi çalışıyor"
+END

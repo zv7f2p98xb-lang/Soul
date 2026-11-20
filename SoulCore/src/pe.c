@@ -1,5 +1,5 @@
 // SoulCore - PE32+ (x86-64 Windows executable / DLL) loader.
-#include "soul_internal.h"
+#include "hle.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -537,4 +537,79 @@ done:
     free(img);
     free(file);
     return rc;
+}
+
+// ---- resources of loaded modules -------------------------------------------------------------
+
+static int res_name_eq(const uint8_t *rsrc, uint32_t name_field, uint64_t want, int wide) {
+    if (want < 0x10000) return !(name_field & 0x80000000u) && (name_field & 0xFFFF) == want;
+    if (!(name_field & 0x80000000u)) return 0;
+    const uint8_t *ds = rsrc + (name_field & 0x7FFFFFFF);
+    uint16_t len; memcpy(&len, ds, 2);
+    const uint16_t *a = (const uint16_t *)(const void *)(ds + 2);
+    char tmp[256];
+    if (wide) w2u((const uint16_t *)(uintptr_t)want, -1, tmp, sizeof tmp);
+    else snprintf(tmp, sizeof tmp, "%s", (const char *)(uintptr_t)want);
+    size_t n = strlen(tmp);
+    if (n != len) return 0;
+    for (size_t i = 0; i < n; i++) {
+        uint16_t c = a[i];
+        if (c >= 'a' && c <= 'z') c = (uint16_t)(c - 32);
+        int d = (unsigned char)tmp[i];
+        if (d >= 'a' && d <= 'z') d -= 32;
+        if (c != d) return 0;
+    }
+    return 1;
+}
+
+static uint64_t res_key(uint64_t v, int wide) {
+    if (v < 0x10000) return v;
+    // "#123" means the integer id 123
+    if (wide) {
+        const uint16_t *w = (const uint16_t *)(uintptr_t)v;
+        if (w[0] == '#') { uint64_t n = 0; for (int i = 1; w[i] >= '0' && w[i] <= '9'; i++) n = n * 10 + (w[i] - '0'); return n; }
+    } else {
+        const char *s = (const char *)(uintptr_t)v;
+        if (s[0] == '#') return (uint64_t)strtoul(s + 1, NULL, 10);
+    }
+    return v;
+}
+
+static const ResEntry *res_lookup(const uint8_t *rsrc, const ResDir *dir, uint64_t want, int wide) {
+    const ResEntry *e = (const ResEntry *)(dir + 1);
+    int n = dir->NumberOfNamedEntries + dir->NumberOfIdEntries;
+    for (int i = 0; i < n; i++)
+        if (res_name_eq(rsrc, e[i].Name, want, wide)) return &e[i];
+    return NULL;
+}
+
+const void *pe_resource(uint64_t module_base, uint64_t type, uint64_t name, int wide, uint32_t *size) {
+    SoulProcess *p = g_proc;
+    if (!module_base && p->main_module) module_base = p->main_module->base;
+    PEModule *m = NULL;
+    for (PEModule *it = p->modules; it; it = it->next) if (it->base == module_base) m = it;
+    if (!m) return NULL;
+    const uint8_t *img = (const uint8_t *)(uintptr_t)m->base;
+    uint32_t lfanew; memcpy(&lfanew, img + 0x3C, 4);
+    const OptHeader64 *oh = (const OptHeader64 *)(const void *)(img + lfanew + 24);
+    uint32_t rva = oh->dirs[DIR_RESOURCE].VirtualAddress;
+    if (!rva) return NULL;
+    const uint8_t *rsrc = img + rva;
+    type = res_key(type, wide);
+    name = res_key(name, wide);
+    const ResEntry *t = res_lookup(rsrc, (const ResDir *)rsrc, type, wide);
+    if (!t || !(t->OffsetToData & 0x80000000u)) return NULL;
+    const ResDir *d2 = (const ResDir *)(rsrc + (t->OffsetToData & 0x7FFFFFFF));
+    const ResEntry *n = res_lookup(rsrc, d2, name, wide);
+    if (!n) return NULL;
+    const ResData *leaf;
+    if (!(n->OffsetToData & 0x80000000u)) leaf = (const ResData *)(rsrc + n->OffsetToData);
+    else {
+        const ResDir *d3 = (const ResDir *)(rsrc + (n->OffsetToData & 0x7FFFFFFF));
+        const ResEntry *l = res_find(rsrc, d3, -1);
+        if (!l || (l->OffsetToData & 0x80000000u)) return NULL;
+        leaf = (const ResData *)(rsrc + l->OffsetToData);
+    }
+    if (size) *size = leaf->Size;
+    return img + leaf->OffsetToData;
 }

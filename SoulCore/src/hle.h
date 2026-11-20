@@ -148,6 +148,7 @@ int vm_query(uint64_t addr, uint64_t *base, uint64_t *alloc_base, uint64_t *size
 void crt_run_atexit(X86State *st);
 void crt_reset(void);
 void crt_flush_all(void);
+uint32_t k32_wait_objects(X86State *st, uint32_t n, const uint64_t *h, int all, uint32_t ms);
 
 // ---- printf / scanf engine ------------------------------------------------------
 typedef struct ArgSrc {

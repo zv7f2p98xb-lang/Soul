@@ -1,0 +1,14 @@
+create ok, resource="Kaynak dizgesi çalışıyor"
+edit "Merhaba"
+added "Merhaba" count=2
+check=1
+added "DUNYA" count=3
+list select 0 "ilk öğe"
+combo 2 "Mavi"
+option off
+dialog init param=42
+dialog end id=1 name=Soul agree=1
+dialog returned 1
+close
+destroy ticks=10
+exit 7

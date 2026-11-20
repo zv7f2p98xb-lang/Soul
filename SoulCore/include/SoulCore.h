@@ -1,6 +1,6 @@
 // SoulCore - public C API used by the iPad app (Swift) and the soulrun CLI.
 //
-// SoulCore runs 64-bit Windows (PE32+, x86-64) console programs on ARM64 by
+// SoulCore runs 64-bit Windows (PE32+, x86-64) console and GUI programs on ARM64 by
 // translating x86-64 machine code to ARM64 at runtime (JIT) and providing a
 // small Win32 / C runtime compatibility layer.
 #ifndef SOULCORE_H
@@ -35,6 +35,7 @@ typedef struct SoulLaunchOptions {
     void *ctx;
     SoulOutputFn output;
     SoulMessageBoxFn message_box;
+    int gui_enabled;          // 1 = a UI shows windows and answers popup menus (soul_gui_*)
 } SoulLaunchOptions;
 
 typedef struct SoulStats {
@@ -55,6 +56,68 @@ void soul_process_close_input(SoulProcess *p);
 void soul_process_stats(SoulProcess *p, SoulStats *out);
 const char *soul_process_error(SoulProcess *p); // empty string if none
 void soul_process_destroy(SoulProcess *p);
+
+// ---- GUI (Win32 windows drawn by SoulCore, shown by the app) ---------------
+// Every visible top-level window has a BGRA framebuffer (premultiplied, alpha
+// 255) the size of its client area. Windows have no non-client area: the app
+// draws the title bar, close button and menu bar itself. Coordinates passed to
+// soul_gui_event are client coordinates of the given top-level window.
+enum {
+    SOUL_GUI_MOUSE_DOWN = 1,   // data: 0 left, 1 right, 2 middle
+    SOUL_GUI_MOUSE_UP = 2,
+    SOUL_GUI_MOUSE_MOVE = 3,
+    SOUL_GUI_MOUSE_WHEEL = 4,  // data: wheel delta (120 per notch), | 0x10000 for horizontal
+    SOUL_GUI_KEY = 5,          // data: Windows virtual-key code, x: 1 down / 0 up, y: SOUL_MOD_*, ch: character (UTF-16)
+    SOUL_GUI_TEXT = 6,         // text: UTF-8 typed text
+    SOUL_GUI_CLOSE = 7,        // title bar close button
+    SOUL_GUI_COMMAND = 8,      // data: menu item id
+    SOUL_GUI_RESIZE = 9,       // x, y: new client size
+    SOUL_GUI_POPUP_RESULT = 10,// data: chosen popup item id (0 = cancelled)
+    SOUL_GUI_MENU_OPEN = 11,   // the app is about to show the menu bar menus
+    SOUL_GUI_ACTIVATE = 12,    // the user tapped the window
+};
+enum { SOUL_MOD_SHIFT = 1, SOUL_MOD_CTRL = 2, SOUL_MOD_ALT = 4 };
+enum {
+    SOUL_WIN_CAPTION = 1, SOUL_WIN_RESIZABLE = 2, SOUL_WIN_DIALOG = 4, SOUL_WIN_ACTIVE = 8, SOUL_WIN_DISABLED = 16,
+    SOUL_WIN_WANTS_TEXT = 32, SOUL_WIN_HAS_MENU = 64, SOUL_WIN_MAXIMIZED = 128, SOUL_WIN_CLOSABLE = 256,
+};
+enum { SOUL_MENU_POPUP = 1, SOUL_MENU_SEPARATOR = 2, SOUL_MENU_CHECKED = 4, SOUL_MENU_DISABLED = 8, SOUL_MENU_RADIO = 16 };
+
+typedef struct SoulWindowInfo {
+    uint64_t hwnd;
+    uint64_t owner;
+    int x, y, width, height;   // client area on the virtual desktop
+    unsigned flags;            // SOUL_WIN_*
+    uint64_t version;          // changes whenever the pixels change
+    int caret_visible, caret_x, caret_y, caret_w, caret_h;
+    char title[256];
+} SoulWindowInfo;
+
+typedef struct SoulMenuEntry {
+    int depth;                 // 0 = menu bar item, 1 = item of its drop-down, ...
+    uint32_t id;
+    unsigned flags;            // SOUL_MENU_*
+    char text[128];            // '&' marks the access key
+} SoulMenuEntry;
+
+typedef struct SoulPopupInfo {
+    int active;
+    int kind;                  // 1 = context menu (TrackPopupMenu), 2 = combo box list
+    uint64_t hwnd;             // top-level window
+    int x, y;                  // anchor in client coordinates of hwnd
+} SoulPopupInfo;
+
+// All functions are safe to call from the UI thread while the program runs.
+int soul_gui_windows(SoulProcess *p, SoulWindowInfo *out, int max);   // visible top-level windows, back to front
+int soul_gui_copy(SoulProcess *p, uint64_t hwnd, void *dst, size_t dst_stride, int width, int height, uint64_t *version); // 1 if copied
+void soul_gui_event(SoulProcess *p, uint64_t hwnd, int type, int x, int y, int data, uint32_t ch, const char *text);
+int soul_gui_menu(SoulProcess *p, uint64_t hwnd, SoulMenuEntry *out, int max);
+int soul_gui_popup(SoulProcess *p, SoulPopupInfo *info, SoulMenuEntry *out, int max);
+uint64_t soul_gui_generation(SoulProcess *p);   // changes when windows, titles or menus change
+void soul_gui_set_screen(SoulProcess *p, int width, int height); // virtual desktop size (default 1280x800)
+int soul_gui_has_windows(SoulProcess *p);
+int soul_gui_idle(SoulProcess *p);               // 1 when no input, posted message or repaint is pending (tests)
+int soul_gui_popup_active(SoulProcess *p);
 
 // ---- JIT memory -------------------------------------------------------
 typedef enum {

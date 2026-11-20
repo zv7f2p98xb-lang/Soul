@@ -1,0 +1,25 @@
+# Drives gui_basic.exe like a user on the iPad would.
+waitwin 1
+wait 700
+menus
+pixel 350 50 1E78DC
+pixel 10 60 F0F0F0
+dump basic1.ppm
+click 60 20
+text Merhaba
+click 240 22
+click 20 55
+click 60 20
+text dunya
+click 240 22
+click 40 85
+click 100 215
+popup 3
+menu 302
+menu 301
+waitwin 2
+expect -1 Hakkında
+click 30 90
+key 0x0D
+waitwin 1
+close

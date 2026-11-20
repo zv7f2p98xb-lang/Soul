@@ -1804,3 +1804,6 @@ const HleEntry hle_kernel32_table[] = {
     { "UnmapViewOfFile", k32_UnmapViewOfFile, NULL },
     { NULL, NULL, NULL }
 };
+
+// Used by user32's MsgWaitForMultipleObjects (polls with a 0 timeout).
+uint32_t k32_wait_objects(X86State *st, uint32_t n, const uint64_t *h, int all, uint32_t ms) { return wait_objects(st, n, h, all, ms); }

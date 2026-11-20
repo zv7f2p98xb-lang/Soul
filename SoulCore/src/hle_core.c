@@ -1,5 +1,6 @@
 // SoulCore - HLE core: import thunks, handles, paths, strings, console streams.
 #include "hle.h"
+#include "gui.h"
 #include <ctype.h>
 #include <errno.h>
 #include <strings.h>
@@ -42,8 +43,8 @@ int hle_is_system_dll(const char *dll) {
 }
 
 static const HleEntry *find_entry(const char *name) {
-    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_misc_table };
-    for (int t = 0; t < 3; t++)
+    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table, hle_gdi32_table, hle_misc_table };
+    for (int t = 0; t < 6; t++)
         for (const HleEntry *e = tables[t]; e->name; e++)
             if (strcmp(e->name, name) == 0) return e;
     return NULL;
@@ -605,6 +606,7 @@ void hle_init(SoulProcess *p) {
         snprintf(d, sizeof d, "%s/%s", p->drive_c, dirs[i]);
         mkdir(d, 0755);
     }
+    gui_reset();
 }
 
 void hle_shutdown(SoulProcess *p) {
@@ -618,5 +620,6 @@ void hle_shutdown(SoulProcess *p) {
         if (o->type == H_MAPPING && o->ptr) free(o->ptr);
     }
     memset(g_hs.handles, 0, sizeof g_hs.handles);
+    gui_shutdown();
     vm_free_all();
 }

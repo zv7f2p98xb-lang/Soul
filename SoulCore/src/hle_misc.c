@@ -18,6 +18,8 @@ static void random_bytes(void *buf, size_t n) {
     for (size_t i = 0; i < n; i++) ((uint8_t *)buf)[i] = (uint8_t)random();
 }
 
+HLE_STUB_RET(crt_ismbblead, 0)
+
 // ---- user32 ------------------------------------------------------------------------------
 
 static int message_box(const char *title, const char *text, unsigned type) {
@@ -41,14 +43,6 @@ HLE(u32_MessageBoxW) {
     char *m = ARG(1) ? w2u_dup(WSTR(1)) : strdup("");
     RET(message_box(t, m, (unsigned)ARG(3)));
     free(t); free(m);
-}
-HLE(u32_GetSystemMetrics) {
-    switch ((int)ARG(0)) {
-    case 0: RET(2360); break;  // SM_CXSCREEN (iPad Air 11" in points*2)
-    case 1: RET(1640); break;  // SM_CYSCREEN
-    case 80: RET(1); break;    // SM_CMONITORS
-    default: RET(0); break;
-    }
 }
 HLE(u32_wsprintfA) {
     char *f = strdup(CSTR(1));
@@ -91,13 +85,6 @@ HLE(u32_CharPrevA) { const char *s = CSTR(0), *p = CSTR(1); RET(p > s ? p - 1 : 
 HLE(u32_IsCharAlphaA) { RET(isalpha((unsigned char)ARG(0)) != 0); }
 HLE(u32_IsCharAlphaW) { RET(iswalpha((wint_t)(uint16_t)ARG(0)) != 0); }
 HLE(u32_IsCharAlphaNumericW) { RET(iswalnum((wint_t)(uint16_t)ARG(0)) != 0); }
-HLE(u32_LoadStringA) { if (ARG(3)) ((char *)PTR(2))[0] = 0; RET(0); }
-HLE(u32_LoadStringW) { if (ARG(3)) ((uint16_t *)PTR(2))[0] = 0; RET(0); }
-HLE_STUB_RET(u32_GetDesktopWindow, 0x10010)
-HLE_STUB_RET(u32_GetForegroundWindow, 0)
-HLE_STUB_RET(u32_GetActiveWindow, 0)
-HLE_STUB_RET(u32_GetKeyState, 0)
-HLE_STUB_RET(u32_GetAsyncKeyState, 0)
 HLE_STUB_RET(u32_MessageBeep, 1)
 HLE_STUB_RET(u32_GetProcessWindowStation, 0x20)
 HLE(u32_GetUserObjectInformationW) {
@@ -240,14 +227,15 @@ HLE_STUB_RET(mm_timeBeginPeriod, 0)
 HLE_STUB_RET(mm_PlaySound, 1)
 
 const HleEntry hle_misc_table[] = {
+    { "_ismbblead", crt_ismbblead, NULL }, { "_ismbbtrail", crt_ismbblead, NULL },
     { "MessageBoxA", u32_MessageBoxA, NULL }, { "MessageBoxW", u32_MessageBoxW, NULL }, { "MessageBoxExA", u32_MessageBoxA, NULL },
-    { "MessageBoxExW", u32_MessageBoxW, NULL }, { "GetSystemMetrics", u32_GetSystemMetrics, NULL }, { "wsprintfA", u32_wsprintfA, NULL },
+    { "MessageBoxExW", u32_MessageBoxW, NULL }, { "wsprintfA", u32_wsprintfA, NULL },
     { "wsprintfW", u32_wsprintfW, NULL }, { "wvsprintfA", u32_wvsprintfA, NULL }, { "CharUpperA", u32_CharUpperA, NULL }, { "CharLowerA", u32_CharLowerA, NULL },
     { "CharUpperW", u32_CharUpperW, NULL }, { "CharLowerW", u32_CharLowerW, NULL }, { "CharNextA", u32_CharNextA, NULL }, { "CharNextW", u32_CharNextW, NULL },
     { "CharPrevA", u32_CharPrevA, NULL }, { "IsCharAlphaA", u32_IsCharAlphaA, NULL }, { "IsCharAlphaW", u32_IsCharAlphaW, NULL },
-    { "IsCharAlphaNumericW", u32_IsCharAlphaNumericW, NULL }, { "LoadStringA", u32_LoadStringA, NULL }, { "LoadStringW", u32_LoadStringW, NULL },
-    { "GetDesktopWindow", u32_GetDesktopWindow, NULL }, { "GetForegroundWindow", u32_GetForegroundWindow, NULL }, { "GetActiveWindow", u32_GetActiveWindow, NULL },
-    { "GetKeyState", u32_GetKeyState, NULL }, { "GetAsyncKeyState", u32_GetAsyncKeyState, NULL }, { "MessageBeep", u32_MessageBeep, NULL },
+    { "IsCharAlphaNumericW", u32_IsCharAlphaNumericW, NULL }, 
+    
+    { "MessageBeep", u32_MessageBeep, NULL },
     { "GetProcessWindowStation", u32_GetProcessWindowStation, NULL }, { "GetUserObjectInformationW", u32_GetUserObjectInformationW, NULL },
     { "SetProcessDPIAware", u32_SetProcessDPIAware, NULL }, { "SetProcessDpiAwarenessContext", u32_SetProcessDpiAwarenessContext, NULL },
     { "GetDpiForSystem", u32_GetDpiForSystem, NULL },

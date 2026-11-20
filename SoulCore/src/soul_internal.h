@@ -180,6 +180,9 @@ PEModule *pe_find_loaded(SoulProcess *p, const char *name);
 PEModule *pe_load_dependency(SoulProcess *p, const char *dll, char *err, size_t errlen);
 void pe_unload_all(SoulProcess *p);
 int pe_run_initializers(SoulProcess *p, X86State *st);
+// Resource data of a loaded module (base 0 = main program). id_or_name < 0x10000 is an
+// integer id, otherwise a NUL-terminated name (UTF-16 when wide, UTF-8 otherwise).
+const void *pe_resource(uint64_t module_base, uint64_t type, uint64_t id_or_name, int wide, uint32_t *size);
 
 // jit_mem.c / jit_a64.c
 int jitmem_ready(void);
