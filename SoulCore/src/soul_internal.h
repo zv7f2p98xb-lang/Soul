@@ -73,6 +73,7 @@ struct SoulProcess {
 
     volatile int terminate;
     void *hle_state;          // owned by hle_core.c
+    pthread_t guest_thread;   // host thread running the guest
 };
 
 extern SoulProcess *g_proc;

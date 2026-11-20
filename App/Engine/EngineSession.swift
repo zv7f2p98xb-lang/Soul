@@ -147,13 +147,13 @@ final class EngineSession: ObservableObject, Identifiable {
         statsTimer?.invalidate()
         statsTimer = nil
         stats = final
-        if !error.isEmpty && code == -1 {
+        if !error.isEmpty {
             phase = .failed(message: error)
         } else {
             phase = .finished(code: code)
             appendLocal("\n■ Program sonlandı (çıkış kodu \(code)).\n", kind: 3)
         }
-        if let box = messageBox { _ = box; messageBox = nil }
+        messageBox = nil
     }
 
     func stop() {

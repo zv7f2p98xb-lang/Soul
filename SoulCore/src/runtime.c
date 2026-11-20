@@ -135,9 +135,10 @@ static volatile int g_in_fault;
 static void fault_handler(int sig, siginfo_t *si, void *uc) {
     (void)uc;
     SoulProcess *p = g_proc;
-    if (!p || !p->main_thread.jb || g_in_fault) {
-        signal(sig, SIG_DFL);
-        raise(sig);
+    if (!p || !p->main_thread.jb || g_in_fault || !pthread_equal(pthread_self(), p->guest_thread)) {
+        // not a guest fault (e.g. another app thread): restore the previous handler and retry
+        struct sigaction *old = sig == SIGSEGV ? &g_old_segv : sig == SIGBUS ? &g_old_bus : sig == SIGILL ? &g_old_ill : &g_old_fpe;
+        sigaction(sig, old, NULL);
         return;
     }
     g_in_fault = 1;
@@ -320,6 +321,7 @@ int soul_process_run(SoulProcess *p) {
     X86State *st = p->main_state;
     sigjmp_buf jb;
     p->main_thread.jb = &jb;
+    p->guest_thread = pthread_self();
     p->start_time = soul_now();
     install_handlers();
     int r = sigsetjmp(jb, 1);
@@ -332,6 +334,11 @@ int soul_process_run(SoulProcess *p) {
     restore_handlers();
     con_flush();
     crt_flush_all();
+    if (r == 3) {
+        char buf[1200];
+        int n = snprintf(buf, sizeof buf, "\n[Soul] Program çöktü: %s\n", p->error);
+        soul_out(SOUL_STREAM_LOG, buf, (size_t)n);
+    }
     p->main_thread.jb = NULL;
     p->exited = 1;
     return p->exit_code;
