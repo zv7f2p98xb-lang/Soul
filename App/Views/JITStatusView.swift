@@ -68,7 +68,7 @@ struct JITStatusView: View {
             Section("JIT nasıl açılır? (iPad Air M3 dahil)") {
                 Step(n: 1, title: "Soul'u yan yükleyin", text: "Soul.ipa dosyasını SideStore, AltStore ya da Sideloadly ile kendi Apple kimliğinizle imzalayıp yükleyin. Geliştirici imzası 'get-task-allow' yetkisini ekler; JIT için bu gereklidir.")
                 Step(n: 2, title: "StikDebug'ı kurun", text: "StikDebug'ı yükleyin, eşleştirme (pairing) dosyasını içe aktarın ve LocalDevVPN'i açın.")
-                Step(n: 3, title: "iPadOS 26 ve üzeri (TXM)", text: "StikDebug ayarlarında 'Always Run Scripts' ve 'Picture in Picture' seçeneklerini açın; Scripts bölümünde Soul için universal.js betiğini atayın. Soul, hata ayıklayıcı bağlanınca brk #0xf00d ile JIT bölgesi ister; StikDebug arka planda (PiP) açık kalmalıdır.")
+                Step(n: 3, title: "iPadOS 26 ve üzeri (TXM)", text: "StikDebug ayarlarında TXM seçeneğini (TXM Override) açın, 'Always Run Scripts' ve 'Picture in Picture' seçeneklerini de açın; Scripts bölümünde Soul için universal.js betiğini seçin. M3 iPad'lerde TXM seçeneği açılmazsa betik çalışmaz ve JIT görünmez. StikDebug arka planda (PiP) açık kalmalıdır.")
                 Step(n: 4, title: "iPadOS 17–18", text: "Ek betik gerekmez: StikDebug'da 'Enable JIT' ile Soul'u seçmeniz yeterlidir (Klasik yöntem).")
                 Step(n: 5, title: "JIT'i etkinleştirin", text: "Bu ekrandaki 'StikDebug ile JIT'i etkinleştir' düğmesine basın ya da StikDebug → Enable JIT → Soul seçin. Soul'a dönünce birkaç saniye içinde 'JIT etkin' görünmelidir. Görünmezse 'Tanılama bilgisini kopyala' ile günlüğü paylaşın.")
             }

@@ -44,7 +44,7 @@ Soul, Windows için derlenmiş **64-bit (x64) programları** Apple Silicon (M se
 1. **IPA'yı alın:** GitHub Actions → *Build* iş akışı → `Soul-ipa` çıktısı (ya da `v*` etiketli sürümler). Kendiniz derlemek için aşağıya bakın.
 2. **Yan yükleyin:** SideStore, AltStore veya Sideloadly ile kendi Apple kimliğinizle imzalayıp yükleyin (geliştirici imzası `get-task-allow` ekler — JIT için şart).
 3. **StikDebug'ı kurun:** eşleştirme (pairing) dosyasını içe aktarın, LocalDevVPN'i açın.
-4. **iPadOS 26 (TXM):** StikDebug ayarlarında *Always Run Scripts* ve *Picture in Picture*'ı açın, *Scripts* bölümünde **Soul için `universal.js`** atayın.
+4. **iPadOS 26 (TXM):** StikDebug ayarlarında **TXM seçeneğini (TXM Override)** açın, *Always Run Scripts* ve *Picture in Picture*'ı da açın, *Scripts* bölümünde **Soul için `universal.js`** seçin. iPad Air M3'te TXM seçeneği açılmadan betik çalışmaz ve Soul JIT'i göremez (kullanıcı testiyle doğrulandı).
 5. Soul'da **JIT Durumu → "StikDebug ile JIT'i etkinleştir"** düğmesine basın (StikDebug'ı Soul + `universal.js` ile açar) ya da StikDebug'da **Enable JIT → Soul** seçin, sonra Soul'a geri dönün. Birkaç saniye içinde "JIT etkin" görünmelidir; görünmezse *Tanılama bilgisini kopyala* ile günlüğü paylaşın. JIT olmadan da çalışır ama yorumlayıcı modunda (yavaş).
 
 ## Kullanım
