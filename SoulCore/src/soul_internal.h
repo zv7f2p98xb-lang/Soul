@@ -94,7 +94,11 @@ struct SoulProcess {
 
     // threads: guest code runs under one global interpreter lock (GIL)
     pthread_mutex_t gil;
-    pthread_cond_t gil_cv;     // broadcast whenever a guest sync object changes
+    pthread_cond_t gil_cv;     // unused (kept for ABI of older builds)
+    pthread_mutex_t ev_mu;     // guards ev_gen; waiters sleep on ev_cv without holding the GIL
+    pthread_cond_t ev_cv;      // broadcast whenever a guest sync object changes
+    volatile uint64_t ev_gen;
+    volatile uint64_t gil_epoch; // incremented on every GIL acquisition
     volatile int gil_waiters;
     SoulThread *gil_owner;
     SoulThread *threads;       // additional guest threads

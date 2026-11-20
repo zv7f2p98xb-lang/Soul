@@ -61,6 +61,7 @@ void gil_lock(SoulThread *t) {
     pthread_mutex_lock(&p->gil);
     __atomic_sub_fetch(&p->gil_waiters, 1, __ATOMIC_SEQ_CST);
     p->gil_owner = t;
+    p->gil_epoch++;
     t_cur = t;
 }
 
@@ -71,33 +72,48 @@ void gil_unlock(SoulThread *t) {
     pthread_mutex_unlock(&p->gil);
 }
 
-void gil_notify(void) { pthread_cond_broadcast(&g_proc->gil_cv); }
+void gil_notify(void) {
+    SoulProcess *p = g_proc;
+    pthread_mutex_lock(&p->ev_mu);
+    p->ev_gen++;
+    pthread_cond_broadcast(&p->ev_cv);
+    pthread_mutex_unlock(&p->ev_mu);
+}
 
+// Releases the GIL until gil_notify() is called or the timeout expires, then
+// re-acquires it through gil_lock() so that every contender is counted.
 int gil_wait(int64_t timeout_ms) {
     SoulProcess *p = g_proc;
     SoulThread *t = t_cur;
     con_flush();
-    p->gil_owner = NULL;
     int timed_out = 0;
-    if (timeout_ms < 0) {
-        pthread_cond_wait(&p->gil_cv, &p->gil);
-    } else {
-        struct timespec ts;
+    struct timespec ts;
+    if (timeout_ms >= 0) {
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += timeout_ms / 1000;
         ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
         if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
-        timed_out = pthread_cond_timedwait(&p->gil_cv, &p->gil, &ts) == ETIMEDOUT;
     }
-    p->gil_owner = t;
-    t_cur = t;
+    pthread_mutex_lock(&p->ev_mu);
+    uint64_t gen = p->ev_gen;
+    gil_unlock(t);
+    while (p->ev_gen == gen && !p->terminate) {
+        if (timeout_ms < 0) pthread_cond_wait(&p->ev_cv, &p->ev_mu);
+        else if (pthread_cond_timedwait(&p->ev_cv, &p->ev_mu, &ts) == ETIMEDOUT) { timed_out = 1; break; }
+    }
+    pthread_mutex_unlock(&p->ev_mu);
+    gil_lock(t);
     return timed_out;
 }
 
+// Hands the GIL to a waiting thread (if any) and takes it back afterwards.
 void soul_yield(void) {
+    SoulProcess *p = g_proc;
     SoulThread *t = t_cur;
+    if (p->gil_waiters == 0) return;
+    uint64_t epoch = p->gil_epoch;
     gil_unlock(t);
-    sched_yield();
+    for (int i = 0; i < 2000 && p->gil_epoch == epoch && p->gil_waiters > 0; i++) sched_yield();
     gil_lock(t);
 }
 
@@ -105,7 +121,10 @@ static void stop_all_threads(SoulProcess *p) {
     p->terminate = 1;
     if (p->main_state) p->main_state->stop_req = 1;
     for (SoulThread *t = p->threads; t; t = t->next) if (t->st) t->st->stop_req = 1;
-    pthread_cond_broadcast(&p->gil_cv);
+    pthread_mutex_lock(&p->ev_mu);
+    p->ev_gen++;
+    pthread_cond_broadcast(&p->ev_cv);
+    pthread_mutex_unlock(&p->ev_mu);
     pthread_mutex_lock(&p->in_mu);
     pthread_cond_broadcast(&p->in_cv);
     pthread_mutex_unlock(&p->in_mu);
@@ -198,7 +217,7 @@ static void *ticker_main(void *arg) {
     SoulProcess *p = arg;
     while (p->ticker_running) {
         usleep(4000);
-        if (!p->threads) continue;
+        if (!p->threads || p->gil_waiters == 0) continue;
         SoulThread *owner = p->gil_owner;
         if (owner && owner->st) owner->st->stop_req = 1;
     }
@@ -452,6 +471,8 @@ int soul_process_create(const SoulLaunchOptions *o, SoulProcess **out, char *err
         pthread_mutexattr_destroy(&ma);
     }
     pthread_cond_init(&p->gil_cv, NULL);
+    pthread_mutex_init(&p->ev_mu, NULL);
+    pthread_cond_init(&p->ev_cv, NULL);
     p->next_tid = 4243;
     p->main_thread.tid = 4243;
     p->main_thread.is_main = 1;
@@ -550,6 +571,10 @@ int soul_process_run(SoulProcess *p) {
     // the process is over: stop every other guest thread and wait for them
     if (p->threads) {
         int code = p->exit_code;
+        if (!p->terminate) { // normal end of the program: other threads just stop
+            p->exit_requested = 1;
+            p->requested_code = code;
+        }
         stop_all_threads(p);
         gil_unlock(&p->main_thread);
         for (int i = 0; i < 300; i++) {
@@ -651,6 +676,8 @@ void soul_process_destroy(SoulProcess *p) {
     pthread_cond_destroy(&p->in_cv);
     pthread_mutex_destroy(&p->gil);
     pthread_cond_destroy(&p->gil_cv);
+    pthread_mutex_destroy(&p->ev_mu);
+    pthread_cond_destroy(&p->ev_cv);
     if (g_proc == p) g_proc = NULL;
     free(p);
 }
