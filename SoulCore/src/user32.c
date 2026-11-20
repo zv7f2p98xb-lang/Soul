@@ -1501,8 +1501,25 @@ static Win *key_target(uint64_t hwnd) {
     if (a) return a;
     return win_get(hwnd);
 }
+static uint32_t key_char(int vk) { // character a key-down produces with the current modifier state
+    GuiState *g = &g_gui;
+    int shift = g->keys[VK_SHIFT] & 0x80, ctrl = g->keys[VK_CONTROL] & 0x80;
+    if (vk >= 'A' && vk <= 'Z') return ctrl ? (uint32_t)(vk - 'A' + 1) : (shift ? (uint32_t)vk : (uint32_t)(vk + 32));
+    if (ctrl) return 0;
+    if (vk >= '0' && vk <= '9' && !shift) return (uint32_t)vk;
+    if (vk >= 0x60 && vk <= 0x69) return (uint32_t)('0' + vk - 0x60);
+    switch (vk) {
+    case VK_SPACE: return ' ';
+    case VK_RETURN: return '\r';
+    case VK_BACK: return 8;
+    case VK_TAB: return '\t';
+    case VK_ESCAPE: return 27;
+    default: return 0;
+    }
+}
 static void post_key(Win *t, int vk, int down, uint32_t ch) {
     GuiState *g = &g_gui;
+    if (down && !ch) ch = key_char(vk);
     int alt = (g->keys[VK_MENU] & 0x80) && !(g->keys[VK_CONTROL] & 0x80);
     uint32_t msg = down ? (alt ? WM_SYSKEYDOWN : WM_KEYDOWN) : (alt ? WM_SYSKEYUP : WM_KEYUP);
     uint32_t prev = g->keys[vk] & 0x80;
@@ -1600,7 +1617,8 @@ static void process_input(X86State *st, GuiInput *ev) {
         post_key(t, ev->data & 0xFF, ev->x != 0, ev->ch);
         return;
     }
-    case 6: { // text typed on the on-screen keyboard
+    case 6: { // text typed on the on-screen keyboard (no modifier keys are held)
+        set_mod(0);
         Win *t = key_target(ev->hwnd);
         if (!t || !ev->text || modal_blocked(win_top(t))) return;
         const char *p = ev->text;
@@ -1812,17 +1830,7 @@ HLE(u_TranslateMessage) {
     uint64_t hwnd; uint32_t msg, priv; uint64_t wp, lp;
     memcpy(&hwnd, m, 8); memcpy(&msg, m + 8, 4); memcpy(&wp, m + 16, 8); memcpy(&lp, m + 24, 8); memcpy(&priv, m + 44, 4);
     if (msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN) { RET(0); return; }
-    uint32_t ch = priv;
-    if (!ch) {
-        int vk = (int)wp, shift = g_gui.keys[VK_SHIFT] & 0x80, ctrl = g_gui.keys[VK_CONTROL] & 0x80;
-        if (vk >= 'A' && vk <= 'Z') ch = ctrl ? (uint32_t)(vk - 'A' + 1) : (shift ? (uint32_t)vk : (uint32_t)(vk + 32));
-        else if (vk >= '0' && vk <= '9' && !shift) ch = (uint32_t)vk;
-        else if (vk == VK_SPACE) ch = ' ';
-        else if (vk == VK_RETURN) ch = '\r';
-        else if (vk == VK_BACK) ch = 8;
-        else if (vk == VK_TAB) ch = '\t';
-        else if (vk == VK_ESCAPE) ch = 27;
-    }
+    uint32_t ch = priv ? priv : key_char((int)wp); // keys from the UI carry their character
     if (!ch) { RET(0); return; }
     if (ch == '\n') ch = '\r';
     Win *w = win_get(hwnd);
@@ -2616,7 +2624,6 @@ HLE_STUB_RET(u_DwmExtendFrameIntoClientArea, 0)
 HLE(u_DwmIsCompositionEnabled) { if (ARG(0)) mem_wr(ARG(0), 4, 1); RET(0); }
 HLE_STUB_RET(u_DwmFlush, 0)
 HLE_STUB_RET(u_CommDlgExtendedError, 0)
-HLE_STUB_RET(u_GetOpenFileName, 0)
 HLE_STUB_RET(u_ChooseColor, 0)
 HLE_STUB_RET(u_ChooseFont, 0)
 HLE_STUB_RET(u_ImmGetContext, 0)
@@ -2953,8 +2960,7 @@ const HleEntry hle_user32_table[] = {
     E("InitCommonControls", u_InitCommonControls), E("InitCommonControlsEx", u_InitCommonControls), E("SetWindowTheme", u_SetWindowTheme),
     E("DwmSetWindowAttribute", u_DwmSetWindowAttribute), E("DwmGetWindowAttribute", u_DwmGetWindowAttribute),
     E("DwmExtendFrameIntoClientArea", u_DwmExtendFrameIntoClientArea), E("DwmIsCompositionEnabled", u_DwmIsCompositionEnabled), E("DwmFlush", u_DwmFlush),
-    E("CommDlgExtendedError", u_CommDlgExtendedError), E("GetOpenFileNameA", u_GetOpenFileName), E("GetOpenFileNameW", u_GetOpenFileName),
-    E("GetSaveFileNameA", u_GetOpenFileName), E("GetSaveFileNameW", u_GetOpenFileName), E("ChooseColorA", u_ChooseColor), E("ChooseColorW", u_ChooseColor),
+    E("CommDlgExtendedError", u_CommDlgExtendedError), E("ChooseColorA", u_ChooseColor), E("ChooseColorW", u_ChooseColor),
     E("ChooseFontA", u_ChooseFont), E("ChooseFontW", u_ChooseFont), E("ImmGetContext", u_ImmGetContext), E("ImmReleaseContext", u_ImmReleaseContext),
     E("ImmAssociateContext", u_ImmAssociateContext), E("ImmSetCompositionWindow", u_ImmSetCompositionWindow),
     E("SetProcessDpiAwareness", u_SetProcessDpiAwareness), E("GetDpiForMonitor", u_GetDpiForMonitor), E("GetScaleFactorForMonitor", u_GetScaleFactorForMonitor),

@@ -1,0 +1,13 @@
+# Not Defteri: type, "Farklı kaydet" through the common file dialog, check the window title.
+waitwin 1
+key 0x41 2
+text Soul test
+menu 5
+waitwin 2
+expect -1 Farklı Kaydet
+key 0x41 2
+text deneme
+key 0x0D
+waitwin 1
+expect 0 deneme.txt - Not Defteri
+close

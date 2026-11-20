@@ -3,12 +3,14 @@
 #define _UNICODE
 #include <windows.h>
 #include <stdio.h>
+#include <commdlg.h>
 
 #define IDC_EDIT 100
 #define IDM_NEW 1
 #define IDM_OPEN 2
 #define IDM_SAVE 3
 #define IDM_EXIT 4
+#define IDM_SAVEAS 5
 #define IDM_CUT 10
 #define IDM_COPY 11
 #define IDM_PASTE 12
@@ -36,6 +38,7 @@ static void update_status(void) {
     swprintf(s, 128, L"  %d karakter, %d satır  |  %ls", len, lines, g_path);
     SetWindowTextW(g_status, s);
 }
+static void set_title(HWND h, int dirty);
 static void save(HWND h) {
     int n = GetWindowTextLengthW(g_edit);
     wchar_t *buf = malloc(sizeof(wchar_t) * (size_t)(n + 1));
@@ -45,12 +48,37 @@ static void save(HWND h) {
     WideCharToMultiByte(CP_UTF8, 0, buf, n, u8, bytes, NULL, NULL);
     HANDLE f = CreateFileW(g_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
     if (f == INVALID_HANDLE_VALUE) { MessageBoxW(h, L"Dosya kaydedilemedi.", L"Not Defteri", MB_ICONERROR); }
-    else { DWORD w; WriteFile(f, u8, (DWORD)bytes, &w, NULL); CloseHandle(f); SendMessageW(g_edit, EM_SETMODIFY, FALSE, 0); SetWindowTextW(h, L"not.txt - Not Defteri"); }
+    else { DWORD w; WriteFile(f, u8, (DWORD)bytes, &w, NULL); CloseHandle(f); SendMessageW(g_edit, EM_SETMODIFY, FALSE, 0); set_title(h, 0); update_status(); }
     free(u8); free(buf);
+}
+static void file_name(wchar_t *out) {
+    const wchar_t *b = wcsrchr(g_path, L'\\');
+    wcscpy(out, b ? b + 1 : g_path);
+}
+static void set_title(HWND h, int dirty) {
+    wchar_t name[MAX_PATH], t[MAX_PATH + 32];
+    file_name(name);
+    swprintf(t, MAX_PATH + 32, L"%ls%ls - Not Defteri", dirty ? L"*" : L"", name);
+    SetWindowTextW(h, t);
+}
+static int choose(HWND h, int save) {
+    wchar_t buf[MAX_PATH];
+    file_name(buf);
+    OPENFILENAMEW o = { 0 };
+    o.lStructSize = sizeof o;
+    o.hwndOwner = h;
+    o.lpstrFilter = L"Metin belgeleri (*.txt)\0*.txt\0Tüm dosyalar (*.*)\0*.*\0";
+    o.lpstrFile = buf;
+    o.nMaxFile = MAX_PATH;
+    o.lpstrDefExt = L"txt";
+    o.Flags = save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST;
+    if (!(save ? GetSaveFileNameW(&o) : GetOpenFileNameW(&o))) return 0;
+    wcscpy(g_path, buf);
+    return 1;
 }
 static void load(HWND h) {
     HANDLE f = CreateFileW(g_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (f == INVALID_HANDLE_VALUE) { MessageBoxW(h, L"Henüz kaydedilmiş bir not yok.", L"Not Defteri", MB_ICONINFORMATION); return; }
+    if (f == INVALID_HANDLE_VALUE) { MessageBoxW(h, L"Dosya açılamadı.", L"Not Defteri", MB_ICONERROR); return; }
     DWORD size = GetFileSize(f, NULL), r;
     char *u8 = malloc(size + 1);
     ReadFile(f, u8, size, &r, NULL);
@@ -61,6 +89,8 @@ static void load(HWND h) {
     w[n] = 0;
     SetWindowTextW(g_edit, w);
     free(w); free(u8);
+    SendMessageW(g_edit, EM_SETMODIFY, FALSE, 0);
+    set_title(h, 0);
     update_status();
 }
 
@@ -87,11 +117,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case IDC_EDIT:
-            if (HIWORD(wp) == EN_CHANGE) { update_status(); SetWindowTextW(h, L"*not.txt - Not Defteri"); }
+            if (HIWORD(wp) == EN_CHANGE) { update_status(); set_title(h, SendMessageW(g_edit, EM_GETMODIFY, 0, 0) != 0); }
             break;
         case IDM_NEW: SetWindowTextW(g_edit, L""); update_status(); break;
-        case IDM_OPEN: load(h); break;
+        case IDM_OPEN: if (choose(h, 0)) load(h); break;
         case IDM_SAVE: save(h); break;
+        case IDM_SAVEAS: if (choose(h, 1)) save(h); break;
         case IDM_EXIT: SendMessageW(h, WM_CLOSE, 0, 0); break;
         case IDM_CUT: SendMessageW(g_edit, WM_CUT, 0, 0); break;
         case IDM_COPY: SendMessageW(g_edit, WM_COPY, 0, 0); break;
@@ -107,7 +138,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         case IDM_BIGGER: if (g_size < 48) { g_size += 4; set_font(); } break;
         case IDM_SMALLER: if (g_size > 10) { g_size -= 4; set_font(); } break;
-        case IDM_ABOUT: MessageBoxW(h, L"Soul ile iPad'de çalışan Windows not defteri.\nNotlar Belgeler\\not.txt dosyasına kaydedilir.", L"Not Defteri hakkında", MB_OK); break;
+        case IDM_ABOUT: MessageBoxW(h, L"Soul ile iPad'de çalışan Windows not defteri.\nNotlar varsayılan olarak Belgeler\\not.txt dosyasına kaydedilir.", L"Not Defteri hakkında", MB_OK); break;
         }
         return 0;
     case WM_CLOSE:
@@ -132,8 +163,9 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE prev, LPSTR cmd, int show) {
     RegisterClassW(&wc);
     HMENU bar = CreateMenu(), file = CreatePopupMenu(), edit = CreatePopupMenu(), view = CreatePopupMenu(), help = CreatePopupMenu();
     AppendMenuW(file, MF_STRING, IDM_NEW, L"&Yeni\tCtrl+N");
-    AppendMenuW(file, MF_STRING, IDM_OPEN, L"&Aç\tCtrl+O");
+    AppendMenuW(file, MF_STRING, IDM_OPEN, L"&Aç...\tCtrl+O");
     AppendMenuW(file, MF_STRING, IDM_SAVE, L"&Kaydet\tCtrl+S");
+    AppendMenuW(file, MF_STRING, IDM_SAVEAS, L"&Farklı kaydet...");
     AppendMenuW(file, MF_SEPARATOR, 0, NULL);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"Çı&kış");
     AppendMenuW(edit, MF_STRING, IDM_CUT, L"&Kes\tCtrl+X");

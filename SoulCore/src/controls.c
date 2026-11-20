@@ -2,6 +2,7 @@
 #include "gui.h"
 #include <ctype.h>
 #include <strings.h>
+#include <sys/stat.h>
 
 #define ARGI(n) ((int32_t)hle_arg(st, (n)))
 #define LOWORD(v) ((uint32_t)(v) & 0xFFFF)
@@ -1636,6 +1637,281 @@ HLE(c_GetNextDlgGroupItem) {
 }
 HLE(c_DlgDirListA) { RET(0); }
 
+// ---- common file dialogs (GetOpenFileName / GetSaveFileName) -------------------------------------
+// Drawn with Soul's own dialog and controls; lists the C: drive inside the app's container.
+
+typedef struct TB { uint16_t *b; size_t n, cap; } TB;
+static void tb_w(TB *t, uint16_t v) {
+    if (t->n == t->cap) { t->cap = t->cap ? t->cap * 2 : 256; t->b = realloc(t->b, t->cap * 2); }
+    t->b[t->n++] = v;
+}
+static void tb_dw(TB *t, uint32_t v) { tb_w(t, (uint16_t)v); tb_w(t, (uint16_t)(v >> 16)); }
+static void tb_str(TB *t, const char *s) { uint16_t *w = u2w_dup(s); for (uint16_t *q = w; *q; q++) tb_w(t, *q); tb_w(t, 0); free(w); }
+static void tb_item(TB *t, uint32_t style, int x, int y, int cx, int cy, uint16_t id, uint16_t cls, const char *text) {
+    if (t->n & 1) tb_w(t, 0);
+    tb_dw(t, style | WS_CHILD | WS_VISIBLE); tb_dw(t, 0);
+    tb_w(t, (uint16_t)x); tb_w(t, (uint16_t)y); tb_w(t, (uint16_t)cx); tb_w(t, (uint16_t)cy); tb_w(t, id);
+    tb_w(t, 0xFFFF); tb_w(t, cls);
+    tb_str(t, text);
+    tb_w(t, 0);
+}
+
+typedef struct FileDlg {
+    int wide, save;
+    uint8_t *ofn;
+    char dir[600];
+    char filter_name[16][96], filter_pat[16][96];
+    int nfilters, filter;
+    char **names;   // list box entries: "..", "[dir]" or file names
+    int nnames;
+} FileDlg;
+static FileDlg *g_fd;
+
+static uint64_t ofn_q(const uint8_t *o, int off) { uint64_t v; memcpy(&v, o + off, 8); return v; }
+static uint32_t ofn_d(const uint8_t *o, int off) { uint32_t v; memcpy(&v, o + off, 4); return v; }
+static int name_cmp(const void *a, const void *b) { return strcasecmp(*(char *const *)a, *(char *const *)b); }
+
+static void fd_fill(X86State *st, uint64_t hdlg) {
+    FileDlg *fd = g_fd;
+    Win *d = win_get(hdlg);
+    if (!d) return;
+    Win *lb = dlg_item(d, 1101), *path = dlg_item(d, 1100);
+    if (path) win_send_ex(st, path->hwnd, WM_SETTEXT, 0, (uint64_t)(uintptr_t)fd->dir, 0);
+    for (int i = 0; i < fd->nnames; i++) free(fd->names[i]);
+    free(fd->names);
+    fd->names = NULL; fd->nnames = 0;
+    char host[1100];
+    char **dirs = NULL, **files = NULL;
+    int nd = 0, nf = 0;
+    if (path_w2h(fd->dir, host, sizeof host) == 0) {
+        DIR *dp = opendir(host);
+        struct dirent *e;
+        while (dp && (e = readdir(dp))) {
+            if (e->d_name[0] == '.') continue;
+            char full[1400];
+            snprintf(full, sizeof full, "%s/%s", host, e->d_name);
+            struct stat sb;
+            if (stat(full, &sb) != 0) continue;
+            if (S_ISDIR(sb.st_mode)) { dirs = realloc(dirs, sizeof(char *) * (size_t)(nd + 1)); dirs[nd++] = strdup(e->d_name); continue; }
+            const char *pats = fd->nfilters ? fd->filter_pat[fd->filter] : "*.*";
+            char pat[96];
+            snprintf(pat, sizeof pat, "%s", pats);
+            int ok = 0;
+            for (char *tok = strtok(pat, ";"); tok && !ok; tok = strtok(NULL, ";")) { while (*tok == ' ') tok++; ok = wild_match(tok, e->d_name); }
+            if (ok) { files = realloc(files, sizeof(char *) * (size_t)(nf + 1)); files[nf++] = strdup(e->d_name); }
+        }
+        if (dp) closedir(dp);
+    }
+    if (nd) qsort(dirs, (size_t)nd, sizeof(char *), name_cmp);
+    if (nf) qsort(files, (size_t)nf, sizeof(char *), name_cmp);
+    int root = strlen(fd->dir) <= 3;
+    fd->names = malloc(sizeof(char *) * (size_t)(nd + nf + 1));
+    if (!root) fd->names[fd->nnames++] = strdup("..");
+    for (int i = 0; i < nd; i++) { char b[300]; snprintf(b, sizeof b, "[%s]", dirs[i]); fd->names[fd->nnames++] = strdup(b); free(dirs[i]); }
+    for (int i = 0; i < nf; i++) fd->names[fd->nnames++] = files[i];
+    free(dirs); free(files);
+    if (lb) {
+        win_send(st, lb->hwnd, 0x184, 0, 0); // LB_RESETCONTENT
+        for (int i = 0; i < fd->nnames; i++) win_send_ex(st, lb->hwnd, 0x180, 0, (uint64_t)(uintptr_t)fd->names[i], 0);
+    }
+}
+
+static void fd_enter(X86State *st, uint64_t hdlg, const char *name) {
+    FileDlg *fd = g_fd;
+    if (!strcmp(name, "..")) {
+        char *bs = strrchr(fd->dir, '\\');
+        if (bs && bs > fd->dir + 2) *bs = 0;
+        else fd->dir[3] = 0;
+    } else {
+        size_t n = strlen(fd->dir);
+        snprintf(fd->dir + n, sizeof fd->dir - n, "%s%s", fd->dir[n - 1] == '\\' ? "" : "\\", name);
+    }
+    fd_fill(st, hdlg);
+}
+
+// returns 1 when the dialog may close with the name in the edit box
+static int fd_accept(X86State *st, uint64_t hdlg) {
+    FileDlg *fd = g_fd;
+    Win *d = win_get(hdlg), *ed = d ? dlg_item(d, 1102) : NULL, *lb = d ? dlg_item(d, 1101) : NULL;
+    if (!ed) return 0;
+    char name[600];
+    snprintf(name, sizeof name, "%s", ed->text);
+    char *p = name;
+    while (*p == ' ') p++;
+    if (!*p && lb && lb->cur_sel >= 0 && lb->cur_sel < fd->nnames) {
+        const char *sel = fd->names[lb->cur_sel];
+        if (sel[0] == '[' || !strcmp(sel, "..")) { char dn[300]; snprintf(dn, sizeof dn, "%s", sel[0] == '[' ? sel + 1 : sel); if (dn[0] && dn[strlen(dn) - 1] == ']') dn[strlen(dn) - 1] = 0; fd_enter(st, hdlg, dn); return 0; }
+        p = (char *)sel;
+    }
+    if (!*p) return 0;
+    char full[1200];
+    if ((isalpha((unsigned char)p[0]) && p[1] == ':') || p[0] == '\\') snprintf(full, sizeof full, "%s", p);
+    else snprintf(full, sizeof full, "%s%s%s", fd->dir, fd->dir[strlen(fd->dir) - 1] == '\\' ? "" : "\\", p);
+    char host[1300];
+    struct stat sb;
+    if (path_w2h(full, host, sizeof host) == 0 && stat(host, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+        char norm[600];
+        path_normalize_win(full, norm, sizeof norm);
+        snprintf(fd->dir, sizeof fd->dir, "%s", norm);
+        win_send_ex(st, ed->hwnd, WM_SETTEXT, 0, (uint64_t)(uintptr_t)"", 0);
+        fd_fill(st, hdlg);
+        return 0;
+    }
+    const char *base = strrchr(full, '\\');
+    base = base ? base + 1 : full;
+    uint64_t defext = ofn_q(fd->ofn, 104);
+    if (!strchr(base, '.')) {
+        char *ext = NULL;
+        if (defext) ext = gstr(defext, fd->wide);
+        else if (fd->nfilters) { const char *pt = fd->filter_pat[fd->filter]; const char *dot = strchr(pt, '.'); if (dot && dot[1] && dot[1] != '*' && !strchr(dot, ';')) ext = strdup(dot + 1); }
+        if (ext && *ext) { size_t n = strlen(full); snprintf(full + n, sizeof full - n, ".%s", ext); }
+        free(ext);
+        base = strrchr(full, '\\'); base = base ? base + 1 : full;
+    }
+    uint32_t flags = ofn_d(fd->ofn, 96);
+    if (!fd->save && (flags & 0x1000) && !(path_w2h(full, host, sizeof host) == 0 && stat(host, &sb) == 0)) return 0; // OFN_FILEMUSTEXIST
+    uint64_t file = ofn_q(fd->ofn, 48);
+    uint32_t max = ofn_d(fd->ofn, 56);
+    if (file && max) {
+        char norm[1200];
+        path_normalize_win(full, norm, sizeof norm);
+        put_str(file, max, norm, fd->wide);
+        const char *b2 = strrchr(norm, '\\');
+        size_t off = b2 ? units(norm, fd->wide) - units(b2 + 1, fd->wide) : 0;
+        const char *dot = strrchr(norm, '.');
+        size_t ext_off = dot && (!b2 || dot > b2) ? units(norm, fd->wide) - units(dot + 1, fd->wide) : 0;
+        uint16_t o16 = (uint16_t)off, e16 = (uint16_t)ext_off;
+        memcpy(fd->ofn + 100, &o16, 2);
+        memcpy(fd->ofn + 102, &e16, 2);
+    }
+    uint64_t title = ofn_q(fd->ofn, 64);
+    uint32_t tmax = ofn_d(fd->ofn, 72);
+    if (title && tmax) put_str(title, tmax, base, fd->wide);
+    uint32_t idx = (uint32_t)fd->filter + 1;
+    memcpy(fd->ofn + 44, &idx, 4);
+    return 1;
+}
+
+HLE(c_FileDlgProc) {
+    uint64_t hdlg = ARG(0);
+    uint32_t msg = (uint32_t)ARG(1);
+    uint64_t wp = ARG(2);
+    FileDlg *fd = g_fd;
+    Win *d = win_get(hdlg);
+    if (!fd || !d) { RET(0); return; }
+    switch (msg) {
+    case WM_INITDIALOG: {
+        Win *cb = dlg_item(d, 1103), *ed = dlg_item(d, 1102);
+        for (int i = 0; i < fd->nfilters && cb; i++) win_send_ex(st, cb->hwnd, 0x143, 0, (uint64_t)(uintptr_t)fd->filter_name[i], 0);
+        if (cb && fd->nfilters) win_send(st, cb->hwnd, 0x14E, (uint64_t)fd->filter, 0);
+        uint64_t file = ofn_q(fd->ofn, 48);
+        if (file && ed) {
+            char *init = gstr(file, fd->wide);
+            if (init && *init) { const char *b = strrchr(init, '\\'); win_send_ex(st, ed->hwnd, WM_SETTEXT, 0, (uint64_t)(uintptr_t)(b ? b + 1 : init), 0); }
+            free(init);
+        }
+        fd_fill(st, hdlg);
+        if (ed) win_set_focus(st, ed->hwnd);
+        RET(0);
+        return;
+    }
+    case WM_COMMAND: {
+        uint32_t id = (uint32_t)(wp & 0xFFFF), code = (uint32_t)(wp >> 16) & 0xFFFF;
+        if (id == IDOK) { if (fd_accept(st, hdlg)) { d->dlg_ended = 1; d->dlg_result = 1; } RET(1); return; }
+        if (id == IDCANCEL) { d->dlg_ended = 1; d->dlg_result = 0; RET(1); return; }
+        if (id == 1101) {
+            Win *lb = dlg_item(d, 1101), *ed = dlg_item(d, 1102);
+            int i = lb ? lb->cur_sel : -1;
+            if (i < 0 || i >= fd->nnames) { RET(1); return; }
+            const char *n = fd->names[i];
+            int is_dir = n[0] == '[' || !strcmp(n, "..");
+            if (code == 1 && !is_dir && ed) win_send_ex(st, ed->hwnd, WM_SETTEXT, 0, (uint64_t)(uintptr_t)n, 0); // LBN_SELCHANGE
+            if (code == 2) { // LBN_DBLCLK
+                if (is_dir) {
+                    char dn[300];
+                    snprintf(dn, sizeof dn, "%s", n[0] == '[' ? n + 1 : n);
+                    if (dn[strlen(dn) - 1] == ']') dn[strlen(dn) - 1] = 0;
+                    fd_enter(st, hdlg, dn);
+                } else if (fd_accept(st, hdlg)) { d->dlg_ended = 1; d->dlg_result = 1; }
+            }
+            RET(1);
+            return;
+        }
+        if (id == 1103 && code == 1) { Win *cb = dlg_item(d, 1103); if (cb && cb->cur_sel >= 0) { fd->filter = cb->cur_sel; fd_fill(st, hdlg); } RET(1); return; }
+        RET(0);
+        return;
+    }
+    default: RET(0); return;
+    }
+}
+
+static void file_dialog(X86State *st, int wide, int save) {
+    uint8_t *ofn = PTR(0);
+    FileDlg fd;
+    memset(&fd, 0, sizeof fd);
+    fd.wide = wide; fd.save = save; fd.ofn = ofn;
+    // filters: "Name\0pattern\0...\0\0"
+    uint64_t f = ofn_q(ofn, 24);
+    while (f && fd.nfilters < 16) {
+        char *name = gstr(f, wide);
+        if (!name || !*name) { free(name); break; }
+        f += wide ? (wstrlen((const uint16_t *)(uintptr_t)f) + 1) * 2 : strlen((const char *)(uintptr_t)f) + 1;
+        char *pat = gstr(f, wide);
+        f += wide ? (wstrlen((const uint16_t *)(uintptr_t)f) + 1) * 2 : strlen((const char *)(uintptr_t)f) + 1;
+        snprintf(fd.filter_name[fd.nfilters], 96, "%s", name);
+        snprintf(fd.filter_pat[fd.nfilters], 96, "%s", pat ? pat : "*.*");
+        fd.nfilters++;
+        free(name); free(pat);
+    }
+    uint32_t idx = ofn_d(ofn, 44);
+    fd.filter = idx >= 1 && (int)idx <= fd.nfilters ? (int)idx - 1 : 0;
+    char *init = gstr(ofn_q(ofn, 80), wide), *file = gstr(ofn_q(ofn, 48), wide);
+    char cand[600] = "";
+    if (init && *init) snprintf(cand, sizeof cand, "%s", init);
+    else if (file && strchr(file, '\\')) { snprintf(cand, sizeof cand, "%s", file); *strrchr(cand, '\\') = 0; }
+    else snprintf(cand, sizeof cand, "C:\\users\\soul\\Documents");
+    path_normalize_win(cand, fd.dir, sizeof fd.dir);
+    char host[1100];
+    struct stat sb;
+    if (path_w2h(fd.dir, host, sizeof host) != 0 || stat(host, &sb) != 0 || !S_ISDIR(sb.st_mode)) snprintf(fd.dir, sizeof fd.dir, "%s", g_proc->cwd_win);
+    free(init); free(file);
+
+    char *title = gstr(ofn_q(ofn, 88), wide);
+    TB t = { 0 };
+    tb_dw(&t, 0x40 | 0x80 | 0x800 | WS_POPUP | WS_CAPTION | WS_SYSMENU); // DS_SETFONT | DS_MODALFRAME | DS_CENTER
+    tb_dw(&t, 0);
+    tb_w(&t, 10);
+    tb_w(&t, 0); tb_w(&t, 0); tb_w(&t, 300); tb_w(&t, 200);
+    tb_w(&t, 0); tb_w(&t, 0);
+    tb_str(&t, title && *title ? title : save ? "Farklı Kaydet" : "Aç");
+    tb_w(&t, 9);
+    tb_str(&t, "Segoe UI");
+    tb_item(&t, 0, 5, 6, 30, 10, 0xFFFF, 0x82, "Konum:");
+    tb_item(&t, 0x80, 38, 6, 257, 10, 1100, 0x82, "");
+    tb_item(&t, 0x1 | 0x100 | WS_VSCROLL | WS_BORDER | WS_TABSTOP, 5, 19, 290, 118, 1101, 0x83, "");
+    tb_item(&t, 0, 5, 145, 42, 10, 0xFFFF, 0x82, "Dosya adı:");
+    tb_item(&t, 0x80 | WS_BORDER | WS_TABSTOP, 48, 143, 247, 13, 1102, 0x81, "");
+    tb_item(&t, 0, 5, 163, 42, 10, 0xFFFF, 0x82, "Tür:");
+    tb_item(&t, 3 | WS_VSCROLL | WS_TABSTOP, 48, 161, 247, 80, 1103, 0x85, "");
+    tb_item(&t, 1 | WS_TABSTOP, 190, 181, 50, 14, IDOK, 0x80, save ? "Kaydet" : "Aç");
+    tb_item(&t, WS_TABSTOP, 245, 181, 50, 14, IDCANCEL, 0x80, "İptal");
+    free(title);
+    uint32_t id = hle_thunk_for(g_proc, c_FileDlgProc, "comdlg32", "SoulFileDialogProc");
+    uint64_t proc = g_proc->thunk_base + (uint64_t)id * SOUL_THUNK_STRIDE;
+    FileDlg *saved = g_fd;
+    g_fd = &fd;
+    int64_t r = dialog_box(st, 0, (const uint8_t *)t.b, ofn_q(ofn, 8), proc, 0, 1);
+    g_fd = saved;
+    for (int i = 0; i < fd.nnames; i++) free(fd.names[i]);
+    free(fd.names);
+    free(t.b);
+    RET(r == 1);
+}
+HLE(c_GetOpenFileNameA) { file_dialog(st, 0, 0); }
+HLE(c_GetOpenFileNameW) { file_dialog(st, 1, 0); }
+HLE(c_GetSaveFileNameA) { file_dialog(st, 0, 1); }
+HLE(c_GetSaveFileNameW) { file_dialog(st, 1, 1); }
+
 const HleEntry hle_controls_table[] = {
     { "DialogBoxParamA", c_DialogBoxParamA, NULL }, { "DialogBoxParamW", c_DialogBoxParamW, NULL },
     { "DialogBoxIndirectParamA", c_DialogBoxIndirectParamA, NULL }, { "DialogBoxIndirectParamW", c_DialogBoxIndirectParamW, NULL },
@@ -1650,6 +1926,7 @@ const HleEntry hle_controls_table[] = {
     { "SendDlgItemMessageA", c_SendDlgItemMessageA, NULL }, { "SendDlgItemMessageW", c_SendDlgItemMessageW, NULL },
     { "MapDialogRect", c_MapDialogRect, NULL }, { "GetDialogBaseUnits", c_GetDialogBaseUnits, NULL },
     { "GetNextDlgTabItem", c_GetNextDlgTabItem, NULL }, { "GetNextDlgGroupItem", c_GetNextDlgGroupItem, NULL },
-    { "DlgDirListA", c_DlgDirListA, NULL },
+    { "DlgDirListA", c_DlgDirListA, NULL }, { "GetOpenFileNameA", c_GetOpenFileNameA, NULL }, { "GetOpenFileNameW", c_GetOpenFileNameW, NULL },
+    { "GetSaveFileNameA", c_GetSaveFileNameA, NULL }, { "GetSaveFileNameW", c_GetSaveFileNameW, NULL },
     { NULL, NULL, NULL }
 };

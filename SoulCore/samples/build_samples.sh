@@ -18,7 +18,7 @@ $CXX -O2 -s -static -o "$OUT/CppDemo.exe" cppdemo.cpp
 $CC -O2 -s -mwindows -o "$OUT/Cizim.exe" cizim.c
 $CC -O2 -s -mwindows -o "$OUT/Saat.exe" saat.c -lm
 $CC -O2 -s -mwindows -o "$OUT/HesapMakinesiGUI.exe" hesapgui.c
-$CC -O2 -s -mwindows -o "$OUT/NotDefteri.exe" notdefteri.c
+$CC -O2 -s -mwindows -o "$OUT/NotDefteri.exe" notdefteri.c -lcomdlg32
 $CC -O2 -s -mwindows -o "$OUT/Yilan.exe" yilan.c
 $CC -O2 -s -mwindows -o "$OUT/MayinTarlasi.exe" mayin.c
 cp samples.json "$OUT/samples.json"

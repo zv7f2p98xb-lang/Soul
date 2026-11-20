@@ -155,7 +155,7 @@ static void *script_main(void *arg) {
             if (i < 0) continue;
             int vk = (int)strtol(a, NULL, 0), mods = (int)strtol(b[0] ? b : "0", NULL, 0);
             soul_gui_event(g_p, w[i].hwnd, SOUL_GUI_KEY, 1, mods, vk, 0, NULL);
-            soul_gui_event(g_p, w[i].hwnd, SOUL_GUI_KEY, 0, mods, vk, 0, NULL);
+            soul_gui_event(g_p, w[i].hwnd, SOUL_GUI_KEY, 0, 0, vk, 0, NULL); // modifiers are released with the key
             settle();
             continue;
         }
