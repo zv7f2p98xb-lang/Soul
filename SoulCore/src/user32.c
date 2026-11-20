@@ -2651,6 +2651,17 @@ void gui_reset(void) {
     builtin_class("ComboBox", CTL_COMBOBOX, 0x4008 | 3, 0, 0);
     builtin_class("ComboLBox", CTL_LISTBOX, 0x4008 | 3, 0, 0);
     builtin_class("msctls_progress32", CTL_PROGRESS, 3, 0, 0);
+    builtin_class("msctls_statusbar32", CTL_STATUS, 0x4008 | 3, 0, 0);
+    builtin_class("msctls_trackbar32", CTL_TRACKBAR, 0x4008 | 3, 0, 0);
+    builtin_class("tooltips_class32", CTL_TOOLTIP, 0, 0, 0);
+    builtin_class("RichEdit20W", CTL_EDIT, 0x4008 | 3, 0, 0);
+    builtin_class("RichEdit20A", CTL_EDIT, 0x4008 | 3, 0, 0);
+    builtin_class("RICHEDIT50W", CTL_EDIT, 0x4008 | 3, 0, 0);
+    builtin_class("RichEdit", CTL_EDIT, 0x4008 | 3, 0, 0);
+    static const char *generic[] = { "SysListView32", "SysTreeView32", "SysTabControl32", "ToolbarWindow32", "ReBarWindow32",
+                                     "msctls_updown32", "SysLink", "SysDateTimePick32", "SysMonthCal32", "msctls_hotkey32",
+                                     "SysIPAddress32", "SysHeader32", "SysAnimate32", "ScrollBar", "SysPager", "NativeFontCtl", NULL };
+    for (int i = 0; generic[i]; i++) builtin_class(generic[i], CTL_GENERIC, 0x4008 | 3, 0, 0);
     builtin_class("#32770", CTL_DIALOG, 0x0008, COLOR_BTNFACE + 1, 48);
     g_wm_count = 0;
     g_wm_next = 0xC100;
@@ -2713,7 +2724,7 @@ int soul_gui_windows(SoulProcess *p, SoulWindowInfo *out, int max) {
     int count = 0;
     for (int i = 0; i < WIN_MAX; i++) {
         Win *w = &g->wins[i];
-        if (w->used && !w->parent && w->visible && !w->message_only && w->pixels) list[count++] = w;
+        if (w->used && !w->parent && w->visible && !w->message_only && w->pixels && w->ctl != CTL_TOOLTIP) list[count++] = w;
     }
     for (int a = 1; a < count; a++) for (int b = a; b > 0; b--) {
         int swap = list[b - 1]->zstamp > list[b]->zstamp ||

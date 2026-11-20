@@ -8,7 +8,7 @@
 #define IDC_NAME 1001
 #define IDC_AGREE 1002
 
-static HWND g_edit, g_list, g_check, g_combo, g_progress, g_button;
+static HWND g_edit, g_list, g_check, g_combo, g_progress, g_button, g_status, g_track;
 static int g_ticks;
 static char g_name[64] = "";
 
@@ -92,6 +92,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         g_list = CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", NULL, WS_CHILD | WS_VISIBLE | LBS_NOTIFY, 10, 74, 270, 120, h, (HMENU)104, hi, NULL);
         g_combo = CreateWindowA("COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 10, 204, 270, 200, h, (HMENU)105, hi, NULL);
         g_progress = CreateWindowA("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 10, 244, 270, 18, h, (HMENU)106, hi, NULL);
+        g_track = CreateWindowA(TRACKBAR_CLASSA, NULL, WS_CHILD | WS_VISIBLE, 10, 266, 270, 26, h, (HMENU)107, hi, NULL);
+        SendMessageA(g_track, TBM_SETRANGE, TRUE, MAKELPARAM(0, 50));
+        g_status = CreateWindowA(STATUSCLASSNAMEA, "Hazır", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, h, (HMENU)108, hi, NULL);
+        int parts[2] = { 200, -1 };
+        SendMessageA(g_status, SB_SETPARTS, 2, (LPARAM)parts);
+        SendMessageA(g_status, SB_SETTEXTA, 1, (LPARAM)"Soul");
         for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) SendMessageA(c, WM_SETFONT, (WPARAM)gui, TRUE);
         SendMessageA(g_combo, CB_ADDSTRING, 0, (LPARAM)"Kırmızı");
         SendMessageA(g_combo, CB_ADDSTRING, 0, (LPARAM)"Yeşil");
@@ -163,12 +169,28 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
         printf("click %d,%d\n", (short)LOWORD(lp), (short)HIWORD(lp));
         return 0;
+    case WM_SIZE: SendMessageA(g_status, WM_SIZE, 0, 0); return 0;
+    case WM_HSCROLL:
+        if ((HWND)lp == g_track && LOWORD(wp) == TB_ENDTRACK) {
+            char t[64];
+            int pos = (int)SendMessageA(g_track, TBM_GETPOS, 0, 0);
+            snprintf(t, sizeof t, "Konum %d", pos);
+            SendMessageA(g_status, SB_SETTEXTA, 0, (LPARAM)t);
+            printf("track %d\n", pos);
+        }
+        return 0;
     case WM_KEYDOWN:
         if (wp == 'N' && (GetKeyState(VK_CONTROL) & 0x8000)) printf("ctrl+n\n");
         return 0;
     case WM_PAINT: paint(h); return 0;
     case WM_CLOSE: printf("close\n"); DestroyWindow(h); return 0;
-    case WM_DESTROY: printf("destroy ticks=%d\n", g_ticks); PostQuitMessage(7); return 0;
+    case WM_DESTROY: {
+        char t[64] = "";
+        SendMessageA(g_status, SB_GETTEXTA, 0, (LPARAM)t);
+        printf("destroy ticks=%d status=\"%s\"\n", g_ticks, t);
+        PostQuitMessage(7);
+        return 0;
+    }
     }
     return DefWindowProcA(h, m, wp, lp);
 }

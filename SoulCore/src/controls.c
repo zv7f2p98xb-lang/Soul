@@ -1203,8 +1203,178 @@ static uint64_t progress_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, u
     return (uint64_t)old;
 }
 
+// ---- status bar (msctls_statusbar32) ----------------------------------------------------------------
+
+static void status_place(X86State *st, Win *w) {
+    Win *p = win_get(w->parent);
+    if (!p || (w->style & 0x4)) return; // CCS_NORESIZE
+    int h = line_height(w) + 8;
+    if (w->x != 0 || w->y != p->h - h || w->w != p->w || w->h != h) win_move(st, w, 0, p->h - h, p->w, h, 0);
+}
+static void status_set_part(Win *w, int part, const char *text) {
+    while (w->item_count <= part) item_insert(w, -1, "", 0);
+    free(w->items[part]);
+    w->items[part] = strdup(text ? text : "");
+    if (part == 0) win_set_text(w, text ? text : "");
+}
+static uint64_t status_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint64_t lp, int unicode) {
+    switch (msg) {
+    case WM_CREATE: { char *t = strdup(w->text); status_set_part(w, 0, t); free(t); status_place(st, w); return 0; }
+    case WM_SIZE: status_place(st, w); return 0;
+    case WM_PAINT: {
+        Paint p = ctl_begin(st, w, 0);
+        gdi_fill_rect_px(p.hdc, 0, 0, w->w, w->h, gui_sys_color(COLOR_BTNFACE));
+        gdi_fill_rect_px(p.hdc, 0, 0, w->w, 1, 0xD7D7D7);
+        int x = 0;
+        int n = w->item_count ? w->item_count : 1;
+        for (int i = 0; i < n; i++) {
+            int right = w->item_data && i < w->item_count && (int32_t)w->item_data[i] >= 0 && i + 1 < n ? (int)(int32_t)w->item_data[i] : w->w;
+            const char *t = w->item_count ? w->items[i] : w->text;
+            set_text_color(p.hdc, 0x000000);
+            text_in_rect(p.hdc, t, x + 6, 1, right - 4, w->h, 0x20 | 4 | 0x800);
+            if (right < w->w) gdi_fill_rect_px(p.hdc, right - 1, 4, right, w->h - 3, 0xC8C8C8);
+            x = right;
+        }
+        ctl_end(&p);
+        return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_SETTEXT: { char *t = lp ? gstr(lp, unicode) : strdup(""); status_set_part(w, 0, t); free(t); win_invalidate_rect(w, NULL, 1); return 1; }
+    case 0x401: case 0x40B: { // SB_SETTEXTA / W
+        char *t = lp ? gstr(lp, msg == 0x40B ? 1 : unicode) : strdup("");
+        status_set_part(w, (int)(wp & 0xFF), t);
+        free(t);
+        win_invalidate_rect(w, NULL, 1);
+        return 1;
+    }
+    case 0x402: case 0x40D: { int i = (int)(wp & 0xFF); const char *t = i < w->item_count ? w->items[i] : ""; put_str(lp, 1u << 20, t, msg == 0x40D ? 1 : unicode); return units(t, msg == 0x40D); }
+    case 0x403: case 0x40C: { int i = (int)(wp & 0xFF); return i < w->item_count ? units(w->items[i], msg == 0x40C) : 0; }
+    case 0x404: { // SB_SETPARTS
+        int n = (int)wp;
+        for (int i = 0; i < n && i < 32; i++) {
+            while (w->item_count <= i) item_insert(w, -1, "", 0);
+            w->item_data[i] = (uint64_t)(int64_t)(int32_t)mem_rd(lp + 4u * (uint64_t)i, 4);
+        }
+        win_invalidate_rect(w, NULL, 1);
+        return 1;
+    }
+    case 0x406: { int n = w->item_count; for (int i = 0; i < n && i < (int)wp; i++) mem_wr(lp + 4u * (uint64_t)i, 4, w->item_data[i]); return (uint64_t)n; } // SB_GETPARTS
+    case 0x40A: { int32_t r[4] = { 0, 0, w->w, w->h }; if (lp) memcpy((void *)(uintptr_t)lp, r, 16); return 1; } // SB_GETRECT
+    case 0x408: case 0x409: case 0x40F: case 0x410: case 0x2001: return 0;
+    default: return win_def_proc(st, w, msg, wp, lp, unicode);
+    }
+}
+
+// ---- trackbar (msctls_trackbar32) ------------------------------------------------------------------
+
+static int tb_vert(Win *w) { return (w->style & 2) != 0; }
+static int tb_pos_from(Win *w, int x, int y) {
+    int len = (tb_vert(w) ? w->h : w->w) - 16, at = (tb_vert(w) ? y : x) - 8;
+    if (len < 1) len = 1;
+    if (at < 0) at = 0;
+    if (at > len) at = len;
+    return w->progress_min + (int)((int64_t)at * (w->progress_max - w->progress_min) / len + 0);
+}
+static void tb_notify(X86State *st, Win *w, int code) {
+    if (!w->parent) return;
+    win_send(st, w->parent, tb_vert(w) ? WM_VSCROLL : WM_HSCROLL, (uint64_t)(code | ((uint32_t)(uint16_t)w->progress_pos << 16)), w->hwnd);
+}
+static uint64_t trackbar_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint64_t lp, int unicode) {
+    GuiState *g = gui();
+    switch (msg) {
+    case WM_NCCREATE: w->progress_max = 100; return 1;
+    case WM_PAINT: {
+        Paint p = ctl_begin(st, w, WM_CTLCOLORSTATIC);
+        if (p.has_bg) gdi_fill_rect_px(p.hdc, 0, 0, w->w, w->h, p.bg);
+        int range = w->progress_max - w->progress_min;
+        int len = (tb_vert(w) ? w->h : w->w) - 16;
+        int at = 8 + (range > 0 ? (int)((int64_t)(w->progress_pos - w->progress_min) * len / range) : 0);
+        uint32_t accent = w->enabled ? 0xD77800 : 0xA0A0A0;
+        if (tb_vert(w)) {
+            int cx = w->w / 2;
+            gdi_fill_rect_px(p.hdc, cx - 2, 8, cx + 2, w->h - 8, 0xC8C8C8);
+            gdi_fill_rect_px(p.hdc, cx - 2, 8, cx + 2, at, accent);
+            gdi_fill_rect_px(p.hdc, cx - 10, at - 5, cx + 10, at + 5, w->enabled ? 0xF7E4CC : 0xE0E0E0);
+            gdi_frame_rect_px(p.hdc, cx - 10, at - 5, cx + 10, at + 5, accent);
+        } else {
+            int cy = w->h / 2;
+            gdi_fill_rect_px(p.hdc, 8, cy - 2, w->w - 8, cy + 2, 0xC8C8C8);
+            gdi_fill_rect_px(p.hdc, 8, cy - 2, at, cy + 2, accent);
+            gdi_fill_rect_px(p.hdc, at - 5, cy - 10, at + 5, cy + 10, w->enabled ? 0xF7E4CC : 0xE0E0E0);
+            gdi_frame_rect_px(p.hdc, at - 5, cy - 10, at + 5, cy + 10, accent);
+        }
+        ctl_end(&p);
+        return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_LBUTTONDOWN: case WM_MOUSEMOVE:
+        if (msg == WM_MOUSEMOVE && !w->tracking) return 0;
+        if (msg == WM_LBUTTONDOWN) { w->tracking = 1; g->capture = w->hwnd; if (g->focus != w->hwnd) win_set_focus(st, w->hwnd); }
+        {
+            int pos = tb_pos_from(w, (int16_t)LOWORD(lp), (int16_t)HIWORD(lp));
+            if (pos != w->progress_pos) { w->progress_pos = pos; win_invalidate_rect(w, NULL, 1); tb_notify(st, w, 5); } // TB_THUMBTRACK
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (!w->tracking) return 0;
+        w->tracking = 0;
+        if (g->capture == w->hwnd) g->capture = 0;
+        tb_notify(st, w, 4); // TB_THUMBPOSITION
+        if (win_get(w->hwnd)) tb_notify(st, w, 8); // TB_ENDTRACK
+        return 0;
+    case WM_KEYDOWN: {
+        int d = (wp == VK_LEFT || wp == VK_UP) ? -1 : (wp == VK_RIGHT || wp == VK_DOWN) ? 1 : 0;
+        if (!d) return 0;
+        int pos = w->progress_pos + d * (w->top_index > 0 ? w->top_index : 1);
+        if (pos < w->progress_min) pos = w->progress_min;
+        if (pos > w->progress_max) pos = w->progress_max;
+        if (pos != w->progress_pos) { w->progress_pos = pos; win_invalidate_rect(w, NULL, 1); tb_notify(st, w, d < 0 ? 0 : 1); tb_notify(st, w, 8); }
+        return 0;
+    }
+    case WM_GETDLGCODE: return 1;
+    case 0x400: return (uint64_t)(int64_t)w->progress_pos;
+    case 0x401: return (uint64_t)(int64_t)w->progress_min;
+    case 0x402: return (uint64_t)(int64_t)w->progress_max;
+    case 0x405: w->progress_pos = (int)(int32_t)lp; goto clamp;
+    case 0x406: w->progress_min = (int)(int16_t)LOWORD(lp); w->progress_max = (int)(int16_t)HIWORD(lp); goto clamp;
+    case 0x407: w->progress_min = (int)(int32_t)lp; goto clamp;
+    case 0x408: w->progress_max = (int)(int32_t)lp; goto clamp;
+    case 0x417: w->top_index = (int)(int32_t)lp; return 1;
+    case 0x414: case 0x415: case 0x404: case 0x40B: case 0x40C: case 0x420: return 0;
+    default: return win_def_proc(st, w, msg, wp, lp, unicode);
+    }
+clamp:
+    if (w->progress_pos < w->progress_min) w->progress_pos = w->progress_min;
+    if (w->progress_pos > w->progress_max) w->progress_pos = w->progress_max;
+    win_invalidate_rect(w, NULL, 1);
+    return 0;
+}
+
+// ---- common controls Soul does not implement yet: an empty panel so that creation succeeds -------
+
+static uint64_t generic_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint64_t lp, int unicode) {
+    switch (msg) {
+    case WM_PAINT: {
+        Paint p = ctl_begin(st, w, 0);
+        gdi_fill_rect_px(p.hdc, 0, 0, w->w, w->h, 0xFFFFFF);
+        gdi_frame_rect_px(p.hdc, 0, 0, w->w, w->h, 0xD0D0D0);
+        ctl_end(&p);
+        return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_NCCREATE: case WM_SETTEXT: case WM_GETTEXT: case WM_GETTEXTLENGTH: case WM_SETFONT: case WM_GETFONT:
+    case WM_SIZE: case WM_MOVE: case WM_DESTROY: case WM_NCDESTROY: case WM_CREATE: case WM_WINDOWPOSCHANGED: case WM_SHOWWINDOW:
+        return win_def_proc(st, w, msg, wp, lp, unicode);
+    default: return msg >= WM_USER ? 0 : win_def_proc(st, w, msg, wp, lp, unicode);
+    }
+}
+
 uint64_t ctl_proc(X86State *st, Win *w, int ctl, uint32_t msg, uint64_t wp, uint64_t lp, int unicode) {
     switch (ctl) {
+    case CTL_STATUS: return status_proc(st, w, msg, wp, lp, unicode);
+    case CTL_TRACKBAR: return trackbar_proc(st, w, msg, wp, lp, unicode);
+    case CTL_TOOLTIP: return msg >= WM_USER ? 0 : win_def_proc(st, w, msg, wp, lp, unicode);
+    case CTL_GENERIC: return generic_proc(st, w, msg, wp, lp, unicode);
     case CTL_BUTTON: return button_proc(st, w, msg, wp, lp, unicode);
     case CTL_STATIC: return static_proc(st, w, msg, wp, lp, unicode);
     case CTL_EDIT: return edit_proc(st, w, msg, wp, lp, unicode);

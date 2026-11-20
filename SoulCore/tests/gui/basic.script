@@ -5,6 +5,8 @@ menus
 pixel 350 50 1E78DC
 pixel 10 60 F0F0F0
 dump basic1.ppm
+pixel 100 310 F0F0F0
+pixel 2 295 D7D7D7
 click 60 20
 text Merhaba
 click 240 22
@@ -15,6 +17,7 @@ click 240 22
 click 40 85
 click 100 215
 popup 3
+click 145 279
 menu 302
 menu 301
 waitwin 2

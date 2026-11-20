@@ -134,18 +134,15 @@ jobs:
           sleep 2
           xcrun simctl io "$UDID" screenshot sim-results/gui.png
           for f in "$DATA"/Documents/Soul/autorun/*.exe.png; do [ -f "$f" ] && cp "$f" sim-results/; done
-          for f in sim-results/*.exe.png; do
-            [ -f "$f" ] || continue
-            b=$(basename "$f" .png)
-            sips -s format jpeg -s formatOptions 50 "$f" --out "sim-results/$b-small.jpg" >/dev/null
-            echo "=====BEGIN $b.jpg"; base64 -i "sim-results/$b-small.jpg" | fold -w 4000; echo "=====END $b.jpg"
-          done
-          for n in console library gui; do
-            sips -Z 1000 -s format jpeg -s formatOptions 45 "sim-results/$n.png" --out "sim-results/$n-small.jpg" >/dev/null
-            echo "=====BEGIN $n.jpg"; base64 -i "sim-results/$n-small.jpg" | fold -w 4000; echo "=====END $n.jpg"
-          done
           echo "===== summary"; cat sim-results/summary.txt
           for f in sim-results/*.log; do echo "===== $f"; cat "$f"; done
+          # pictures last (and small) so that the end of the log shows them
+          for n in console library gui; do
+            sips -Z 900 -s format jpeg -s formatOptions 35 "sim-results/$n.png" --out "sim-results/$n-small.jpg" >/dev/null
+          done
+          for n in library console gui; do
+            echo "=====BEGIN $n.jpg"; base64 -i "sim-results/$n-small.jpg" | fold -w 8000; echo "=====END $n.jpg"
+          done
           test -f sim-results/summary.txt
           ! grep -E "FAILED|TIMEOUT|MISSING" sim-results/summary.txt
       - uses: actions/upload-artifact@v4
