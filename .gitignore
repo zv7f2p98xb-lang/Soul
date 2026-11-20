@@ -1,0 +1,6 @@
+build/
+SoulCore/build/
+*.xcodeproj/xcuserdata/
+DerivedData/
+.DS_Store
+*.ipa

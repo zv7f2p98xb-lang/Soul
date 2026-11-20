@@ -1,0 +1,608 @@
+// SoulCore - HLE core: import thunks, handles, paths, strings, console streams.
+#include "hle.h"
+#include <ctype.h>
+#include <errno.h>
+#include <strings.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+static HleState g_hs;
+HleState *hs(void) { return &g_hs; }
+X86State *hle_state_of(void) { return g_proc ? g_proc->main_state : NULL; }
+
+// ---- registry --------------------------------------------------------------
+
+static const char *const k_system_dlls[] = {
+    "kernel32", "kernelbase", "ntdll", "msvcrt", "ucrtbase", "ucrtbased", "vcruntime140", "vcruntime140d",
+    "vcruntime140_1", "msvcr80", "msvcr90", "msvcr100", "msvcr110", "msvcr120", "crtdll",
+    "user32", "gdi32", "advapi32", "shell32", "ole32", "oleaut32", "shlwapi", "ws2_32", "wsock32", "winmm",
+    "comctl32", "comdlg32", "version", "imm32", "uxtheme", "dwmapi", "setupapi", "bcrypt", "bcryptprimitives",
+    "crypt32", "psapi", "dbghelp", "winhttp", "wininet", "iphlpapi", "secur32", "userenv", "rpcrt4",
+    "d3d9", "d3d11", "d3d12", "dxgi", "opengl32", "glu32", "xinput1_3", "xinput1_4", "xinput9_1_0", "dsound",
+    "dinput8", "hid", "powrprof", "mpr", "netapi32", "wtsapi32", "normaliz", "sechost", "cfgmgr32", NULL
+};
+
+static void dll_key(const char *dll, char *out, size_t n) {
+    size_t i = 0;
+    for (; dll[i] && i + 1 < n; i++) out[i] = (char)tolower((unsigned char)dll[i]);
+    out[i] = 0;
+    char *dot = strrchr(out, '.');
+    if (dot && (strcmp(dot, ".dll") == 0 || strcmp(dot, ".drv") == 0)) *dot = 0;
+}
+
+int hle_is_system_dll(const char *dll) {
+    char k[128];
+    dll_key(dll, k, sizeof k);
+    if (strncmp(k, "api-ms-win-", 11) == 0 || strncmp(k, "ext-ms-", 7) == 0) return 1;
+    for (int i = 0; k_system_dlls[i]; i++)
+        if (strcmp(k, k_system_dlls[i]) == 0) return 1;
+    return 0;
+}
+
+static const HleEntry *find_entry(const char *name) {
+    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_misc_table };
+    for (int t = 0; t < 3; t++)
+        for (const HleEntry *e = tables[t]; e->name; e++)
+            if (strcmp(e->name, name) == 0) return e;
+    return NULL;
+}
+
+uint32_t hle_thunk_for(SoulProcess *p, HleFn fn, const char *dll, const char *name) {
+    for (uint32_t i = 1; i < p->thunk_count; i++) {
+        HleThunk *t = &p->thunks[i];
+        if (t->fn == fn && t->name && name && strcmp(t->name, name) == 0) return i;
+    }
+    if (p->thunk_count >= SOUL_MAX_THUNKS) return 0;
+    uint32_t id = p->thunk_count++;
+    HleThunk *t = &p->thunks[id];
+    t->fn = fn;
+    t->dll = dll ? strdup(dll) : NULL;
+    t->name = name ? strdup(name) : NULL;
+    uint8_t *c = p->thunk_mem + (size_t)id * SOUL_THUNK_STRIDE;
+    c[0] = 0xCC; c[1] = 0x53; c[2] = 0x43;
+    memcpy(c + 3, &id, 4);
+    c[7] = 0xC3;
+    return id;
+}
+
+static void hle_unimplemented(X86State *st) {
+    SoulProcess *p = g_proc;
+    HleThunk *t = &p->thunks[st->thread->cur_thunk];
+    if (!t->warned) {
+        t->warned = 1;
+        soul_log("[api] Uygulanmamış işlev çağrıldı: %s!%s (0 döndürülüyor)\n", t->dll ? t->dll : "?", t->name ? t->name : "?");
+    }
+    RET(0);
+}
+
+uint64_t hle_get_proc(SoulProcess *p, const char *dll, const char *name) {
+    const HleEntry *e = find_entry(name);
+    if (!e) return 0;
+    if (e->data) return (uint64_t)(uintptr_t)e->data();
+    uint32_t id = hle_thunk_for(p, e->fn, dll, name);
+    return id ? p->thunk_base + (uint64_t)id * SOUL_THUNK_STRIDE : 0;
+}
+
+uint64_t hle_resolve_import(SoulProcess *p, const char *dll, const char *name, int ordinal) {
+    if (!hle_is_system_dll(dll)) {
+        PEModule *m = pe_find_loaded(p, dll);
+        if (m) {
+            uint64_t a = pe_find_export(m, name, ordinal);
+            if (a) return a;
+        }
+    }
+    if (name) {
+        uint64_t a = hle_get_proc(p, dll, name);
+        if (a) return a;
+    }
+    char label[300];
+    if (name) snprintf(label, sizeof label, "%s", name);
+    else snprintf(label, sizeof label, "#%d", ordinal);
+    if (p->verbose) soul_log("[yükleyici] Taklit edilmeyen içe aktarım: %s!%s\n", dll, label);
+    uint32_t id = hle_thunk_for(p, hle_unimplemented, dll, label);
+    return id ? p->thunk_base + (uint64_t)id * SOUL_THUNK_STRIDE : 0;
+}
+
+void hle_invoke(X86State *st, uint32_t id) {
+    SoulProcess *p = g_proc;
+    if (id == 0 || id >= p->thunk_count) soul_fatal(st, "Geçersiz API köprüsü #%u", id);
+    HleThunk *t = &p->thunks[id];
+    SoulThread *th = st->thread;
+    uint32_t prev = th->cur_thunk;
+    th->skip_ret = 0;
+    th->cur_thunk = id;
+    g_hs.api_calls++;
+    t->fn(st);
+    th->cur_thunk = prev;
+    if (!th->skip_ret) st->rip = pop64(st);
+    th->skip_ret = 0;
+}
+
+// ---- handles -----------------------------------------------------------------
+
+uint64_t h_alloc(HType t, HObj **out) {
+    for (int i = 0; i < MAX_HANDLES; i++) {
+        if (g_hs.handles[i].type == H_FREE) {
+            memset(&g_hs.handles[i], 0, sizeof(HObj));
+            g_hs.handles[i].type = t;
+            g_hs.handles[i].fd = -1;
+            if (out) *out = &g_hs.handles[i];
+            return HANDLE_BASE + (uint64_t)i * 4;
+        }
+    }
+    return 0;
+}
+
+HObj *h_get(uint64_t h) {
+    if ((int64_t)h >= -12 && (int64_t)h <= -10) h = h_std((int)(-10 - (int64_t)h));
+    if (h < HANDLE_BASE) return NULL;
+    uint64_t i = (h - HANDLE_BASE) / 4;
+    if (i >= MAX_HANDLES || (h - HANDLE_BASE) % 4) return NULL;
+    HObj *o = &g_hs.handles[i];
+    return o->type == H_FREE ? NULL : o;
+}
+
+void h_free(uint64_t h) {
+    HObj *o = h_get(h);
+    if (!o) return;
+    if (o->type == H_CONIN || o->type == H_CONOUT || o->type == H_CONERR) return; // console handles stay
+    if (o->fd >= 0) close(o->fd);
+    if (o->dir) closedir(o->dir);
+    if (o->type == H_MAPPING && o->ptr) free(o->ptr);
+    memset(o, 0, sizeof *o);
+}
+
+uint64_t h_std(int which) { return g_hs.std_handles[which]; }
+
+void set_last_error(X86State *st, uint32_t e) {
+    if (st && st->gs_base) mem_wr(st->gs_base + 0x68, 4, e);
+}
+uint32_t get_last_error(X86State *st) {
+    return (st && st->gs_base) ? (uint32_t)mem_rd(st->gs_base + 0x68, 4) : 0;
+}
+
+uint32_t errno_to_win(int e) {
+    switch (e) {
+    case 0: return 0;
+    case ENOENT: return ERROR_FILE_NOT_FOUND;
+    case ENOTDIR: return ERROR_PATH_NOT_FOUND;
+    case EACCES: case EPERM: case EISDIR: case EROFS: return ERROR_ACCESS_DENIED;
+    case EEXIST: return ERROR_ALREADY_EXISTS;
+    case ENOTEMPTY: return ERROR_DIR_NOT_EMPTY;
+    case EBADF: return ERROR_INVALID_HANDLE;
+    case ENOMEM: return ERROR_NOT_ENOUGH_MEMORY;
+    case ENOSPC: return 112;
+    case EPIPE: return ERROR_BROKEN_PIPE;
+    default: return ERROR_INVALID_PARAMETER;
+    }
+}
+
+// ---- strings ----------------------------------------------------------------
+
+size_t wstrlen(const uint16_t *w) {
+    size_t n = 0;
+    while (w[n]) n++;
+    return n;
+}
+
+size_t w2u(const uint16_t *w, long wlen, char *out, size_t outcap) {
+    size_t o = 0;
+    long i = 0;
+    for (;;) {
+        if (wlen >= 0 ? i >= wlen : !w[i]) break;
+        uint32_t c = w[i++];
+        if (c >= 0xD800 && c < 0xDC00 && (wlen < 0 ? w[i] != 0 : i < wlen) && w[i] >= 0xDC00 && w[i] < 0xE000) {
+            c = 0x10000 + ((c - 0xD800) << 10) + (w[i++] - 0xDC00);
+        }
+        char tmp[4];
+        int n;
+        if (c < 0x80) { tmp[0] = (char)c; n = 1; }
+        else if (c < 0x800) { tmp[0] = (char)(0xC0 | (c >> 6)); tmp[1] = (char)(0x80 | (c & 0x3F)); n = 2; }
+        else if (c < 0x10000) { tmp[0] = (char)(0xE0 | (c >> 12)); tmp[1] = (char)(0x80 | ((c >> 6) & 0x3F)); tmp[2] = (char)(0x80 | (c & 0x3F)); n = 3; }
+        else { tmp[0] = (char)(0xF0 | (c >> 18)); tmp[1] = (char)(0x80 | ((c >> 12) & 0x3F)); tmp[2] = (char)(0x80 | ((c >> 6) & 0x3F)); tmp[3] = (char)(0x80 | (c & 0x3F)); n = 4; }
+        for (int k = 0; k < n; k++) { if (out && o + 1 < outcap) out[o] = tmp[k]; o++; }
+    }
+    if (out && outcap) out[o < outcap ? o : outcap - 1] = 0;
+    return o;
+}
+
+size_t u2w(const char *s, long slen, uint16_t *out, size_t outcap) {
+    const unsigned char *u = (const unsigned char *)s;
+    size_t o = 0;
+    long i = 0;
+    for (;;) {
+        if (slen >= 0 ? i >= slen : !u[i]) break;
+        uint32_t c = u[i];
+        int n = 1;
+        if (c >= 0xF0 && c < 0xF8) { c &= 0x07; n = 4; }
+        else if (c >= 0xE0) { c &= 0x0F; n = 3; }
+        else if (c >= 0xC0) { c &= 0x1F; n = 2; }
+        else if (c >= 0x80) { c = 0xFFFD; n = 1; }
+        int ok = 1;
+        for (int k = 1; k < n; k++) {
+            unsigned char cc = u[i + k];
+            if ((slen >= 0 && i + k >= slen) || (cc & 0xC0) != 0x80) { ok = 0; break; }
+            c = (c << 6) | (cc & 0x3F);
+        }
+        if (!ok) { c = 0xFFFD; n = 1; }
+        i += n;
+        if (c >= 0x10000) {
+            c -= 0x10000;
+            if (out && o + 1 < outcap) out[o] = (uint16_t)(0xD800 + (c >> 10));
+            o++;
+            if (out && o + 1 < outcap) out[o] = (uint16_t)(0xDC00 + (c & 0x3FF));
+            o++;
+        } else {
+            if (out && o + 1 < outcap) out[o] = (uint16_t)c;
+            o++;
+        }
+    }
+    if (out && outcap) out[o < outcap ? o : outcap - 1] = 0;
+    return o;
+}
+
+char *w2u_dup(const uint16_t *w) {
+    if (!w) return NULL;
+    size_t n = w2u(w, -1, NULL, 0);
+    char *s = malloc(n + 1);
+    w2u(w, -1, s, n + 1);
+    return s;
+}
+uint16_t *u2w_dup(const char *s) {
+    if (!s) return NULL;
+    size_t n = u2w(s, -1, NULL, 0);
+    uint16_t *w = malloc((n + 1) * 2);
+    u2w(s, -1, w, n + 1);
+    return w;
+}
+
+// ---- console ---------------------------------------------------------------
+
+static void out_flush_stream(int idx) {
+    if (g_hs.outlen[idx]) {
+        soul_out(idx + 1, g_hs.outbuf[idx], g_hs.outlen[idx]);
+        g_hs.outlen[idx] = 0;
+    }
+}
+
+void con_flush(void) {
+    out_flush_stream(0);
+    out_flush_stream(1);
+}
+
+void con_write(int stream, const char *data, size_t len) {
+    int idx = (stream == 2) ? 1 : 0;
+    if (idx == 1) out_flush_stream(0); // keep ordering between stdout and stderr
+    else out_flush_stream(1);
+    while (len) {
+        size_t room = sizeof(g_hs.outbuf[idx]) - g_hs.outlen[idx];
+        size_t n = len < room ? len : room;
+        memcpy(g_hs.outbuf[idx] + g_hs.outlen[idx], data, n);
+        g_hs.outlen[idx] += n;
+        data += n;
+        len -= n;
+        if (g_hs.outlen[idx] == sizeof(g_hs.outbuf[idx])) out_flush_stream(idx);
+    }
+    if (g_hs.outlen[idx] && memchr(g_hs.outbuf[idx], '\n', g_hs.outlen[idx])) out_flush_stream(idx);
+}
+
+size_t con_read(char *buf, size_t max, int line_mode) {
+    SoulProcess *p = g_proc;
+    con_flush();
+    pthread_mutex_lock(&p->in_mu);
+    while (p->in_len == 0 && !p->in_closed && !p->terminate) pthread_cond_wait(&p->in_cv, &p->in_mu);
+    size_t n = 0;
+    if (p->in_len) {
+        n = p->in_len < max ? p->in_len : max;
+        if (line_mode) {
+            char *nl = memchr(p->in_buf, '\n', n);
+            if (nl) n = (size_t)(nl - p->in_buf) + 1;
+        }
+        memcpy(buf, p->in_buf, n);
+        memmove(p->in_buf, p->in_buf + n, p->in_len - n);
+        p->in_len -= n;
+    }
+    pthread_mutex_unlock(&p->in_mu);
+    return n;
+}
+
+int con_getc(void) {
+    char c;
+    return con_read(&c, 1, 0) == 1 ? (unsigned char)c : -1;
+}
+
+int con_has_input(void) {
+    SoulProcess *p = g_proc;
+    pthread_mutex_lock(&p->in_mu);
+    int r = p->in_len > 0;
+    pthread_mutex_unlock(&p->in_mu);
+    return r;
+}
+
+// ---- paths -------------------------------------------------------------------
+
+void path_normalize_win(const char *in, char *out, size_t outlen) {
+    char tmp[1200];
+    size_t i = 0;
+    for (; in[i] && i + 1 < sizeof tmp; i++) tmp[i] = in[i] == '/' ? '\\' : in[i];
+    tmp[i] = 0;
+    const char *s = tmp;
+    if (strncmp(s, "\\\\?\\", 4) == 0 || strncmp(s, "\\\\.\\", 4) == 0) s += 4;
+    char full[1600];
+    const char *cwd = g_proc ? g_proc->cwd_win : "C:\\";
+    if (isalpha((unsigned char)s[0]) && s[1] == ':') {
+        if (s[2] == '\\') snprintf(full, sizeof full, "%c:%s", toupper((unsigned char)s[0]), s + 2);
+        else snprintf(full, sizeof full, "%s\\%s", cwd, s + 2);
+    } else if (s[0] == '\\') {
+        snprintf(full, sizeof full, "%c:%s", cwd[0], s);
+    } else {
+        snprintf(full, sizeof full, "%s\\%s", cwd, s);
+    }
+    // split and normalise
+    char drive = full[0];
+    const char *comps[128];
+    int nc = 0;
+    char work[1600];
+    snprintf(work, sizeof work, "%s", full + 2);
+    char *save = NULL;
+    for (char *tok = strtok_r(work, "\\", &save); tok; tok = strtok_r(NULL, "\\", &save)) {
+        if (strcmp(tok, ".") == 0 || tok[0] == 0) continue;
+        if (strcmp(tok, "..") == 0) { if (nc) nc--; continue; }
+        if (nc < 128) comps[nc++] = tok;
+    }
+    size_t o = (size_t)snprintf(out, outlen, "%c:", drive);
+    if (nc == 0) { snprintf(out + o, outlen - o, "\\"); return; }
+    for (int k = 0; k < nc && o < outlen; k++) o += (size_t)snprintf(out + o, outlen - o, "\\%s", comps[k]);
+}
+
+int path_w2h(const char *win, char *host, size_t hostlen) {
+    SoulProcess *p = g_proc;
+    char norm[1200];
+    if (strcasecmp(win, "NUL") == 0) { snprintf(host, hostlen, "/dev/null"); return 0; }
+    path_normalize_win(win, norm, sizeof norm);
+    char cur[2048];
+    snprintf(cur, sizeof cur, "%s", p->drive_c);
+    const char *s = norm + 2; // skip "C:"
+    int exists = 1;
+    while (*s) {
+        while (*s == '\\') s++;
+        if (!*s) break;
+        const char *e = strchr(s, '\\');
+        size_t l = e ? (size_t)(e - s) : strlen(s);
+        char comp[512];
+        if (l >= sizeof comp) l = sizeof comp - 1;
+        memcpy(comp, s, l);
+        comp[l] = 0;
+        // Windows ignores trailing dots/spaces
+        while (l > 0 && (comp[l - 1] == ' ' || comp[l - 1] == '.') && strcmp(comp, "..") != 0) comp[--l] = 0;
+        char cand[2600];
+        snprintf(cand, sizeof cand, "%s/%s", cur, comp);
+        struct stat sb;
+        if (exists && lstat(cand, &sb) != 0) {
+            DIR *d = opendir(cur);
+            int found = 0;
+            if (d) {
+                struct dirent *de;
+                while ((de = readdir(d))) {
+                    if (strcasecmp(de->d_name, comp) == 0) {
+                        snprintf(cand, sizeof cand, "%s/%s", cur, de->d_name);
+                        found = 1;
+                        break;
+                    }
+                }
+                closedir(d);
+            }
+            if (!found) exists = 0;
+        }
+        snprintf(cur, sizeof cur, "%s", cand);
+        s += l;
+        while (*s && *s != '\\') s++;
+    }
+    snprintf(host, hostlen, "%s", cur);
+    return 0;
+}
+
+int win_to_host_path(SoulProcess *p, const char *win, char *out, size_t outlen) {
+    (void)p;
+    return path_w2h(win, out, outlen);
+}
+
+uint64_t filetime_from_unix(double t) { return (uint64_t)((t + 11644473600.0) * 10000000.0); }
+
+void fill_find_data(void *dst, int wide, const char *name, const char *host_path) {
+    uint8_t *d = dst;
+    memset(d, 0, wide ? 592 : 320);
+    struct stat sb;
+    uint32_t attr = 0x80;
+    uint64_t ft = 0, size = 0;
+    if (stat(host_path, &sb) == 0) {
+        attr = S_ISDIR(sb.st_mode) ? 0x10 : 0x20;
+        if (!(sb.st_mode & S_IWUSR)) attr |= 0x1;
+        size = S_ISDIR(sb.st_mode) ? 0 : (uint64_t)sb.st_size;
+        ft = filetime_from_unix((double)sb.st_mtime);
+    }
+    if (name[0] == '.' && strcmp(name, ".") && strcmp(name, "..")) attr |= 0x2; // hidden
+    memcpy(d, &attr, 4);
+    memcpy(d + 4, &ft, 8);
+    memcpy(d + 12, &ft, 8);
+    memcpy(d + 20, &ft, 8);
+    uint32_t hi = (uint32_t)(size >> 32), lo = (uint32_t)size;
+    memcpy(d + 28, &hi, 4);
+    memcpy(d + 32, &lo, 4);
+    if (wide) u2w(name, -1, (uint16_t *)(d + 44), 260);
+    else snprintf((char *)(d + 44), 260, "%s", name);
+}
+
+int wild_match(const char *pat, const char *s) {
+    if (strcmp(pat, "*.*") == 0 || strcmp(pat, "*") == 0) return 1;
+    while (*pat) {
+        if (*pat == '*') {
+            pat++;
+            if (!*pat) return 1;
+            for (; *s; s++) if (wild_match(pat, s)) return 1;
+            return wild_match(pat, s);
+        }
+        if (!*s) return 0;
+        if (*pat != '?' && tolower((unsigned char)*pat) != tolower((unsigned char)*s)) return 0;
+        pat++;
+        s++;
+    }
+    return *s == 0;
+}
+
+// ---- virtual memory regions -------------------------------------------------
+
+typedef struct VmRegion { uint64_t base, size; struct VmRegion *next; } VmRegion;
+static VmRegion *g_regions;
+
+void *vm_alloc(uint64_t addr, size_t size, int *existed) {
+    size = (size + 0xFFFF) & ~(size_t)0xFFFF;
+    if (existed) *existed = 0;
+    if (addr) {
+        for (VmRegion *r = g_regions; r; r = r->next) {
+            if (addr >= r->base && addr < r->base + r->size) {
+                if (existed) *existed = 1;
+                return (void *)(uintptr_t)addr; // commit inside reservation
+            }
+        }
+    }
+    void *want = (void *)(uintptr_t)(addr & ~0xFFFFull);
+    void *p = mmap(want, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) return NULL;
+    if (addr && p != want) {
+        munmap(p, size);
+        return NULL;
+    }
+    VmRegion *r = malloc(sizeof *r);
+    r->base = (uint64_t)(uintptr_t)p;
+    r->size = size;
+    r->next = g_regions;
+    g_regions = r;
+    return p;
+}
+
+int vm_free(uint64_t addr) {
+    for (VmRegion **pr = &g_regions; *pr; pr = &(*pr)->next) {
+        VmRegion *r = *pr;
+        if (r->base == addr) {
+            munmap((void *)(uintptr_t)r->base, r->size);
+            *pr = r->next;
+            free(r);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int vm_query(uint64_t addr, uint64_t *base, uint64_t *alloc_base, uint64_t *size, int *type) {
+    for (VmRegion *r = g_regions; r; r = r->next) {
+        if (addr >= r->base && addr < r->base + r->size) {
+            *base = addr & ~0xFFFull;
+            *alloc_base = r->base;
+            *size = r->base + r->size - *base;
+            *type = 0x20000; // MEM_PRIVATE
+            return 1;
+        }
+    }
+    for (PEModule *m = g_proc->modules; m; m = m->next) {
+        if (addr >= m->base && addr < m->base + m->size) {
+            *base = addr & ~0xFFFull;
+            *alloc_base = m->base;
+            *size = m->base + m->size - *base;
+            *type = 0x1000000; // MEM_IMAGE
+            return 1;
+        }
+    }
+    SoulThread *t = &g_proc->main_thread;
+    if (addr >= t->stack_limit && addr < t->stack_base) {
+        *base = addr & ~0xFFFull;
+        *alloc_base = t->stack_limit;
+        *size = t->stack_base - *base;
+        *type = 0x20000;
+        return 1;
+    }
+    return 0;
+}
+
+static void vm_free_all(void) {
+    while (g_regions) {
+        VmRegion *n = g_regions->next;
+        munmap((void *)(uintptr_t)g_regions->base, g_regions->size);
+        free(g_regions);
+        g_regions = n;
+    }
+}
+
+// ---- init ----------------------------------------------------------------------
+
+static void env_add(const char *kv) {
+    g_hs.env = realloc(g_hs.env, sizeof(char *) * (size_t)(g_hs.env_count + 2));
+    g_hs.env[g_hs.env_count++] = strdup(kv);
+    g_hs.env[g_hs.env_count] = NULL;
+}
+
+void hle_init(SoulProcess *p) {
+    // keep nothing from a previous run
+    for (int i = 0; i < g_hs.env_count; i++) free(g_hs.env[i]);
+    free(g_hs.env);
+    memset(&g_hs, 0, sizeof g_hs);
+    p->hle_state = &g_hs;
+    HObj *o;
+    g_hs.std_handles[0] = h_alloc(H_CONIN, &o);
+    g_hs.std_handles[1] = h_alloc(H_CONOUT, &o);
+    g_hs.std_handles[2] = h_alloc(H_CONERR, &o);
+    g_hs.process_heap = 0x00000000ABCD0000ull;
+    g_hs.con_attr = 7;
+    g_hs.tls_next = 0;
+    snprintf(g_hs.con_title, sizeof g_hs.con_title, "%s", p->exe_win);
+
+    env_add("ALLUSERSPROFILE=C:\\ProgramData");
+    env_add("APPDATA=C:\\users\\soul\\AppData\\Roaming");
+    env_add("COMPUTERNAME=IPAD");
+    env_add("ComSpec=C:\\windows\\system32\\cmd.exe");
+    env_add("HOMEDRIVE=C:");
+    env_add("HOMEPATH=\\users\\soul");
+    env_add("LOCALAPPDATA=C:\\users\\soul\\AppData\\Local");
+    env_add("NUMBER_OF_PROCESSORS=1");
+    env_add("OS=Windows_NT");
+    env_add("PATH=C:\\windows\\system32;C:\\windows");
+    env_add("PATHEXT=.COM;.EXE;.BAT;.CMD");
+    env_add("PROCESSOR_ARCHITECTURE=AMD64");
+    env_add("ProgramData=C:\\ProgramData");
+    env_add("ProgramFiles=C:\\Program Files");
+    env_add("ProgramFiles(x86)=C:\\Program Files (x86)");
+    env_add("PUBLIC=C:\\users\\Public");
+    env_add("SystemDrive=C:");
+    env_add("SystemRoot=C:\\windows");
+    env_add("TEMP=C:\\users\\soul\\Temp");
+    env_add("TMP=C:\\users\\soul\\Temp");
+    env_add("USERNAME=soul");
+    env_add("USERPROFILE=C:\\users\\soul");
+    env_add("windir=C:\\windows");
+
+    // ensure the standard directory layout exists inside the container
+    const char *dirs[] = { "windows", "windows/system32", "users", "users/soul", "users/soul/Temp",
+                           "users/soul/AppData", "users/soul/AppData/Roaming", "users/soul/AppData/Local",
+                           "users/soul/Documents", "users/soul/Desktop", "ProgramData", "Program Files", NULL };
+    for (int i = 0; dirs[i]; i++) {
+        char d[1200];
+        snprintf(d, sizeof d, "%s/%s", p->drive_c, dirs[i]);
+        mkdir(d, 0755);
+    }
+}
+
+void hle_shutdown(SoulProcess *p) {
+    (void)p;
+    con_flush();
+    for (int i = 0; i < MAX_HANDLES; i++) {
+        HObj *o = &g_hs.handles[i];
+        if (o->type == H_FREE) continue;
+        if (o->fd >= 0) close(o->fd);
+        if (o->dir) closedir(o->dir);
+        if (o->type == H_MAPPING && o->ptr) free(o->ptr);
+    }
+    memset(g_hs.handles, 0, sizeof g_hs.handles);
+    vm_free_all();
+}
