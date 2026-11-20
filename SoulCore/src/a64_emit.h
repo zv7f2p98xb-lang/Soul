@@ -101,6 +101,18 @@ static inline uint32_t a_fcvt_s2d(int rd, int rn) { return 0x1E22C000u | ((uint3
 static inline uint32_t a_fcvt_d2s(int rd, int rn) { return 0x1E624000u | ((uint32_t)rn << 5) | (uint32_t)rd; }
 static inline uint32_t a_fmov_to_gpr(int dbl, int rd, int rn) { return dbl ? (0x9E660000u | ((uint32_t)rn << 5) | (uint32_t)rd) : (0x1E260000u | ((uint32_t)rn << 5) | (uint32_t)rd); }
 static inline uint32_t a_fmov_from_gpr(int dbl, int rd, int rn) { return dbl ? (0x9E670000u | ((uint32_t)rn << 5) | (uint32_t)rd) : (0x1E270000u | ((uint32_t)rn << 5) | (uint32_t)rd); }
+// vector integer: size 0 B, 1 H, 2 S, 3 D (Q = 1)
+static inline uint32_t a_vadd(int size, int rd, int rn, int rm) { return 0x4E208400u | ((uint32_t)size << 22) | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
+static inline uint32_t a_vsub(int size, int rd, int rn, int rm) { return 0x6E208400u | ((uint32_t)size << 22) | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
+static inline uint32_t a_vcmeq(int size, int rd, int rn, int rm) { return 0x6E208C00u | ((uint32_t)size << 22) | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
+static inline uint32_t a_vcmgt(int size, int rd, int rn, int rm) { return 0x4E203400u | ((uint32_t)size << 22) | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
+static inline uint32_t a_vzip1(int size, int rd, int rn, int rm) { return 0x4E003800u | ((uint32_t)size << 22) | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
+static inline uint32_t a_vzip2(int size, int rd, int rn, int rm) { return 0x4E007800u | ((uint32_t)size << 22) | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd; }
+// vector FP: dbl 0 = 4S, 1 = 2D ; op 0 FADD, 1 FSUB, 2 FMUL, 3 FDIV
+static inline uint32_t a_vfp(int dbl, int op, int rd, int rn, int rm) {
+    static const uint32_t base[4] = { 0x4E20D400u, 0x4EA0D400u, 0x6E20DC00u, 0x6E20FC00u };
+    return base[op] | ((uint32_t)dbl << 22) | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
 // vector 16B logic: opc 0 AND, 1 BIC, 2 ORR, 3 EOR
 static inline uint32_t a_vlogic(int op, int rd, int rn, int rm) {
     static const uint32_t base[4] = { 0x4E201C00u, 0x4E601C00u, 0x4EA01C00u, 0x6E201C00u };

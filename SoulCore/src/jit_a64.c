@@ -52,6 +52,7 @@ enum { R_ST = 19, T0 = 0, T1 = 1, T2 = 2, T3 = 3, T4 = 4, R_EA = 6, S14 = 14, S1
 typedef struct {
     Emit e;
     X86State *st;
+    struct JitCache *jc;
     int nat;          // current native flag kind
     int fail;         // translation of the current instruction is not possible
 } J;
@@ -255,20 +256,54 @@ static void emit_alu(J *j, int aop, int size, int need) {
     }
 }
 
-static void emit_exit_imm(J *j, uint64_t target) {
+static void emit_epilogue(J *j) {
     Emit *e = &j->e;
-    mov_imm(j, T0, target);
-    em(e, a_str_imm(3, T0, R_ST, ST_OFF(rip)));
     em(e, a_ldp_post(19, 20, SP_REG, 16));
     em(e, a_ldp_post(29, 30, SP_REG, 16));
     em(e, a_ret());
 }
-static void emit_exit_reg(J *j, int r) {
+
+#define PROLOGUE_INSNS 3
+
+// Block exit to a target held in register r (T2..T4 allowed). The guest rip is
+// stored, then the fast lookup table is probed inline: on a hit we jump straight
+// into the next block's body (direct chaining) instead of returning to C.
+static void emit_chain(J *j, int r, int known, uint64_t target) {
     Emit *e = &j->e;
     em(e, a_str_imm(3, r, R_ST, ST_OFF(rip)));
-    em(e, a_ldp_post(19, 20, SP_REG, 16));
-    em(e, a_ldp_post(29, 30, SP_REG, 16));
-    em(e, a_ret());
+    em(e, a_ldr_imm(2, S15, R_ST, ST_OFF(stop_req)));
+    uint32_t *stop_br = e->p;
+    em(e, a_cbnz(0, S15, 0));
+    if (known) {
+        mov_imm(j, S14, (uint64_t)(uintptr_t)&j->jc->fast[(size_t)(target >> 1) & (FAST_SIZE - 1)]);
+    } else {
+        mov_imm(j, S14, (uint64_t)(uintptr_t)&j->jc->fast[0]);
+        em(e, a_bfm(1, 2, S15, r, 1, 13));                        // ubfx x15, r, #1, #13
+        em(e, a_addsub_reg(1, 0, 0, S14, S14, S15, 0, 4));        // x14 += idx * 16
+    }
+    em(e, 0xA9400000u | ((uint32_t)17 << 10) | ((uint32_t)S14 << 5) | (uint32_t)S15); // ldp x15, x17, [x14]
+    em(e, a_addsub_reg(1, 1, 1, XZR, S15, r, 0, 0));          // cmp x15, r
+    uint32_t *miss_br = e->p;
+    em(e, a_bcond(C_NE, 0));
+    uint32_t *nul_br = e->p;
+    em(e, a_cbz(1, 17, 0));
+    em(e, a_addsub_imm(1, 0, 0, 17, 17, PROLOGUE_INSNS * 4, 0));
+    em(e, a_br(17));
+    uint32_t *exit = e->p;
+    if (!e->overflow) {
+        *stop_br = a_cbnz(0, S15, (int32_t)(exit - stop_br));
+        *miss_br = a_bcond(C_NE, (int32_t)(exit - miss_br));
+        *nul_br = a_cbz(1, 17, (int32_t)(exit - nul_br));
+    }
+    emit_epilogue(j);
+}
+
+static void emit_exit_imm(J *j, uint64_t target) {
+    mov_imm(j, T2, target);
+    emit_chain(j, T2, 1, target);
+}
+static void emit_exit_reg(J *j, int r) {
+    emit_chain(j, r, 0, 0);
 }
 
 static void emit_push(J *j, int hr_val) {
@@ -638,7 +673,17 @@ static int translate(J *j, const Slot *s) {
             return 0;
         }
         case 0x58: case 0x59: case 0x5C: case 0x5E: case 0x51: case 0x5D: case 0x5F: {
-            if (pfx < 2) return -1;
+            if (pfx < 2) {
+                if (op == 0x51 || op == 0x5D || op == 0x5F) return -1;
+                // packed single (pfx 0) / double (pfx 1)
+                if (in->mod != 3) { emit_ea(j, in, 1); em(e, a_ldr_fp(4, 1, R_EA, 0)); }
+                else em(e, a_ldr_fp(4, 1, R_ST, xmm_off(in->rm)));
+                em(e, a_ldr_fp(4, 0, R_ST, xmm_off(xr)));
+                int vop = op == 0x58 ? 0 : op == 0x5C ? 1 : op == 0x59 ? 2 : 3;
+                em(e, a_vfp(pfx, vop, 0, 0, 1));
+                em(e, a_str_fp(4, 0, R_ST, xmm_off(xr)));
+                return 0;
+            }
             int dbl = pfx == 3, fsz = dbl ? 3 : 2;
             if (op == 0x5D || op == 0x5F) return -1; // x86 MIN/MAX NaN semantics differ
             if (in->mod != 3) { emit_ea(j, in, 1); em(e, a_ldr_fp(fsz, 1, R_EA, 0)); }
@@ -736,6 +781,37 @@ static int translate(J *j, const Slot *s) {
                 if (in->mod != 3) { emit_ea(j, in, 1); em(e, a_str_imm(size_log2(sz), T0, R_EA, 0)); }
                 else store_reg(j, in, T0, in->rm, sz);
             }
+            return 0;
+        }
+        case 0xFC: case 0xFD: case 0xFE: case 0xD4: case 0xF8: case 0xF9: case 0xFA: case 0xFB:
+        case 0x74: case 0x75: case 0x76: case 0x64: case 0x65: case 0x66: case 0x14: case 0x15: case 0x6C: case 0x6D: {
+            if (pfx != 1 && !((op == 0x14 || op == 0x15) && pfx == 0)) return -1;
+            if (in->mod != 3) { emit_ea(j, in, 1); em(e, a_ldr_fp(4, 1, R_EA, 0)); }
+            else em(e, a_ldr_fp(4, 1, R_ST, xmm_off(in->rm)));
+            em(e, a_ldr_fp(4, 0, R_ST, xmm_off(xr)));
+            uint32_t ins;
+            switch (op) {
+            case 0xFC: ins = a_vadd(0, 0, 0, 1); break;
+            case 0xFD: ins = a_vadd(1, 0, 0, 1); break;
+            case 0xFE: ins = a_vadd(2, 0, 0, 1); break;
+            case 0xD4: ins = a_vadd(3, 0, 0, 1); break;
+            case 0xF8: ins = a_vsub(0, 0, 0, 1); break;
+            case 0xF9: ins = a_vsub(1, 0, 0, 1); break;
+            case 0xFA: ins = a_vsub(2, 0, 0, 1); break;
+            case 0xFB: ins = a_vsub(3, 0, 0, 1); break;
+            case 0x74: ins = a_vcmeq(0, 0, 0, 1); break;
+            case 0x75: ins = a_vcmeq(1, 0, 0, 1); break;
+            case 0x76: ins = a_vcmeq(2, 0, 0, 1); break;
+            case 0x64: ins = a_vcmgt(0, 0, 0, 1); break;
+            case 0x65: ins = a_vcmgt(1, 0, 0, 1); break;
+            case 0x66: ins = a_vcmgt(2, 0, 0, 1); break;
+            case 0x14: ins = a_vzip1(pfx == 1 ? 3 : 2, 0, 0, 1); break;   // UNPCKLPD / UNPCKLPS
+            case 0x15: ins = a_vzip2(pfx == 1 ? 3 : 2, 0, 0, 1); break;   // UNPCKHPD / UNPCKHPS
+            case 0x6C: ins = a_vzip1(3, 0, 0, 1); break;                  // PUNPCKLQDQ
+            default: ins = a_vzip2(3, 0, 0, 1); break;                    // PUNPCKHQDQ
+            }
+            em(e, ins);
+            em(e, a_str_fp(4, 0, R_ST, xmm_off(xr)));
             return 0;
         }
         case 0xD6: {
@@ -871,6 +947,7 @@ static BlockFn compile(JitCache *jc, uint64_t rip, X86State *st) {
     J j;
     memset(&j, 0, sizeof j);
     j.st = st;
+    j.jc = jc;
     jitmem_begin_write();
     uint32_t *start = (uint32_t *)(jc->rw + jc->used);
     j.e.start = j.e.p = start;
