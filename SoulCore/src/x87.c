@@ -16,6 +16,11 @@ static inline void fpush(X86State *st, double v) {
     st->fpr[st->ftop] = v;
     st->ftag[st->ftop] = 0;
 }
+// Float -> integer stores: out-of-range values and NaN give the "integer indefinite" value
+// (the most negative integer), as on real hardware, independent of the host CPU.
+static inline uint32_t f2i32(double v) { return (v >= -2147483648.0 && v < 2147483648.0) ? (uint32_t)(int32_t)v : 0x80000000u; }
+static inline uint16_t f2i16(double v) { return (v >= -32768.0 && v < 32768.0) ? (uint16_t)(int16_t)v : 0x8000u; }
+static inline uint64_t f2i64(double v) { return (v >= -9223372036854775808.0 && v < 9223372036854775808.0) ? (uint64_t)(int64_t)v : 0x8000000000000000ull; }
 static inline double fpop(X86State *st) {
     double v = st->fpr[st->ftop];
     st->ftag[st->ftop] = 1;
@@ -96,8 +101,8 @@ int x87_exec(X86State *st, const X86Insn *in) {
         uint64_t a = ea_addr(st, in);
         switch (op) {
         case 0xD8: case 0xDC: { // arith with m32 / m64
-            double v = (op == 0xD8) ? (double)({ float f; memcpy(&f, (void *)(uintptr_t)a, 4); f; })
-                                    : ({ double dd; memcpy(&dd, (void *)(uintptr_t)a, 8); dd; });
+            double v = (op == 0xD8) ? (double)({ float f; memcpy(&f, (void *)G2H(a), 4); f; })
+                                    : ({ double dd; memcpy(&dd, (void *)G2H(a), 8); dd; });
             if (r == 2 || r == 3) { fcom_flags(st, *sti(st, 0), v); if (r == 3) fpop(st); return 1; }
             *sti(st, 0) = arith(r, *sti(st, 0), v);
             return 1;
@@ -110,40 +115,40 @@ int x87_exec(X86State *st, const X86Insn *in) {
         }
         case 0xD9:
             switch (r) {
-            case 0: { float f; memcpy(&f, (void *)(uintptr_t)a, 4); fpush(st, f); return 1; }
-            case 2: case 3: { float f = (float)*sti(st, 0); memcpy((void *)(uintptr_t)a, &f, 4); if (r == 3) fpop(st); return 1; }
+            case 0: { float f; memcpy(&f, (void *)G2H(a), 4); fpush(st, f); return 1; }
+            case 2: case 3: { float f = (float)*sti(st, 0); memcpy((void *)G2H(a), &f, 4); if (r == 3) fpop(st); return 1; }
             case 4: return 1; // FLDENV
             case 5: st->fcw = (uint16_t)mem_rd(a, 2); return 1;
-            case 6: { uint8_t buf[28]; memset(buf, 0, sizeof buf); memcpy(buf, &st->fcw, 2); uint16_t sw = fsw_value(st); memcpy(buf + 4, &sw, 2); memcpy((void *)(uintptr_t)a, buf, 28); return 1; }
+            case 6: { uint8_t buf[28]; memset(buf, 0, sizeof buf); memcpy(buf, &st->fcw, 2); uint16_t sw = fsw_value(st); memcpy(buf + 4, &sw, 2); memcpy((void *)G2H(a), buf, 28); return 1; }
             case 7: mem_wr(a, 2, st->fcw); return 1;
             default: return 0;
             }
         case 0xDB:
             switch (r) {
             case 0: fpush(st, (double)(int32_t)mem_rd(a, 4)); return 1;
-            case 1: mem_wr(a, 4, (uint32_t)(int32_t)trunc(fpop(st))); return 1;
-            case 2: case 3: { double v = fround(st, *sti(st, 0)); mem_wr(a, 4, (uint32_t)(int32_t)v); if (r == 3) fpop(st); return 1; }
-            case 5: fpush(st, f80_to_double((const uint8_t *)(uintptr_t)a)); return 1;
-            case 7: double_to_f80(fpop(st), (uint8_t *)(uintptr_t)a); return 1;
+            case 1: mem_wr(a, 4, f2i32(trunc(fpop(st)))); return 1;
+            case 2: case 3: { double v = fround(st, *sti(st, 0)); mem_wr(a, 4, f2i32(v)); if (r == 3) fpop(st); return 1; }
+            case 5: fpush(st, f80_to_double((const uint8_t *)G2H(a))); return 1;
+            case 7: double_to_f80(fpop(st), (uint8_t *)G2H(a)); return 1;
             default: return 0;
             }
         case 0xDD:
             switch (r) {
-            case 0: { double dd; memcpy(&dd, (void *)(uintptr_t)a, 8); fpush(st, dd); return 1; }
-            case 1: mem_wr(a, 8, (uint64_t)(int64_t)trunc(fpop(st))); return 1;
-            case 2: case 3: { double dd = *sti(st, 0); memcpy((void *)(uintptr_t)a, &dd, 8); if (r == 3) fpop(st); return 1; }
+            case 0: { double dd; memcpy(&dd, (void *)G2H(a), 8); fpush(st, dd); return 1; }
+            case 1: mem_wr(a, 8, f2i64(trunc(fpop(st)))); return 1;
+            case 2: case 3: { double dd = *sti(st, 0); memcpy((void *)G2H(a), &dd, 8); if (r == 3) fpop(st); return 1; }
             case 4: return 1; // FRSTOR
-            case 6: memset((void *)(uintptr_t)a, 0, 108); x87_reset(st); return 1; // FNSAVE
+            case 6: memset((void *)G2H(a), 0, 108); x87_reset(st); return 1; // FNSAVE
             case 7: mem_wr(a, 2, fsw_value(st)); return 1;
             default: return 0;
             }
         case 0xDF:
             switch (r) {
             case 0: fpush(st, (double)(int16_t)mem_rd(a, 2)); return 1;
-            case 1: mem_wr(a, 2, (uint16_t)(int16_t)trunc(fpop(st))); return 1;
-            case 2: case 3: { double v = fround(st, *sti(st, 0)); mem_wr(a, 2, (uint16_t)(int16_t)v); if (r == 3) fpop(st); return 1; }
+            case 1: mem_wr(a, 2, f2i16(trunc(fpop(st)))); return 1;
+            case 2: case 3: { double v = fround(st, *sti(st, 0)); mem_wr(a, 2, f2i16(v)); if (r == 3) fpop(st); return 1; }
             case 5: fpush(st, (double)(int64_t)mem_rd(a, 8)); return 1;
-            case 7: { double v = fround(st, fpop(st)); mem_wr(a, 8, (uint64_t)(int64_t)v); return 1; }
+            case 7: { double v = fround(st, fpop(st)); mem_wr(a, 8, f2i64(v)); return 1; }
             default: return 0;
             }
         default:
@@ -257,3 +262,6 @@ int x87_exec(X86State *st, const X86Insn *in) {
         return 0;
     }
 }
+
+// Pushes a value onto the x87 stack (32-bit HLE functions return float/double in ST(0)).
+void x87_push_value(X86State *st, double v) { fpush(st, v); }

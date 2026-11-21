@@ -82,8 +82,16 @@ static inline int64_t sext(uint64_t v, int size) {
     }
 }
 
-// Guest memory is identity-mapped into the host address space.
+// Guest memory: 64-bit programs are identity-mapped (g_gbase = 0). 32-bit programs live
+// in a 4 GB window of the host address space starting at g_gbase (iOS keeps the low
+// 4 GB of every process unmapped), so guest address a is host address g_gbase + a.
+extern uint64_t g_gbase;
+extern int g_mode32;
+// (branch-free so that a NULL guest pointer stays NULL without tripping -Wnonnull)
+static inline void *G2H(uint64_t a) { return (void *)(uintptr_t)(a + (g_gbase & (0 - (uint64_t)(a != 0)))); }
+#define H2G(p) ((p) ? (uint64_t)(uintptr_t)(p) - g_gbase : 0)
 static inline uint64_t mem_rd(uint64_t a, int size) {
+    a += g_gbase;
     switch (size) {
     case 1: return *(volatile uint8_t *)(uintptr_t)a;
     case 2: { uint16_t v; memcpy(&v, (void *)(uintptr_t)a, 2); return v; }
@@ -92,6 +100,7 @@ static inline uint64_t mem_rd(uint64_t a, int size) {
     }
 }
 static inline void mem_wr(uint64_t a, int size, uint64_t v) {
+    a += g_gbase;
     switch (size) {
     case 1: *(volatile uint8_t *)(uintptr_t)a = (uint8_t)v; break;
     case 2: { uint16_t x = (uint16_t)v; memcpy((void *)(uintptr_t)a, &x, 2); break; }

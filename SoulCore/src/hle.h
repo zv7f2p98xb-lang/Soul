@@ -126,6 +126,7 @@ size_t w2u(const uint16_t *w, long wlen, char *out, size_t outcap);
 size_t u2w(const char *s, long slen, uint16_t *out, size_t outcap);
 char *w2u_dup(const uint16_t *w);      // malloc'ed
 uint16_t *u2w_dup(const char *s);      // malloc'ed
+uint16_t *u2w_gdup(const char *s);     // in guest-visible memory (g_malloc)
 
 // ---- console / stdio -------------------------------------------------------
 void con_write(int stream, const char *data, size_t len); // stream 1 = stdout, 2 = stderr
@@ -152,6 +153,7 @@ void crt_run_atexit(X86State *st);
 void crt_reset(void);
 void crt_flush_all(void);
 uint32_t k32_wait_objects(X86State *st, uint32_t n, const uint64_t *h, int all, uint32_t ms);
+void k32_shutdown(void); // releases per-process kernel32 state (fake modules, cached strings)
 
 // ---- printf / scanf engine ------------------------------------------------------
 typedef struct ArgSrc {
@@ -159,9 +161,19 @@ typedef struct ArgSrc {
     int next;        // next argument index (register/stack mode)
     uint64_t va;     // va_list pointer (0 = register mode)
 } ArgSrc;
+// Next variadic argument of int / pointer size (4 bytes in 32-bit programs, 8 in 64-bit ones).
 static inline uint64_t arg_next(ArgSrc *a) {
+    if (g_mode32) {
+        if (a->va) { uint64_t v = mem_rd(a->va, 4); a->va = (uint32_t)(a->va + 4); return v; }
+        return hle_arg(a->st, a->next++);
+    }
     if (a->va) { uint64_t v = mem_rd(a->va, 8); a->va += 8; return v; }
     return hle_arg(a->st, a->next++);
+}
+// Next 8-byte variadic argument (double, long long): two stack slots in 32-bit programs.
+static inline uint64_t arg_next64(ArgSrc *a) {
+    if (g_mode32) { uint64_t lo = arg_next(a); uint64_t hi = arg_next(a); return lo | (hi << 32); }
+    return arg_next(a);
 }
 typedef struct OutSink {
     char *buf;      // destination buffer (may be NULL to only count)

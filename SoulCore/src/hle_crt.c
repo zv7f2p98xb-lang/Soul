@@ -17,40 +17,70 @@
 #define HOST_MSIZE(p) malloc_usable_size(p)
 #endif
 
-#define FARG(n) (st->xmm[(n)].fd[0])
-#define FARGF(n) (st->xmm[(n)].f[0])
-#define RETD(v) do { double _v = (v); memset(&st->xmm[0], 0, 16); st->xmm[0].fd[0] = _v; } while (0)
-#define RETF(v) do { float _v = (v); memset(&st->xmm[0], 0, 16); st->xmm[0].f[0] = _v; } while (0)
-#define CSTR(n) ((const char *)(uintptr_t)hle_arg(st, (n)))
-#define WSTR(n) ((const uint16_t *)(uintptr_t)hle_arg(st, (n)))
+// Floating point arguments: XMM0-3 in 64-bit programs; on the stack in 32-bit ones, where a
+// double takes two slots (FARG(n) assumes all earlier arguments are doubles too) and a float one.
+static inline double farg32(X86State *st, int slot) { uint64_t v = mem_rd((uint32_t)(st->gpr[RSP] + 4 + 4 * (uint32_t)slot), 8); double d; memcpy(&d, &v, 8); return d; }
+static inline float fargf32(X86State *st, int slot) { uint32_t v = (uint32_t)hle_arg(st, slot); float f; memcpy(&f, &v, 4); return f; }
+#define FARG(n) (g_mode32 ? farg32(st, 2 * (n)) : st->xmm[(n)].fd[0])
+#define FARGF(n) (g_mode32 ? fargf32(st, (n)) : st->xmm[(n)].f[0])
+// Floating point results: XMM0 in 64-bit programs, x87 ST(0) in 32-bit ones.
+void x87_push_value(X86State *st, double v);
+#define RETD(v) do { double _v = (v); if (g_mode32) x87_push_value(st, _v); else { memset(&st->xmm[0], 0, 16); st->xmm[0].fd[0] = _v; } } while (0)
+#define RETF(v) do { float _v = (v); if (g_mode32) x87_push_value(st, (double)_v); else { memset(&st->xmm[0], 0, 16); st->xmm[0].f[0] = _v; } } while (0)
+#define CSTR(n) ((const char *)G2H(hle_arg(st, (n))))
+#define WSTR(n) ((const uint16_t *)G2H(hle_arg(st, (n))))
+// Arguments after a 64-bit integer / double argument: index n64 in 64-bit programs, stack slot s32 in 32-bit ones.
+#define ARGS(n64, s32) (g_mode32 ? hle_arg(st, (s32)) : hle_arg(st, (n64)))
+#define ARG64(n64, s32) (g_mode32 ? (hle_arg(st, (s32)) | (hle_arg(st, (s32) + 1) << 32)) : hle_arg(st, (n64)))
 
 // ---- global CRT data visible to the guest ------------------------------------------
 
 #define MAX_FILES 256
-typedef struct { uint8_t raw[48]; } GuestFILE;
 enum { CF_HOST = 0, CF_STDIN, CF_STDOUT, CF_STDERR };
 typedef struct { int used; int kind; FILE *hf; int text; int eof, err; int ungot; } CrtFile;
+typedef struct { int32_t v[9]; } GuestTm;
 
-static GuestFILE g_iob[MAX_FILES];
+// Everything the guest can address (FILE array, errno, argv cells, ctype table, static result
+// buffers) lives in one block of guest memory: inside the 4 GB window for 32-bit programs.
+// Pointer cells are 8 bytes; 32-bit programs read and write their low 4 bytes.
+typedef struct CrtGuest {
+    uint8_t iob[MAX_FILES][48];   // FILE: 48 bytes in 64-bit programs, 32 in 32-bit ones
+    int32_t fmode, commode, errno_v, doserrno, argc, mb_cur_max, timezone_v, daylight_v;
+    uint64_t argv, wargv, environ_v, wenviron, acmdln, wcmdln, pgmptr, wpgmptr, pctype;
+    uint16_t ctype_table[257];
+    uint8_t lconv[160];
+    uint64_t current_exception[2];
+    GuestTm tm;
+    char asctime_buf[64];
+    char strerror_buf[128];
+    char locale_c[4];
+    uint16_t wlocale_c[4];
+    char empty[2], dot[2];
+    uint16_t wempty[2], wdot[2];
+    uint64_t lc_names[6], locale_obj[4];
+} CrtGuest;
+static CrtGuest *g_cg;
+#define g_iob (g_cg->iob)
+#define g_fmode (g_cg->fmode)
+#define g_commode (g_cg->commode)
+#define g_errno (g_cg->errno_v)
+#define g_doserrno (g_cg->doserrno)
+#define g_argc (g_cg->argc)
+#define g_mb_cur_max (g_cg->mb_cur_max)
+#define g_ctype_table (g_cg->ctype_table)
+#define g_lconv (g_cg->lconv)
+#define g_current_exception (g_cg->current_exception)
+#define g_tm (g_cg->tm)
+#define g_asctime_buf (g_cg->asctime_buf)
+#define g_timezone (g_cg->timezone_v)
+#define g_daylight (g_cg->daylight_v)
+#define IOB_STRIDE (g_mode32 ? 32u : 48u)
+static int g_args_built;
+
 static CrtFile g_files[MAX_FILES];
-static int32_t g_fmode, g_commode, g_errno, g_doserrno, g_argc, g_mb_cur_max = 1;
-static char **g_argv;
-static uint16_t **g_wargv;
-static char **g_environ;
-static uint16_t **g_wenviron;
-static char *g_acmdln;
-static uint16_t *g_wcmdln;
-static char *g_pgmptr;
-static uint16_t *g_wpgmptr;
-static uint16_t g_ctype_table[257];
-static uint16_t *g_pctype = &g_ctype_table[1];
-static uint8_t g_lconv[160];
-static uint64_t g_current_exception[2];
 static uint32_t g_rand_state = 1;
 static uint64_t *g_atexit;
 static int g_atexit_n, g_atexit_cap;
-static struct { int32_t v[9]; } g_tm;
-static char g_asctime_buf[64];
 static char g_strtok_save_dummy;
 static char *g_strtok_save;
 static uint16_t *g_wcstok_save;
@@ -59,8 +89,11 @@ static double g_clock_start;
 void crt_reset(void) {
     for (int i = 3; i < MAX_FILES; i++) if (g_files[i].used && g_files[i].hf) fclose(g_files[i].hf);
     memset(g_files, 0, sizeof g_files);
-    memset(g_iob, 0, sizeof g_iob);
-    for (int i = 0; i < MAX_FILES; i++) { int32_t idx = i; memcpy(g_iob[i].raw + 28, &idx, 4); }
+    g_cg = g_calloc(1, sizeof(CrtGuest));
+    g_args_built = 0;
+    g_mb_cur_max = 1;
+    // FILE._file: offset 28 in the 64-bit layout, 16 in the 32-bit one
+    for (int i = 0; i < MAX_FILES; i++) { int32_t idx = i; memcpy((uint8_t *)g_iob + (size_t)i * IOB_STRIDE + (g_mode32 ? 16 : 28), &idx, 4); }
     g_files[0] = (CrtFile){ 1, CF_STDIN, NULL, 1, 0, 0, -1 };
     g_files[1] = (CrtFile){ 1, CF_STDOUT, NULL, 1, 0, 0, -1 };
     g_files[2] = (CrtFile){ 1, CF_STDERR, NULL, 1, 0, 0, -1 };
@@ -83,26 +116,28 @@ void crt_reset(void) {
         }
         g_ctype_table[c + 1] = f;
     }
+    g_cg->pctype = H2G(&g_ctype_table[1]);
     // lconv: 10 char* + 8 chars + 6 wchar_t*
-    static char dot[] = ".", empty[] = "";
-    static uint16_t wdot[] = { '.', 0 }, wempty[] = { 0 };
-    uint64_t ptrs[10];
-    for (int i = 0; i < 10; i++) ptrs[i] = (uint64_t)(uintptr_t)empty;
-    ptrs[0] = (uint64_t)(uintptr_t)dot;
-    memcpy(g_lconv, ptrs, 80);
-    memset(g_lconv + 80, 127, 8);
-    uint64_t wp[6];
-    for (int i = 0; i < 6; i++) wp[i] = (uint64_t)(uintptr_t)wempty;
-    wp[0] = (uint64_t)(uintptr_t)wdot;
-    memcpy(g_lconv + 88, wp, 48);
+    g_cg->dot[0] = '.'; g_cg->wdot[0] = '.';
+    memcpy(g_cg->locale_c, "C", 2);
+    g_cg->wlocale_c[0] = 'C';
+    uint64_t lc = H2G(g_lconv);
+    for (int i = 0; i < 10; i++) wr_ptr(lc + (uint64_t)i * PSZ, H2G(i ? g_cg->empty : g_cg->dot));
+    memset(g_lconv + 10 * PSZ, 127, 8);
+    uint64_t wl = lc + 10 * (uint64_t)PSZ + 8;
+    for (int i = 0; i < 6; i++) wr_ptr(wl + (uint64_t)i * PSZ, H2G(i ? g_cg->wempty : g_cg->wdot));
 }
+
+static uint64_t gstr(const char *s) { return H2G(g_strdup(s)); }
+static uint64_t gwstr(const char *s) { return H2G(u2w_gdup(s)); }
 
 static void build_args(void) {
     SoulProcess *p = g_proc;
     // split command line using Windows rules
-    if (g_argv) return;
+    if (g_args_built) return;
+    g_args_built = 1;
     const char *s = p->cmdline;
-    char **argv = calloc(256, sizeof(char *));
+    uint64_t argv = H2G(g_calloc(256, (size_t)PSZ)), wargv = H2G(g_calloc(256, (size_t)PSZ));
     int argc = 0;
     while (*s && argc < 255) {
         while (*s == ' ' || *s == '\t') s++;
@@ -127,40 +162,47 @@ static void build_args(void) {
             s++;
         }
         buf[n] = 0;
-        argv[argc++] = strdup(buf);
+        wr_ptr(argv + (uint64_t)argc * PSZ, gstr(buf));
+        wr_ptr(wargv + (uint64_t)argc * PSZ, gwstr(buf));
+        argc++;
     }
     g_argc = argc;
-    g_argv = argv;
-    g_wargv = calloc(256, sizeof(uint16_t *));
-    for (int i = 0; i < argc; i++) g_wargv[i] = u2w_dup(argv[i]);
+    g_cg->argv = argv;
+    g_cg->wargv = wargv;
     HleState *h = hs();
-    g_environ = calloc((size_t)h->env_count + 1, sizeof(char *));
-    g_wenviron = calloc((size_t)h->env_count + 1, sizeof(uint16_t *));
-    for (int i = 0; i < h->env_count; i++) { g_environ[i] = h->env[i]; g_wenviron[i] = u2w_dup(h->env[i]); }
-    g_acmdln = p->cmdline;
-    g_wcmdln = u2w_dup(p->cmdline);
-    g_pgmptr = p->exe_win;
-    g_wpgmptr = u2w_dup(p->exe_win);
+    uint64_t env = H2G(g_calloc((size_t)h->env_count + 1, (size_t)PSZ));
+    uint64_t wenv = H2G(g_calloc((size_t)h->env_count + 1, (size_t)PSZ));
+    for (int i = 0; i < h->env_count; i++) { wr_ptr(env + (uint64_t)i * PSZ, H2G(h->env[i])); wr_ptr(wenv + (uint64_t)i * PSZ, gwstr(h->env[i])); }
+    g_cg->environ_v = env;
+    g_cg->wenviron = wenv;
+    g_cg->acmdln = gstr(p->cmdline);
+    g_cg->wcmdln = gwstr(p->cmdline);
+    g_cg->pgmptr = gstr(p->exe_win);
+    g_cg->wpgmptr = gwstr(p->exe_win);
 }
 
 static void free_args(void) {
-    if (g_argv) { for (int i = 0; i < g_argc; i++) { free(g_argv[i]); free(g_wargv[i]); } }
-    free(g_argv); free(g_wargv); g_argv = NULL; g_wargv = NULL;
-    if (g_wenviron) for (int i = 0; g_wenviron[i]; i++) free(g_wenviron[i]);
-    free(g_environ); free(g_wenviron); g_environ = NULL; g_wenviron = NULL;
-    free(g_wcmdln); g_wcmdln = NULL;
-    free(g_wpgmptr); g_wpgmptr = NULL;
+    if (!g_cg) return;
+    if (g_args_built) {
+        for (int i = 0; i < g_argc; i++) { g_free(G2H(rd_ptr(g_cg->argv + (uint64_t)i * PSZ))); g_free(G2H(rd_ptr(g_cg->wargv + (uint64_t)i * PSZ))); }
+        for (uint64_t a = g_cg->wenviron; a && rd_ptr(a); a += (uint64_t)PSZ) g_free(G2H(rd_ptr(a)));
+        g_free(G2H(g_cg->argv)); g_free(G2H(g_cg->wargv)); g_free(G2H(g_cg->environ_v)); g_free(G2H(g_cg->wenviron));
+        g_free(G2H(g_cg->acmdln)); g_free(G2H(g_cg->wcmdln)); g_free(G2H(g_cg->pgmptr)); g_free(G2H(g_cg->wpgmptr));
+    }
+    g_args_built = 0;
+    g_free(g_cg);
+    g_cg = NULL;
 }
 
 // ---- FILE helpers ------------------------------------------------------------------------
 
 static CrtFile *cf_get(uint64_t fp) {
-    uint64_t base = (uint64_t)(uintptr_t)g_iob;
-    if (fp < base || fp >= base + sizeof g_iob) return NULL;
-    uint64_t i = (fp - base) / sizeof(GuestFILE);
+    uint64_t base = H2G(g_iob);
+    if (fp < base || fp >= base + (uint64_t)MAX_FILES * IOB_STRIDE) return NULL;
+    uint64_t i = (fp - base) / IOB_STRIDE;
     return g_files[i].used ? &g_files[i] : NULL;
 }
-static uint64_t cf_ptr(int i) { return (uint64_t)(uintptr_t)&g_iob[i]; }
+static uint64_t cf_ptr(int i) { return H2G(g_iob) + (uint64_t)i * IOB_STRIDE; }
 
 static void cf_write(CrtFile *f, const char *d, size_t n) {
     if (!f || !n) return;
@@ -271,8 +313,8 @@ static char *fmt_from(X86State *st, int idx, int wide) {
     (void)st;
     uint64_t p = hle_arg(st, idx);
     if (!p) return strdup("");
-    if (wide) return w2u_dup((const uint16_t *)(uintptr_t)p);
-    return strdup((const char *)(uintptr_t)p);
+    if (wide) return w2u_dup((const uint16_t *)G2H(p));
+    return strdup((const char *)G2H(p));
 }
 
 static int64_t write_formatted(CrtFile *f, const char *fmt, ArgSrc *a, int wide) {
@@ -294,21 +336,21 @@ static int64_t print_to_buffer(uint64_t buf, uint64_t count, const char *fmt, Ar
     if (buf && count) {
         size_t usz = wide_out ? 2 : 1;
         if (units < count) {
-            if (wide_out) u2w(s, (long)n, (uint16_t *)(uintptr_t)buf, units + 1);
-            else memcpy((void *)(uintptr_t)buf, s, n + 1);
+            if (wide_out) u2w(s, (long)n, (uint16_t *)G2H(buf), units + 1);
+            else memcpy(G2H(buf), s, n + 1);
         } else if (mode == 1) {
-            if (wide_out) u2w(s, (long)n, (uint16_t *)(uintptr_t)buf, count);
-            else { memcpy((void *)(uintptr_t)buf, s, count - 1); ((char *)(uintptr_t)buf)[count - 1] = 0; }
+            if (wide_out) u2w(s, (long)n, (uint16_t *)G2H(buf), count);
+            else { memcpy(G2H(buf), s, count - 1); ((char *)G2H(buf))[count - 1] = 0; }
         } else if (mode == 2) {
             if (wide_out) {
                 uint16_t *tmp = malloc((units + 1) * 2);
                 u2w(s, (long)n, tmp, units + 1);
-                memcpy((void *)(uintptr_t)buf, tmp, count * 2);
+                memcpy(G2H(buf), tmp, count * 2);
                 free(tmp);
-            } else memcpy((void *)(uintptr_t)buf, s, count);
+            } else memcpy(G2H(buf), s, count);
             ret = (units == count) ? (int64_t)units : -1;
         } else {
-            memset((void *)(uintptr_t)buf, 0, usz);
+            memset(G2H(buf), 0, usz);
             ret = -1;
         }
     }
@@ -343,21 +385,24 @@ HLE(crt__scprintf) { char *f = fmt_from(st, 0, 0); ArgSrc a = { st, 1, 0 }; RET(
 HLE(crt__vscprintf) { char *f = fmt_from(st, 0, 0); ArgSrc a = { st, 0, ARG(1) }; RET(print_to_buffer(0, 0, f, &a, 0, 0, 1)); free(f); }
 HLE(crt__vscwprintf) { char *f = fmt_from(st, 0, 1); ArgSrc a = { st, 0, ARG(1) }; RET(print_to_buffer(0, 0, f, &a, 1, 1, 1)); free(f); }
 
-// UCRT entry points: options (bit0 legacy null termination, bit1 standard snprintf behaviour)
-HLE(ucrt_vfprintf) { char *f = fmt_from(st, 2, 0); ArgSrc a = { st, 0, ARG(4) }; RET(write_formatted(cf_get(ARG(1)), f, &a, 0)); free(f); }
-HLE(ucrt_vfwprintf) { char *f = fmt_from(st, 2, 1); ArgSrc a = { st, 0, ARG(4) }; RET(write_formatted(cf_get(ARG(1)), f, &a, 1)); free(f); }
+// UCRT entry points: options (bit0 legacy null termination, bit1 standard snprintf behaviour).
+// The options argument is 64-bit, so in 32-bit programs the later arguments start one slot later.
+#define UI(n) ((n) + (g_mode32 ? 1 : 0))
+#define UA(n) hle_arg(st, UI(n))
+HLE(ucrt_vfprintf) { char *f = fmt_from(st, UI(2), 0); ArgSrc a = { st, 0, UA(4) }; RET(write_formatted(cf_get(UA(1)), f, &a, 0)); free(f); }
+HLE(ucrt_vfwprintf) { char *f = fmt_from(st, UI(2), 1); ArgSrc a = { st, 0, UA(4) }; RET(write_formatted(cf_get(UA(1)), f, &a, 1)); free(f); }
 static int64_t ucrt_vsprintf_impl(X86State *st, int wide) {
-    uint64_t opt = ARG(0), buf = ARG(1), count = ARG(2);
-    char *f = fmt_from(st, 3, wide);
-    ArgSrc a = { st, 0, ARG(5) };
+    uint64_t opt = ARG(0), buf = UA(1), count = UA(2);
+    char *f = fmt_from(st, UI(3), wide);
+    ArgSrc a = { st, 0, UA(5) };
     int mode = (opt & 2) ? 1 : 2;
     int64_t r;
     if (!buf || !count) r = print_to_buffer(0, 0, f, &a, wide, wide, 1);
     else {
         r = print_to_buffer(buf, count, f, &a, wide, wide, mode);
         if (r < 0 && !(opt & 1)) { // UCRT NUL-terminates truncated output unless legacy flag
-            if (wide) ((uint16_t *)(uintptr_t)buf)[count - 1] = 0;
-            else ((char *)(uintptr_t)buf)[count - 1] = 0;
+            if (wide) ((uint16_t *)G2H(buf))[count - 1] = 0;
+            else ((char *)G2H(buf))[count - 1] = 0;
         }
     }
     free(f);
@@ -365,20 +410,20 @@ static int64_t ucrt_vsprintf_impl(X86State *st, int wide) {
 }
 HLE(ucrt_vsprintf) { RET(ucrt_vsprintf_impl(st, 0)); }
 HLE(ucrt_vswprintf) { RET(ucrt_vsprintf_impl(st, 1)); }
-HLE(ucrt_vsprintf_s) { char *f = fmt_from(st, 3, 0); ArgSrc a = { st, 0, ARG(5) }; RET(print_to_buffer(ARG(1), ARG(2), f, &a, 0, 0, 3)); free(f); }
-HLE(ucrt_vswprintf_s) { char *f = fmt_from(st, 3, 1); ArgSrc a = { st, 0, ARG(5) }; RET(print_to_buffer(ARG(1), ARG(2), f, &a, 1, 1, 3)); free(f); }
+HLE(ucrt_vsprintf_s) { char *f = fmt_from(st, UI(3), 0); ArgSrc a = { st, 0, UA(5) }; RET(print_to_buffer(UA(1), UA(2), f, &a, 0, 0, 3)); free(f); }
+HLE(ucrt_vswprintf_s) { char *f = fmt_from(st, UI(3), 1); ArgSrc a = { st, 0, UA(5) }; RET(print_to_buffer(UA(1), UA(2), f, &a, 1, 1, 3)); free(f); }
 HLE(ucrt_vsnprintf_s) {
-    char *f = fmt_from(st, 4, 0);
-    ArgSrc a = { st, 0, ARG(6) };
-    uint64_t c = ARG(3) < ARG(2) ? ARG(3) + 1 : ARG(2);
-    RET(print_to_buffer(ARG(1), c, f, &a, 0, 0, 1));
+    char *f = fmt_from(st, UI(4), 0);
+    ArgSrc a = { st, 0, UA(6) };
+    uint64_t c = UA(3) < UA(2) ? UA(3) + 1 : UA(2);
+    RET(print_to_buffer(UA(1), c, f, &a, 0, 0, 1));
     free(f);
 }
 HLE(ucrt_vsnwprintf_s) {
-    char *f = fmt_from(st, 4, 1);
-    ArgSrc a = { st, 0, ARG(6) };
-    uint64_t c = ARG(3) < ARG(2) ? ARG(3) + 1 : ARG(2);
-    RET(print_to_buffer(ARG(1), c, f, &a, 1, 1, 1));
+    char *f = fmt_from(st, UI(4), 1);
+    ArgSrc a = { st, 0, UA(6) };
+    uint64_t c = UA(3) < UA(2) ? UA(3) + 1 : UA(2);
+    RET(print_to_buffer(UA(1), c, f, &a, 1, 1, 1));
     free(f);
 }
 
@@ -409,26 +454,26 @@ HLE(crt_swscanf) {
     free(f); free(s);
 }
 HLE(ucrt_vsscanf) { // (options, buffer, count, format, locale, va)
-    char *f = fmt_from(st, 3, 0);
-    size_t cnt = ARG(2);
-    const char *src = CSTR(1);
+    char *f = fmt_from(st, UI(3), 0);
+    size_t cnt = UA(2);
+    const char *src = CSTR(UI(1));
     char *copy = NULL;
     if (cnt != (size_t)-1) { copy = strndup(src, cnt); src = copy; }
-    ArgSrc a = { st, 0, ARG(5) };
+    ArgSrc a = { st, 0, UA(5) };
     RET((int64_t)scan_str(src, f, &a, 0, (ARG(0) & 1) != 0));
     free(f); free(copy);
 }
 HLE(ucrt_vswscanf) {
-    char *f = fmt_from(st, 3, 1);
-    char *s = w2u_dup(WSTR(1));
-    ArgSrc a = { st, 0, ARG(5) };
+    char *f = fmt_from(st, UI(3), 1);
+    char *s = w2u_dup(WSTR(UI(1)));
+    ArgSrc a = { st, 0, UA(5) };
     RET((int64_t)scan_str(s, f, &a, 1, (ARG(0) & 1) != 0));
     free(f); free(s);
 }
 HLE(ucrt_vfscanf) { // (options, FILE*, format, locale, va)
-    char *f = fmt_from(st, 2, 0);
-    ArgSrc a = { st, 0, ARG(4) };
-    RET((int64_t)scan_file(cf_get(ARG(1)), f, &a, 0, (ARG(0) & 1) != 0));
+    char *f = fmt_from(st, UI(2), 0);
+    ArgSrc a = { st, 0, UA(4) };
+    RET((int64_t)scan_file(cf_get(UA(1)), f, &a, 0, (ARG(0) & 1) != 0));
     free(f);
 }
 
@@ -512,8 +557,8 @@ HLE(crt_gets) {
 }
 HLE(crt_fopen) { RET(crt_open_file(CSTR(0), CSTR(1))); }
 HLE(crt__wfopen) { char *p = w2u_dup(WSTR(0)), *m = w2u_dup(WSTR(1)); RET(crt_open_file(p, m)); free(p); free(m); }
-HLE(crt_fopen_s) { uint64_t f = crt_open_file(CSTR(1), CSTR(2)); mem_wr(ARG(0), 8, f); RET(f ? 0 : (uint64_t)g_errno); }
-HLE(crt__wfopen_s) { char *p = w2u_dup(WSTR(1)), *m = w2u_dup(WSTR(2)); uint64_t f = crt_open_file(p, m); mem_wr(ARG(0), 8, f); RET(f ? 0 : (uint64_t)g_errno); free(p); free(m); }
+HLE(crt_fopen_s) { uint64_t f = crt_open_file(CSTR(1), CSTR(2)); wr_ptr(ARG(0), f); RET(f ? 0 : (uint64_t)g_errno); }
+HLE(crt__wfopen_s) { char *p = w2u_dup(WSTR(1)), *m = w2u_dup(WSTR(2)); uint64_t f = crt_open_file(p, m); wr_ptr(ARG(0), f); RET(f ? 0 : (uint64_t)g_errno); free(p); free(m); }
 HLE(crt__fsopen) { RET(crt_open_file(CSTR(0), CSTR(1))); }
 HLE(crt_freopen) {
     CrtFile *f = cf_get(ARG(2));
@@ -558,7 +603,7 @@ HLE(crt__fseeki64) {
     CrtFile *f = cf_get(ARG(0));
     if (!f || f->kind != CF_HOST) { RET(-1); return; }
     f->ungot = -1; f->eof = 0;
-    RET(fseeko(f->hf, (off_t)(int64_t)ARG(1), (int)ARG(2)) ? -1 : 0);
+    RET(fseeko(f->hf, (off_t)(int64_t)ARG64(1, 1), (int)ARGS(2, 3)) ? -1 : 0);
 }
 HLE(crt_ftell) { CrtFile *f = cf_get(ARG(0)); RET(f && f->kind == CF_HOST ? (uint64_t)(int64_t)(int32_t)ftello(f->hf) : (uint64_t)-1); }
 HLE(crt__ftelli64) { CrtFile *f = cf_get(ARG(0)); RET(f && f->kind == CF_HOST ? (uint64_t)(int64_t)ftello(f->hf) : (uint64_t)-1); }
@@ -608,18 +653,18 @@ HLE(crt__getcwd) {
     uint64_t buf = ARG(0);
     size_t n = (size_t)(int32_t)ARG(1);
     size_t need = strlen(g_proc->cwd_win) + 1;
-    if (!buf) { buf = (uint64_t)(uintptr_t)malloc(need > n ? need : n); n = need > n ? need : n; }
+    if (!buf) { buf = H2G(g_malloc(need > n ? need : n)); n = need > n ? need : n; }
     if (need > n) { g_errno = ERANGE; RET(0); return; }
-    memcpy((void *)(uintptr_t)buf, g_proc->cwd_win, need);
+    memcpy(G2H(buf), g_proc->cwd_win, need);
     RET(buf);
 }
 HLE(crt__wgetcwd) {
     uint64_t buf = ARG(0);
     size_t n = (size_t)(int32_t)ARG(1);
     size_t need = u2w(g_proc->cwd_win, -1, NULL, 0) + 1;
-    if (!buf) { n = need > n ? need : n; buf = (uint64_t)(uintptr_t)malloc(n * 2); }
+    if (!buf) { n = need > n ? need : n; buf = H2G(g_malloc(n * 2)); }
     if (need > n) { RET(0); return; }
-    u2w(g_proc->cwd_win, -1, (uint16_t *)(uintptr_t)buf, n);
+    u2w(g_proc->cwd_win, -1, (uint16_t *)G2H(buf), n);
     RET(buf);
 }
 HLE(crt__fullpath) {
@@ -627,14 +672,24 @@ HLE(crt__fullpath) {
     path_normalize_win(CSTR(1), norm, sizeof norm);
     uint64_t buf = ARG(0);
     size_t n = ARG(2);
-    if (!buf) { buf = (uint64_t)(uintptr_t)strdup(norm); RET(buf); return; }
+    if (!buf) { buf = H2G(g_strdup(norm)); RET(buf); return; }
     if (strlen(norm) + 1 > n) { RET(0); return; }
-    memcpy((void *)(uintptr_t)buf, norm, strlen(norm) + 1);
+    memcpy(G2H(buf), norm, strlen(norm) + 1);
     RET(buf);
 }
 
+// big: 1 = struct _stat64, 0 = _stat64i32, 2 = 32-bit struct _stat32 (32-bit times and size)
 static void fill_stat(uint64_t dst, const struct stat *sb, int big) {
-    uint8_t *d = (uint8_t *)(uintptr_t)dst;
+    uint8_t *d = (uint8_t *)G2H(dst);
+    if (big == 2) {
+        memset(d, 0, 36);
+        uint16_t mode = (uint16_t)((S_ISDIR(sb->st_mode) ? 0x4000 : 0x8000) | ((sb->st_mode & S_IRUSR) ? 0x124 : 0) | ((sb->st_mode & S_IWUSR) ? 0x92 : 0));
+        uint16_t nlink = 1;
+        uint32_t dev = 2, sz = (uint32_t)sb->st_size, at = (uint32_t)sb->st_atime, mt = (uint32_t)sb->st_mtime, ct = (uint32_t)sb->st_ctime;
+        memcpy(d, &dev, 4); memcpy(d + 6, &mode, 2); memcpy(d + 8, &nlink, 2); memcpy(d + 16, &dev, 4);
+        memcpy(d + 20, &sz, 4); memcpy(d + 24, &at, 4); memcpy(d + 28, &mt, 4); memcpy(d + 32, &ct, 4);
+        return;
+    }
     memset(d, 0, big ? 56 : 48);
     uint16_t mode = (uint16_t)((S_ISDIR(sb->st_mode) ? 0x4000 : 0x8000) | ((sb->st_mode & S_IRUSR) ? 0x124 : 0) | ((sb->st_mode & S_IWUSR) ? 0x92 : 0));
     uint16_t nlink = 1;
@@ -674,6 +729,12 @@ static void fstat_impl(X86State *st, int big) {
 }
 HLE(crt__fstat64) { fstat_impl(st, 1); }
 HLE(crt__fstat64i32) { fstat_impl(st, 0); }
+// msvcrt's plain _stat / _fstat use 32-bit times and sizes in 32-bit programs
+HLE(crt__stat_plain) { stat_impl(st, CSTR(0), g_mode32 ? 2 : 0); }
+HLE(crt__wstat_plain) { char *p = w2u_dup(WSTR(0)); stat_impl(st, p, g_mode32 ? 2 : 0); free(p); }
+HLE(crt__fstat_plain) { fstat_impl(st, g_mode32 ? 2 : 0); }
+HLE(crt__stat32) { stat_impl(st, CSTR(0), 2); }
+HLE(crt__fstat32) { fstat_impl(st, 2); }
 
 // low level io
 HLE(crt__open) {
@@ -702,7 +763,7 @@ HLE(crt__write) {
     RET((uint64_t)(int64_t)write(fd, PTR(1), n));
 }
 HLE(crt__lseek) { RET((uint64_t)(int64_t)(int32_t)lseek((int)ARG(0), (off_t)(int32_t)ARG(1), (int)ARG(2))); }
-HLE(crt__lseeki64) { RET((uint64_t)(int64_t)lseek((int)ARG(0), (off_t)(int64_t)ARG(1), (int)ARG(2))); }
+HLE(crt__lseeki64) { RET((uint64_t)(int64_t)lseek((int)ARG(0), (off_t)(int64_t)ARG64(1, 1), (int)ARGS(2, 3))); }
 HLE(crt__filelength) { struct stat sb; RET(fstat((int)ARG(0), &sb) ? (uint64_t)-1 : (uint64_t)sb.st_size); }
 HLE(crt__get_osfhandle) { int fd = (int)ARG(0); RET(fd <= 2 ? h_std(fd) : (uint64_t)fd); }
 HLE(crt_perror) {
@@ -715,31 +776,56 @@ HLE(crt_perror) {
 
 // ---- memory ---------------------------------------------------------------------------------
 
-HLE(crt_malloc) { RET(malloc(ARG(0) ? ARG(0) : 1)); }
-HLE(crt_calloc) { RET(calloc(ARG(0) ? ARG(0) : 1, ARG(1) ? ARG(1) : 1)); }
-HLE(crt_realloc) { RET(realloc(PTR(0), ARG(1))); }
-HLE(crt_free) { free(PTR(0)); RET(0); }
-HLE(crt__msize) { RET(ARG(0) ? HOST_MSIZE(PTR(0)) : (size_t)-1); }
+HLE(crt_malloc) { RET(g_malloc(ARG(0) ? ARG(0) : 1)); }
+HLE(crt_calloc) { RET(g_calloc(ARG(0) ? ARG(0) : 1, ARG(1) ? ARG(1) : 1)); }
+HLE(crt_realloc) { RET(g_realloc(PTR(0), ARG(1))); }
+HLE(crt_free) { g_free(PTR(0)); RET(0); }
+HLE(crt__msize) { RET(ARG(0) ? g_msize(PTR(0)) : (size_t)-1); }
 HLE(crt__recalloc) {
-    size_t old = ARG(0) ? HOST_MSIZE(PTR(0)) : 0;
+    size_t old = ARG(0) ? g_msize(PTR(0)) : 0;
     size_t n = ARG(1) * ARG(2);
-    void *p = realloc(PTR(0), n);
+    void *p = g_realloc(PTR(0), n);
     if (p && n > old) memset((char *)p + old, 0, n - old);
     RET(p);
 }
-HLE(crt__aligned_malloc) {
-    void *p = NULL;
-    size_t al = ARG(1) < 16 ? 16 : ARG(1);
-    if (posix_memalign(&p, al, ARG(0) ? ARG(0) : 1)) p = NULL;
-    RET(p);
+// Aligned blocks: 64-bit programs use posix_memalign; 32-bit ones over-allocate in the guest heap
+// and keep the real block address (and a marker) in the 8 bytes before the aligned pointer.
+#define ALIGN_MAGIC 0x4E474C41u
+static void *aligned_alloc_g(size_t n, size_t al) {
+    if (!g_mode32) { void *p = NULL; if (posix_memalign(&p, al, n ? n : 1)) p = NULL; return p; }
+    uint8_t *raw = g_malloc(n + al + 8);
+    if (!raw) return NULL;
+    uint64_t a = (H2G(raw) + 8 + al - 1) & ~(uint64_t)(al - 1);
+    mem_wr(a - 8, 4, ALIGN_MAGIC);
+    mem_wr(a - 4, 4, H2G(raw));
+    return G2H(a);
 }
+static void aligned_free_g(void *p) {
+    if (!p) return;
+    if (!g_mode32) { free(p); return; }
+    uint64_t a = H2G(p);
+    if (mem_rd(a - 8, 4) == ALIGN_MAGIC) { mem_wr(a - 8, 4, 0); g_free(G2H(mem_rd(a - 4, 4))); }
+    else g_free(p);
+}
+static size_t aligned_size_g(void *p) {
+    if (!g_mode32) return HOST_MSIZE(p);
+    uint64_t a = H2G(p);
+    if (mem_rd(a - 8, 4) != ALIGN_MAGIC) return g_msize(p);
+    uint64_t raw = mem_rd(a - 4, 4);
+    return g_msize(G2H(raw)) - (size_t)(a - raw);
+}
+HLE(crt__aligned_malloc) {
+    size_t al = ARG(1) < 16 ? 16 : ARG(1);
+    RET(aligned_alloc_g(ARG(0) ? ARG(0) : 1, al));
+}
+HLE(crt__aligned_free) { aligned_free_g(PTR(0)); RET(0); }
 HLE(crt__aligned_realloc) {
     size_t al = ARG(2) < 16 ? 16 : ARG(2);
-    void *p = NULL;
-    if (posix_memalign(&p, al, ARG(1) ? ARG(1) : 1) == 0 && ARG(0)) {
-        size_t old = HOST_MSIZE(PTR(0));
+    void *p = aligned_alloc_g(ARG(1) ? ARG(1) : 1, al);
+    if (p && ARG(0)) {
+        size_t old = aligned_size_g(PTR(0));
         memcpy(p, PTR(0), old < ARG(1) ? old : ARG(1));
-        free(PTR(0));
+        aligned_free_g(PTR(0));
     }
     RET(p);
 }
@@ -764,13 +850,13 @@ HLE(crt_strstr) { RET(strstr(CSTR(0), CSTR(1))); }
 HLE(crt_strpbrk) { RET(strpbrk(CSTR(0), CSTR(1))); }
 HLE(crt_strspn) { RET(strspn(CSTR(0), CSTR(1))); }
 HLE(crt_strcspn) { RET(strcspn(CSTR(0), CSTR(1))); }
-HLE(crt__strdup) { RET(ARG(0) ? strdup(CSTR(0)) : NULL); }
+HLE(crt__strdup) { RET(ARG(0) ? g_strdup(CSTR(0)) : NULL); }
 HLE(crt_strtok) { RET(strtok_r(PTR(0), CSTR(1), &g_strtok_save)); (void)g_strtok_save_dummy; }
-HLE(crt_strtok_s) { char *save = (char *)(uintptr_t)mem_rd(ARG(2), 8); char *r = strtok_r(PTR(0), CSTR(1), &save); mem_wr(ARG(2), 8, (uint64_t)(uintptr_t)save); RET(r); }
+HLE(crt_strtok_s) { char *save = (char *)G2H(rd_ptr(ARG(2))); char *r = strtok_r(PTR(0), CSTR(1), &save); wr_ptr(ARG(2), H2G(save)); RET(r); }
 HLE(crt__strlwr) { for (char *p = PTR(0); *p; p++) *p = (char)tolower((unsigned char)*p); RET(ARG(0)); }
 HLE(crt__strupr) { for (char *p = PTR(0); *p; p++) *p = (char)toupper((unsigned char)*p); RET(ARG(0)); }
 HLE(crt__strrev) { char *s = PTR(0); size_t n = strlen(s); for (size_t i = 0; i < n / 2; i++) { char t = s[i]; s[i] = s[n - 1 - i]; s[n - 1 - i] = t; } RET(ARG(0)); }
-HLE(crt_strerror) { RET(strerror((int)ARG(0))); }
+HLE(crt_strerror) { snprintf(g_cg->strerror_buf, sizeof g_cg->strerror_buf, "%s", strerror((int)ARG(0))); RET(g_cg->strerror_buf); }
 HLE(crt_strerror_s) { snprintf(PTR(0), ARG(1), "%s", strerror((int)ARG(2))); RET(0); }
 HLE(crt_strcoll) { RET((int64_t)strcmp(CSTR(0), CSTR(1))); }
 HLE(crt_strxfrm) { size_t n = strlen(CSTR(1)); if (ARG(2) > n) strcpy(PTR(0), CSTR(1)); RET(n); }
@@ -835,7 +921,7 @@ HLE(crt_wcsstr) {
     for (; *h; h++) if (wcmp(h, n, nl, 0) == 0) { RET(h); return; }
     RET(0);
 }
-HLE(crt__wcsdup) { const uint16_t *s = WSTR(0); size_t n = wstrlen(s); uint16_t *d = malloc((n + 1) * 2); memcpy(d, s, (n + 1) * 2); RET(d); }
+HLE(crt__wcsdup) { const uint16_t *s = WSTR(0); size_t n = wstrlen(s); uint16_t *d = g_malloc((n + 1) * 2); memcpy(d, s, (n + 1) * 2); RET(d); }
 HLE(crt__wcslwr) { for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)towlower(*p); RET(ARG(0)); }
 HLE(crt__wcsupr) { for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)towupper(*p); RET(ARG(0)); }
 HLE(crt_wcscpy_s) { const uint16_t *s = WSTR(2); size_t n = wstrlen(s); if (n + 1 > ARG(1)) { RET(ERANGE); return; } memmove(PTR(0), s, (n + 1) * 2); RET(0); }
@@ -877,45 +963,45 @@ static int64_t clamp32(long long v) { if (v > INT32_MAX) { g_errno = ERANGE; ret
 HLE(crt_atoi) { RET((int64_t)(int32_t)strtol(CSTR(0), NULL, 10)); }
 HLE(crt_atoll) { RET((int64_t)strtoll(CSTR(0), NULL, 10)); }
 HLE(crt_atof) { RETD(atof(CSTR(0))); }
-HLE(crt_strtod) { char *e; double v = strtod(CSTR(0), &e); if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)e); RETD(v); }
-HLE(crt_strtof) { char *e; float v = strtof(CSTR(0), &e); if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)e); RETF(v); }
-HLE(crt_strtol) { char *e; long long v = strtoll(CSTR(0), &e, (int)ARG(2)); if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)e); RET(clamp32(v)); }
+HLE(crt_strtod) { char *e; double v = strtod(CSTR(0), &e); if (ARG(1)) wr_ptr(ARG(1), H2G(e)); RETD(v); }
+HLE(crt_strtof) { char *e; float v = strtof(CSTR(0), &e); if (ARG(1)) wr_ptr(ARG(1), H2G(e)); RETF(v); }
+HLE(crt_strtol) { char *e; long long v = strtoll(CSTR(0), &e, (int)ARG(2)); if (ARG(1)) wr_ptr(ARG(1), H2G(e)); RET(clamp32(v)); }
 HLE(crt_strtoul) {
     char *e;
     const char *s = CSTR(0);
     unsigned long long v = strtoull(s, &e, (int)ARG(2));
-    if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)e);
+    if (ARG(1)) wr_ptr(ARG(1), H2G(e));
     const char *p = s; while (isspace((unsigned char)*p)) p++;
     if (*p != '-' && v > UINT32_MAX) { g_errno = ERANGE; v = UINT32_MAX; }
     RET((uint32_t)v);
 }
-HLE(crt_strtoll) { char *e; long long v = strtoll(CSTR(0), &e, (int)ARG(2)); if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)e); RET(v); }
-HLE(crt_strtoull) { char *e; unsigned long long v = strtoull(CSTR(0), &e, (int)ARG(2)); if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)e); RET(v); }
+HLE(crt_strtoll) { char *e; long long v = strtoll(CSTR(0), &e, (int)ARG(2)); if (ARG(1)) wr_ptr(ARG(1), H2G(e)); RET(v); }
+HLE(crt_strtoull) { char *e; unsigned long long v = strtoull(CSTR(0), &e, (int)ARG(2)); if (ARG(1)) wr_ptr(ARG(1), H2G(e)); RET(v); }
 HLE(crt__wtoi) { size_t n; char *s = wide_ascii(WSTR(0), &n); RET((int64_t)(int32_t)strtol(s, NULL, 10)); free(s); }
 HLE(crt__wtoi64) { size_t n; char *s = wide_ascii(WSTR(0), &n); RET((int64_t)strtoll(s, NULL, 10)); free(s); }
 HLE(crt__wtof) { size_t n; char *s = wide_ascii(WSTR(0), &n); RETD(atof(s)); free(s); }
 HLE(crt_wcstol) {
     size_t n; const uint16_t *w = WSTR(0); char *s = wide_ascii(w, &n); char *e;
     long long v = strtoll(s, &e, (int)ARG(2));
-    if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)(w + (e - s)));
+    if (ARG(1)) wr_ptr(ARG(1), H2G(w + (e - s)));
     RET(clamp32(v)); free(s);
 }
 HLE(crt_wcstoul) {
     size_t n; const uint16_t *w = WSTR(0); char *s = wide_ascii(w, &n); char *e;
     unsigned long long v = strtoull(s, &e, (int)ARG(2));
-    if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)(w + (e - s)));
+    if (ARG(1)) wr_ptr(ARG(1), H2G(w + (e - s)));
     RET((uint32_t)v); free(s);
 }
 HLE(crt_wcstoll) {
     size_t n; const uint16_t *w = WSTR(0); char *s = wide_ascii(w, &n); char *e;
     long long v = strtoll(s, &e, (int)ARG(2));
-    if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)(w + (e - s)));
+    if (ARG(1)) wr_ptr(ARG(1), H2G(w + (e - s)));
     RET(v); free(s);
 }
 HLE(crt_wcstod) {
     size_t n; const uint16_t *w = WSTR(0); char *s = wide_ascii(w, &n); char *e;
     double v = strtod(s, &e);
-    if (ARG(1)) mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)(w + (e - s)));
+    if (ARG(1)) wr_ptr(ARG(1), H2G(w + (e - s)));
     RETD(v); free(s);
 }
 static void itoa_impl(uint64_t v, int neg, char *buf, int radix) {
@@ -930,11 +1016,11 @@ static void itoa_impl(uint64_t v, int neg, char *buf, int radix) {
 }
 HLE(crt__itoa) { int32_t v = (int32_t)ARG(0); int r = (int)ARG(2); itoa_impl(v < 0 && r == 10 ? (uint64_t)(-(int64_t)v) : (uint32_t)v, v < 0 && r == 10, PTR(1), r); RET(ARG(1)); }
 HLE(crt__ultoa) { itoa_impl((uint32_t)ARG(0), 0, PTR(1), (int)ARG(2)); RET(ARG(1)); }
-HLE(crt__i64toa) { int64_t v = (int64_t)ARG(0); int r = (int)ARG(2); itoa_impl(v < 0 && r == 10 ? (uint64_t)(-v) : (uint64_t)v, v < 0 && r == 10, PTR(1), r); RET(ARG(1)); }
-HLE(crt__ui64toa) { itoa_impl(ARG(0), 0, PTR(1), (int)ARG(2)); RET(ARG(1)); }
+HLE(crt__i64toa) { int64_t v = (int64_t)ARG64(0, 0); int r = (int)ARGS(2, 3); itoa_impl(v < 0 && r == 10 ? (uint64_t)(-v) : (uint64_t)v, v < 0 && r == 10, G2H(ARGS(1, 2)), r); RET(ARGS(1, 2)); }
+HLE(crt__ui64toa) { itoa_impl(ARG64(0, 0), 0, G2H(ARGS(1, 2)), (int)ARGS(2, 3)); RET(ARGS(1, 2)); }
 HLE(crt__itoa_s) { int32_t v = (int32_t)ARG(0); int r = (int)ARG(3); char tmp[72]; itoa_impl(v < 0 && r == 10 ? (uint64_t)(-(int64_t)v) : (uint32_t)v, v < 0 && r == 10, tmp, r); if (strlen(tmp) + 1 > ARG(2)) { RET(ERANGE); return; } strcpy(PTR(1), tmp); RET(0); }
-HLE(crt__i64toa_s) { int64_t v = (int64_t)ARG(0); int r = (int)ARG(3); char tmp[72]; itoa_impl(v < 0 && r == 10 ? (uint64_t)(-v) : (uint64_t)v, v < 0 && r == 10, tmp, r); if (strlen(tmp) + 1 > ARG(2)) { RET(ERANGE); return; } strcpy(PTR(1), tmp); RET(0); }
-HLE(crt__ui64toa_s) { char tmp[72]; itoa_impl(ARG(0), 0, tmp, (int)ARG(3)); if (strlen(tmp) + 1 > ARG(2)) { RET(ERANGE); return; } strcpy(PTR(1), tmp); RET(0); }
+HLE(crt__i64toa_s) { int64_t v = (int64_t)ARG64(0, 0); int r = (int)ARGS(3, 4); char tmp[72]; itoa_impl(v < 0 && r == 10 ? (uint64_t)(-v) : (uint64_t)v, v < 0 && r == 10, tmp, r); if (strlen(tmp) + 1 > ARGS(2, 3)) { RET(ERANGE); return; } strcpy(G2H(ARGS(1, 2)), tmp); RET(0); }
+HLE(crt__ui64toa_s) { char tmp[72]; itoa_impl(ARG64(0, 0), 0, tmp, (int)ARGS(3, 4)); if (strlen(tmp) + 1 > ARGS(2, 3)) { RET(ERANGE); return; } strcpy(G2H(ARGS(1, 2)), tmp); RET(0); }
 HLE(crt__itow) { int32_t v = (int32_t)ARG(0); int r = (int)ARG(2); char tmp[72]; itoa_impl(v < 0 && r == 10 ? (uint64_t)(-(int64_t)v) : (uint32_t)v, v < 0 && r == 10, tmp, r); u2w(tmp, -1, PTR(1), 72); RET(ARG(1)); }
 
 // multibyte <-> wide (UTF-8)
@@ -1023,8 +1109,8 @@ HLE(crt_iswctype) {
 HLE(crt_towupper) { RET((uint16_t)towupper((wint_t)(uint16_t)ARG(0))); }
 HLE(crt_towlower) { RET((uint16_t)towlower((wint_t)(uint16_t)ARG(0))); }
 HLE(crt__isctype) { int c = (int)(int32_t)ARG(0); RET(c >= -1 && c < 256 ? (g_ctype_table[c + 1] & (unsigned)ARG(1)) : 0); }
-HLE(crt___pctype_func) { RET(g_pctype); }
-static void *data_pctype(void) { return &g_pctype; }
+HLE(crt___pctype_func) { RET(g_cg->pctype); }
+static void *data_pctype(void) { return &g_cg->pctype; }
 
 // ---- math -------------------------------------------------------------------------------------
 
@@ -1039,10 +1125,10 @@ M2(atan2) M2(pow) M2(fmod) M2(hypot) M2(fmin) M2(fmax) M2(copysign) M2(remainder
 M1F(sinf) M1F(cosf) M1F(tanf) M1F(asinf) M1F(acosf) M1F(atanf) M1F(expf) M1F(logf) M1F(log10f) M1F(log2f) M1F(sqrtf)
 M1F(floorf) M1F(ceilf) M1F(roundf) M1F(truncf) M1F(fabsf) M1F(sinhf) M1F(coshf) M1F(tanhf) M1F(exp2f) M1F(cbrtf)
 M2F(atan2f) M2F(powf) M2F(fmodf) M2F(hypotf) M2F(fminf) M2F(fmaxf) M2F(copysignf)
-HLE(crt_ldexp) { RETD(ldexp(FARG(0), (int)ARG(1))); }
+HLE(crt_ldexp) { RETD(ldexp(FARG(0), (int)ARGS(1, 2))); }
 HLE(crt_ldexpf) { RETF(ldexpf(FARGF(0), (int)ARG(1))); }
-HLE(crt_frexp) { int e; double m = frexp(FARG(0), &e); mem_wr(ARG(1), 4, (uint32_t)e); RETD(m); }
-HLE(crt_modf) { double ip; double f = modf(FARG(0), &ip); memcpy(PTR(1), &ip, 8); RETD(f); }
+HLE(crt_frexp) { int e; double m = frexp(FARG(0), &e); mem_wr(ARGS(1, 2), 4, (uint32_t)e); RETD(m); }
+HLE(crt_modf) { double ip; double f = modf(FARG(0), &ip); memcpy(G2H(ARGS(1, 2)), &ip, 8); RETD(f); }
 HLE(crt_modff) { float ip; float f = modff(FARGF(0), &ip); memcpy(PTR(1), &ip, 4); RETF(f); }
 HLE(crt_fma) { RETD(fma(FARG(0), FARG(1), FARG(2))); }
 HLE(crt_lround) { RET((int64_t)(int32_t)lround(FARG(0))); }
@@ -1050,7 +1136,7 @@ HLE(crt_llround) { RET((int64_t)llround(FARG(0))); }
 HLE(crt_lrint) { RET((int64_t)(int32_t)lrint(FARG(0))); }
 HLE(crt_llrint) { RET((int64_t)llrint(FARG(0))); }
 HLE(crt_ilogb) { RET((int64_t)ilogb(FARG(0))); }
-HLE(crt_scalbn) { RETD(scalbn(FARG(0), (int)ARG(1))); }
+HLE(crt_scalbn) { RETD(scalbn(FARG(0), (int)ARGS(1, 2))); }
 HLE(crt__finite) { RET(isfinite(FARG(0)) ? 1 : 0); }
 HLE(crt__isnan) { RET(isnan(FARG(0)) ? 1 : 0); }
 HLE(crt__fpclass) {
@@ -1069,10 +1155,10 @@ HLE(crt__fpclass) {
 HLE(crt__dclass) { int c = fpclassify(FARG(0)); RET(c == FP_NAN ? 2 : c == FP_INFINITE ? 1 : c == FP_ZERO ? 0 : c == FP_SUBNORMAL ? (uint64_t)-2 : (uint64_t)-1); }
 HLE(crt__dsign) { RET(signbit(FARG(0)) ? 0x8000 : 0); }
 HLE(crt_abs) { int32_t v = (int32_t)ARG(0); RET((uint32_t)(v < 0 ? -v : v)); }
-HLE(crt_llabs) { int64_t v = (int64_t)ARG(0); RET((uint64_t)(v < 0 ? -v : v)); }
+HLE(crt_llabs) { int64_t v = (int64_t)ARG64(0, 0); RET((uint64_t)(v < 0 ? -v : v)); }
 HLE(crt_div) { int32_t a = (int32_t)ARG(0), b = (int32_t)ARG(1); RET(((uint64_t)(uint32_t)(a % b) << 32) | (uint32_t)(a / b)); }
 HLE(crt_ldiv) { int32_t a = (int32_t)ARG(0), b = (int32_t)ARG(1); RET(((uint64_t)(uint32_t)(a % b) << 32) | (uint32_t)(a / b)); }
-HLE(crt_lldiv) { int64_t a = (int64_t)ARG(1), b = (int64_t)ARG(2); mem_wr(ARG(0), 8, (uint64_t)(a / b)); mem_wr(ARG(0) + 8, 8, (uint64_t)(a % b)); RET(ARG(0)); }
+HLE(crt_lldiv) { int64_t a = (int64_t)ARG64(1, 1), b = (int64_t)ARG64(2, 3); mem_wr(ARG(0), 8, (uint64_t)(a / b)); mem_wr(ARG(0) + 8, 8, (uint64_t)(a % b)); RET(ARG(0)); }
 HLE(crt__controlfp) { RET(0x0008001F); }
 HLE(crt__controlfp_s) { if (ARG(0)) mem_wr(ARG(0), 4, 0x0008001F); RET(0); }
 HLE_STUB_RET(crt__clearfp, 0)
@@ -1116,22 +1202,22 @@ HLE(crt___current_exception_context) { RET(&g_current_exception[1]); }
 HLE_STUB_RET(crt___std_type_info_destroy_list, 0)
 HLE(crt___std_exception_copy) {
     uint64_t from = ARG(0), to = ARG(1);
-    uint64_t what = mem_rd(from, 8);
-    if (mem_rd(from + 8, 1) && what) { mem_wr(to, 8, (uint64_t)(uintptr_t)strdup((const char *)(uintptr_t)what)); mem_wr(to + 8, 1, 1); }
-    else { mem_wr(to, 8, what); mem_wr(to + 8, 1, 0); }
+    uint64_t what = rd_ptr(from);
+    if (mem_rd(from + PSZ, 1) && what) { wr_ptr(to, H2G(g_strdup((const char *)G2H(what)))); mem_wr(to + PSZ, 1, 1); }
+    else { wr_ptr(to, what); mem_wr(to + PSZ, 1, 0); }
     RET(0);
 }
-HLE(crt___std_exception_destroy) { uint64_t p = ARG(0); if (mem_rd(p + 8, 1)) free((void *)(uintptr_t)mem_rd(p, 8)); mem_wr(p, 8, 0); mem_wr(p + 8, 1, 0); RET(0); }
-HLE(crt___std_type_info_compare) { RET((int64_t)strcmp((const char *)(uintptr_t)(ARG(0) + 17), (const char *)(uintptr_t)(ARG(1) + 17))); }
-HLE(crt___std_type_info_name) { RET(ARG(0) + 16); }
-HLE(crt___std_type_info_hash) { const unsigned char *s = (const unsigned char *)(uintptr_t)(ARG(0) + 17); uint64_t h = 14695981039346656037ull; while (*s) { h ^= *s++; h *= 1099511628211ull; } RET(h); }
+HLE(crt___std_exception_destroy) { uint64_t p = ARG(0); if (mem_rd(p + PSZ, 1)) g_free(G2H(rd_ptr(p))); wr_ptr(p, 0); mem_wr(p + PSZ, 1, 0); RET(0); }
+HLE(crt___std_type_info_compare) { RET((int64_t)strcmp((const char *)G2H(ARG(0) + 2 * PSZ + 1), (const char *)G2H(ARG(1) + 2 * PSZ + 1))); }
+HLE(crt___std_type_info_name) { RET(ARG(0) + 2 * PSZ); }
+HLE(crt___std_type_info_hash) { const unsigned char *s = (const unsigned char *)G2H(ARG(0) + 2 * PSZ + 1); uint64_t h = 14695981039346656037ull; while (*s) { h ^= *s++; h *= 1099511628211ull; } RET(h); }
 
 static void sort_swap(uint8_t *a, uint8_t *b, size_t w) { while (w--) { uint8_t t = *a; *a++ = *b; *b++ = t; } }
 static int sort_cmp(X86State *st, uint64_t fn, uint64_t ctx, int has_ctx, uint8_t *a, uint8_t *b) {
     uint64_t args[3];
     int n;
-    if (has_ctx) { args[0] = ctx; args[1] = (uint64_t)(uintptr_t)a; args[2] = (uint64_t)(uintptr_t)b; n = 3; }
-    else { args[0] = (uint64_t)(uintptr_t)a; args[1] = (uint64_t)(uintptr_t)b; n = 2; }
+    if (has_ctx) { args[0] = ctx; args[1] = H2G(a); args[2] = H2G(b); n = 3; }
+    else { args[0] = H2G(a); args[1] = H2G(b); n = 2; }
     return (int)(int32_t)soul_guest_call(st, fn, n, args);
 }
 static void guest_qsort(X86State *st, uint8_t *base, size_t n, size_t w, uint64_t fn, uint64_t ctx, int has_ctx) {
@@ -1171,7 +1257,7 @@ HLE(crt_bsearch) {
     size_t lo = 0, hi = n;
     while (lo < hi) {
         size_t mid = (lo + hi) / 2;
-        uint64_t args[2] = { key, (uint64_t)(uintptr_t)(base + mid * w) };
+        uint64_t args[2] = { key, H2G(base + mid * w) };
         int c = (int)(int32_t)soul_guest_call(st, fn, 2, args);
         if (c == 0) { RET(base + mid * w); return; }
         if (c < 0) hi = mid; else lo = mid + 1;
@@ -1194,9 +1280,9 @@ static void env_set(const char *name, const char *value) {
     size_t n = strlen(name);
     for (int i = 0; i < h->env_count; i++) {
         if (strncasecmp(h->env[i], name, n) == 0 && h->env[i][n] == '=') {
-            free(h->env[i]);
+            g_free(h->env[i]);
             if (value && *value) {
-                h->env[i] = malloc(n + strlen(value) + 2);
+                h->env[i] = g_malloc(n + strlen(value) + 2);
                 sprintf(h->env[i], "%s=%s", name, value);
             } else {
                 memmove(&h->env[i], &h->env[i + 1], sizeof(char *) * (size_t)(h->env_count - i));
@@ -1207,7 +1293,7 @@ static void env_set(const char *name, const char *value) {
     }
     if (!value || !*value) return;
     h->env = realloc(h->env, sizeof(char *) * (size_t)(h->env_count + 2));
-    h->env[h->env_count] = malloc(n + strlen(value) + 2);
+    h->env[h->env_count] = g_malloc(n + strlen(value) + 2);
     sprintf(h->env[h->env_count], "%s=%s", name, value);
     h->env[++h->env_count] = NULL;
 }
@@ -1218,12 +1304,12 @@ HLE(crt__wgetenv) {
     char *n = w2u_dup(WSTR(0));
     const char *v = env_lookup(n);
     free(n);
-    RET(v ? u2w_dup(v) : NULL); // leaked intentionally (rare)
+    RET(v ? u2w_gdup(v) : NULL); // leaked intentionally (rare)
 }
 HLE(crt_getenv_s) {
     const char *v = env_lookup(CSTR(3));
     size_t need = v ? strlen(v) + 1 : 0;
-    if (ARG(0)) mem_wr(ARG(0), 8, need);
+    if (ARG(0)) wr_ptr(ARG(0), need);
     if (!v) { if (ARG(1) && ARG(2)) *(char *)PTR(1) = 0; RET(0); return; }
     if (ARG(2) < need) { RET(ERANGE); return; }
     memcpy(PTR(1), v, need);
@@ -1231,8 +1317,8 @@ HLE(crt_getenv_s) {
 }
 HLE(crt__dupenv_s) {
     const char *v = env_lookup(CSTR(2));
-    mem_wr(ARG(0), 8, v ? (uint64_t)(uintptr_t)strdup(v) : 0);
-    if (ARG(1)) mem_wr(ARG(1), 8, v ? strlen(v) + 1 : 0);
+    wr_ptr(ARG(0), v ? H2G(g_strdup(v)) : 0);
+    if (ARG(1)) wr_ptr(ARG(1), v ? strlen(v) + 1 : 0);
     RET(0);
 }
 HLE(crt__putenv) {
@@ -1264,16 +1350,16 @@ HLE(crt__get_errno) { mem_wr(ARG(0), 4, (uint32_t)g_errno); RET(0); }
 HLE(crt__set_errno) { g_errno = (int)ARG(0); RET(0); }
 HLE(crt_signal) { RET(0); }
 HLE(crt_raise) { if ((int)ARG(0) == 22) soul_exit_process(st, 3); RET(0); }
-HLE(crt_setlocale) { static char c[] = "C"; RET(c); }
-HLE(crt__wsetlocale) { static uint16_t c[] = { 'C', 0 }; RET(c); }
+HLE(crt_setlocale) { RET(g_cg->locale_c); }
+HLE(crt__wsetlocale) { RET(g_cg->wlocale_c); }
 HLE(crt_localeconv) { RET(g_lconv); }
 HLE(crt____lc_codepage_func) { RET(65001); }
 HLE(crt____mb_cur_max_func) { RET((uint64_t)g_mb_cur_max); }
-HLE(crt___lc_locale_name_func) { static uint64_t names[6]; RET(names); }
+HLE(crt___lc_locale_name_func) { RET(g_cg->lc_names); }
 HLE_STUB_RET(crt__configthreadlocale, 2)
-HLE(crt__create_locale) { static uint64_t loc[4]; RET(loc); }
+HLE(crt__create_locale) { RET(g_cg->locale_obj); }
 HLE_STUB_RET(crt__free_locale, 0)
-HLE(crt__get_current_locale) { static uint64_t loc[4]; RET(loc); }
+HLE(crt__get_current_locale) { RET(g_cg->locale_obj); }
 HLE(crt__getpid) { RET(4242); }
 uint64_t k32_create_thread(X86State *st, uint64_t stack, uint64_t fn, uint64_t arg, uint32_t flags, uint64_t tid_out);
 // _beginthreadex(security, stack, start, arg, initflag, thrdaddr)
@@ -1298,8 +1384,36 @@ HLE(crt__sleep) {
     RET(0);
 }
 
-// setjmp / longjmp (Win64 _JUMP_BUFFER layout)
+// setjmp / longjmp. 32-bit _JUMP_BUFFER: Ebp, Ebx, Edi, Esi, Esp, Eip, Registration, TryLevel, ...
+static void setjmp32(X86State *st) {
+    uint64_t b = ARG(0);
+    mem_wr(b + 0, 4, st->gpr[RBP]);
+    mem_wr(b + 4, 4, st->gpr[RBX]);
+    mem_wr(b + 8, 4, st->gpr[RDI]);
+    mem_wr(b + 12, 4, st->gpr[RSI]);
+    mem_wr(b + 16, 4, (uint32_t)(st->gpr[RSP] + 4)); // ESP after returning to the caller
+    mem_wr(b + 20, 4, mem_rd(st->gpr[RSP], 4));      // return address
+    mem_wr(b + 24, 4, mem_rd(teb_of(st), 4));        // SEH registration
+    mem_wr(b + 28, 4, 0xFFFFFFFFu);
+    mem_wr(b + 32, 4, 0x56433230u);                  // "VC20" cookie
+    RET(0);
+}
+static void longjmp32(X86State *st) {
+    uint64_t b = ARG(0);
+    int v = (int)ARG(1);
+    st->gpr[RBP] = mem_rd(b + 0, 4);
+    st->gpr[RBX] = mem_rd(b + 4, 4);
+    st->gpr[RDI] = mem_rd(b + 8, 4);
+    st->gpr[RSI] = mem_rd(b + 12, 4);
+    st->gpr[RSP] = mem_rd(b + 16, 4);
+    st->rip = mem_rd(b + 20, 4);
+    mem_wr(teb_of(st), 4, mem_rd(b + 24, 4));
+    st->gpr[RAX] = (uint32_t)(v ? v : 1);
+    st->thread->skip_ret = 1;
+}
+// Win64 _JUMP_BUFFER layout
 HLE(crt__setjmp) {
+    if (g_mode32) { setjmp32(st); return; }
     uint64_t b = ARG(0);
     uint64_t ret = mem_rd(st->gpr[RSP], 8);
     mem_wr(b + 0, 8, ARG(1));
@@ -1314,10 +1428,11 @@ HLE(crt__setjmp) {
     mem_wr(b + 72, 8, st->gpr[R15]);
     mem_wr(b + 80, 8, ret);
     mem_wr(b + 88, 4, st->mxcsr);
-    for (int i = 0; i < 10; i++) memcpy((void *)(uintptr_t)(b + 96 + 16 * (uint64_t)i), &st->xmm[6 + i], 16);
+    for (int i = 0; i < 10; i++) memcpy(G2H(b + 96 + 16 * (uint64_t)i), &st->xmm[6 + i], 16);
     RET(0);
 }
 HLE(crt_longjmp) {
+    if (g_mode32) { longjmp32(st); return; }
     uint64_t b = ARG(0);
     int v = (int)ARG(1);
     st->gpr[RBX] = mem_rd(b + 8, 8);
@@ -1330,7 +1445,7 @@ HLE(crt_longjmp) {
     st->gpr[R14] = mem_rd(b + 64, 8);
     st->gpr[R15] = mem_rd(b + 72, 8);
     st->rip = mem_rd(b + 80, 8);
-    for (int i = 0; i < 10; i++) memcpy(&st->xmm[6 + i], (void *)(uintptr_t)(b + 96 + 16 * (uint64_t)i), 16);
+    for (int i = 0; i < 10; i++) memcpy(&st->xmm[6 + i], G2H(b + 96 + 16 * (uint64_t)i), 16);
     st->gpr[RAX] = (uint32_t)(v ? v : 1);
     st->thread->skip_ret = 1;
 }
@@ -1344,20 +1459,26 @@ static void tm_to_guest(const struct tm *t) {
 static void guest_to_tm(uint64_t p, struct tm *t) {
     memset(t, 0, sizeof *t);
     int32_t v[9];
-    memcpy(v, (void *)(uintptr_t)p, sizeof v);
+    memcpy(v, G2H(p), sizeof v);
     t->tm_sec = v[0]; t->tm_min = v[1]; t->tm_hour = v[2]; t->tm_mday = v[3]; t->tm_mon = v[4];
     t->tm_year = v[5]; t->tm_wday = v[6]; t->tm_yday = v[7]; t->tm_isdst = v[8];
 }
 HLE(crt_time64) { time_t t = time(NULL); if (ARG(0)) mem_wr(ARG(0), 8, (uint64_t)t); RET(t); }
 HLE(crt_time32) { time_t t = time(NULL); if (ARG(0)) mem_wr(ARG(0), 4, (uint64_t)t); RET((uint32_t)t); }
 HLE(crt_clock) { RET((int64_t)((soul_now() - g_clock_start) * 1000.0)); }
-HLE(crt_difftime) { RETD((double)((int64_t)ARG(0) - (int64_t)ARG(1))); }
+HLE(crt_difftime) { RETD((double)((int64_t)ARG64(0, 0) - (int64_t)ARG64(1, 2))); }
+HLE(crt_difftime32) { RETD((double)((int32_t)ARG(0) - (int32_t)ARG(1))); }
 HLE(crt_localtime64) { time_t t = (time_t)(int64_t)mem_rd(ARG(0), 8); struct tm r; localtime_r(&t, &r); tm_to_guest(&r); RET(&g_tm); }
 HLE(crt_gmtime64) { time_t t = (time_t)(int64_t)mem_rd(ARG(0), 8); struct tm r; gmtime_r(&t, &r); tm_to_guest(&r); RET(&g_tm); }
 HLE(crt_localtime32) { time_t t = (time_t)(int32_t)mem_rd(ARG(0), 4); struct tm r; localtime_r(&t, &r); tm_to_guest(&r); RET(&g_tm); }
 HLE(crt_localtime64_s) { time_t t = (time_t)(int64_t)mem_rd(ARG(1), 8); struct tm r; localtime_r(&t, &r); tm_to_guest(&r); memcpy(PTR(0), &g_tm, 36); RET(0); }
 HLE(crt_gmtime64_s) { time_t t = (time_t)(int64_t)mem_rd(ARG(1), 8); struct tm r; gmtime_r(&t, &r); tm_to_guest(&r); memcpy(PTR(0), &g_tm, 36); RET(0); }
 HLE(crt_mktime64) { struct tm t; guest_to_tm(ARG(0), &t); time_t r = mktime(&t); tm_to_guest(&t); memcpy(PTR(0), &g_tm, 36); RET((int64_t)r); }
+HLE(crt_localtime_plain);
+HLE(crt_gmtime_plain);
+HLE(crt_mktime_plain);
+HLE(crt_ctime_plain);
+HLE(crt_difftime_plain);
 HLE(crt_mkgmtime64) { struct tm t; guest_to_tm(ARG(0), &t); RET((int64_t)timegm(&t)); }
 HLE(crt_strftime) { struct tm t; guest_to_tm(ARG(3), &t); RET(strftime(PTR(0), ARG(1), CSTR(2), &t)); }
 HLE(crt_wcsftime) {
@@ -1370,6 +1491,11 @@ HLE(crt_wcsftime) {
     RET(w < ARG(1) ? w : 0);
 }
 HLE(crt_asctime) { struct tm t; guest_to_tm(ARG(0), &t); strftime(g_asctime_buf, sizeof g_asctime_buf, "%a %b %d %H:%M:%S %Y\n", &t); RET(g_asctime_buf); }
+HLE(crt_ctime32) { time_t t = (time_t)(int32_t)mem_rd(ARG(0), 4); struct tm r; localtime_r(&t, &r); strftime(g_asctime_buf, sizeof g_asctime_buf, "%a %b %d %H:%M:%S %Y\n", &r); RET(g_asctime_buf); }
+HLE(crt_gmtime32) { time_t t = (time_t)(int32_t)mem_rd(ARG(0), 4); struct tm r; gmtime_r(&t, &r); tm_to_guest(&r); RET(&g_tm); }
+HLE(crt_mktime32) { struct tm t; guest_to_tm(ARG(0), &t); time_t r = mktime(&t); tm_to_guest(&t); memcpy(PTR(0), &g_tm, 36); RET((uint32_t)(int32_t)r); }
+// msvcrt.dll: in 32-bit programs time(), localtime() & co. use a 32-bit time_t
+HLE(crt_time_plain) { if (g_mode32) { time_t t = time(NULL); if (ARG(0)) mem_wr(ARG(0), 4, (uint64_t)t); RET((uint32_t)t); } else { time_t t = time(NULL); if (ARG(0)) mem_wr(ARG(0), 8, (uint64_t)t); RET(t); } }
 HLE(crt_ctime64) { time_t t = (time_t)(int64_t)mem_rd(ARG(0), 8); struct tm r; localtime_r(&t, &r); strftime(g_asctime_buf, sizeof g_asctime_buf, "%a %b %d %H:%M:%S %Y\n", &r); RET(g_asctime_buf); }
 HLE(crt_ftime64) {
     struct timeval tv; gettimeofday(&tv, NULL);
@@ -1378,10 +1504,14 @@ HLE(crt_ftime64) {
     memcpy(d, &s, 8); memcpy(d + 8, &ms, 2); memcpy(d + 10, &tz, 2); memcpy(d + 12, &dst, 2);
     RET(0);
 }
+HLE(crt_localtime_plain) { if (g_mode32) crt_localtime32(st); else crt_localtime64(st); }
+HLE(crt_gmtime_plain) { if (g_mode32) crt_gmtime32(st); else crt_gmtime64(st); }
+HLE(crt_mktime_plain) { if (g_mode32) crt_mktime32(st); else crt_mktime64(st); }
+HLE(crt_ctime_plain) { if (g_mode32) crt_ctime32(st); else crt_ctime64(st); }
+HLE(crt_difftime_plain) { if (g_mode32) crt_difftime32(st); else crt_difftime(st); }
 HLE(crt__strdate) { time_t t = time(NULL); struct tm r; localtime_r(&t, &r); strftime(PTR(0), 9, "%m/%d/%y", &r); RET(ARG(0)); }
 HLE(crt__strtime) { time_t t = time(NULL); struct tm r; localtime_r(&t, &r); strftime(PTR(0), 9, "%H:%M:%S", &r); RET(ARG(0)); }
 HLE(crt__tzset) { RET(0); }
-static int32_t g_timezone = 0, g_daylight = 0;
 static void *data_timezone(void) { return &g_timezone; }
 static void *data_daylight(void) { return &g_daylight; }
 HLE(crt___timezone) { RET(&g_timezone); }
@@ -1392,34 +1522,34 @@ HLE(crt___daylight) { RET(&g_daylight); }
 HLE(crt___getmainargs) {
     build_args();
     mem_wr(ARG(0), 4, (uint32_t)g_argc);
-    mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)g_argv);
-    mem_wr(ARG(2), 8, (uint64_t)(uintptr_t)g_environ);
+    wr_ptr(ARG(1), g_cg->argv);
+    wr_ptr(ARG(2), g_cg->environ_v);
     RET(0);
 }
 HLE(crt___wgetmainargs) {
     build_args();
     mem_wr(ARG(0), 4, (uint32_t)g_argc);
-    mem_wr(ARG(1), 8, (uint64_t)(uintptr_t)g_wargv);
-    mem_wr(ARG(2), 8, (uint64_t)(uintptr_t)g_wenviron);
+    wr_ptr(ARG(1), g_cg->wargv);
+    wr_ptr(ARG(2), g_cg->wenviron);
     RET(0);
 }
 HLE(crt___p___argc) { build_args(); RET(&g_argc); }
-HLE(crt___p___argv) { build_args(); RET(&g_argv); }
-HLE(crt___p___wargv) { build_args(); RET(&g_wargv); }
-HLE(crt___p__environ) { build_args(); RET(&g_environ); }
-HLE(crt___p__wenviron) { build_args(); RET(&g_wenviron); }
-HLE(crt___p__acmdln) { build_args(); RET(&g_acmdln); }
-HLE(crt___p__wcmdln) { build_args(); RET(&g_wcmdln); }
-HLE(crt___p__pgmptr) { build_args(); RET(&g_pgmptr); }
-HLE(crt___p__wpgmptr) { build_args(); RET(&g_wpgmptr); }
-HLE(crt__get_pgmptr) { build_args(); mem_wr(ARG(0), 8, (uint64_t)(uintptr_t)g_pgmptr); RET(0); }
-HLE(crt__get_wpgmptr) { build_args(); mem_wr(ARG(0), 8, (uint64_t)(uintptr_t)g_wpgmptr); RET(0); }
+HLE(crt___p___argv) { build_args(); RET(&g_cg->argv); }
+HLE(crt___p___wargv) { build_args(); RET(&g_cg->wargv); }
+HLE(crt___p__environ) { build_args(); RET(&g_cg->environ_v); }
+HLE(crt___p__wenviron) { build_args(); RET(&g_cg->wenviron); }
+HLE(crt___p__acmdln) { build_args(); RET(&g_cg->acmdln); }
+HLE(crt___p__wcmdln) { build_args(); RET(&g_cg->wcmdln); }
+HLE(crt___p__pgmptr) { build_args(); RET(&g_cg->pgmptr); }
+HLE(crt___p__wpgmptr) { build_args(); RET(&g_cg->wpgmptr); }
+HLE(crt__get_pgmptr) { build_args(); wr_ptr(ARG(0), g_cg->pgmptr); RET(0); }
+HLE(crt__get_wpgmptr) { build_args(); wr_ptr(ARG(0), g_cg->wpgmptr); RET(0); }
 HLE(crt___p__fmode) { RET(&g_fmode); }
 HLE(crt___p__commode) { RET(&g_commode); }
 HLE(crt__set_fmode) { g_fmode = (int)ARG(0); RET(0); }
 HLE(crt__get_fmode) { mem_wr(ARG(0), 4, (uint32_t)g_fmode); RET(0); }
-HLE(crt__get_initial_narrow_environment) { build_args(); RET(g_environ); }
-HLE(crt__get_initial_wide_environment) { build_args(); RET(g_wenviron); }
+HLE(crt__get_initial_narrow_environment) { build_args(); RET(g_cg->environ_v); }
+HLE(crt__get_initial_wide_environment) { build_args(); RET(g_cg->wenviron); }
 HLE(crt__configure_narrow_argv) { build_args(); RET(0); }
 HLE(crt__initialize_narrow_environment) { build_args(); RET(0); }
 HLE_STUB_RET(crt__set_app_type, 0)
@@ -1432,15 +1562,15 @@ HLE_STUB_RET(crt__set_abort_behavior, 0)
 HLE_STUB_RET(crt__set_purecall_handler, 0)
 HLE_STUB_RET(crt__crt_debugger_hook, 0)
 HLE(crt__initterm) {
-    for (uint64_t p = ARG(0); p < ARG(1); p += 8) {
-        uint64_t fn = mem_rd(p, 8);
+    for (uint64_t p = ARG(0); p < ARG(1); p += (uint64_t)PSZ) {
+        uint64_t fn = rd_ptr(p);
         if (fn) soul_guest_call(st, fn, 0, NULL);
     }
     RET(0);
 }
 HLE(crt__initterm_e) {
-    for (uint64_t p = ARG(0); p < ARG(1); p += 8) {
-        uint64_t fn = mem_rd(p, 8);
+    for (uint64_t p = ARG(0); p < ARG(1); p += (uint64_t)PSZ) {
+        uint64_t fn = rd_ptr(p);
         if (fn) {
             uint64_t r = soul_guest_call(st, fn, 0, NULL) & 0xFFFFFFFF;
             if (r) { RET(r); return; }
@@ -1448,34 +1578,36 @@ HLE(crt__initterm_e) {
     }
     RET(0);
 }
-// UCRT onexit tables: struct { void **first, **last, **end; }
-HLE(crt__initialize_onexit_table) { uint64_t t = ARG(0); mem_wr(t, 8, 0); mem_wr(t + 8, 8, 0); mem_wr(t + 16, 8, 0); RET(0); }
+// UCRT onexit tables: struct { void **first, **last, **end; } (pointer-sized fields)
+HLE(crt__initialize_onexit_table) { uint64_t t = ARG(0); wr_ptr(t, 0); wr_ptr(t + PSZ, 0); wr_ptr(t + 2 * PSZ, 0); RET(0); }
 HLE(crt__register_onexit_function) {
     uint64_t t = ARG(0);
-    uint64_t first = mem_rd(t, 8), last = mem_rd(t + 8, 8), end = mem_rd(t + 16, 8);
+    const uint64_t ps = (uint64_t)PSZ;
+    uint64_t first = rd_ptr(t), last = rd_ptr(t + ps), end = rd_ptr(t + 2 * ps);
     if (last == end) {
-        size_t n = first ? (end - first) / 8 : 0;
+        size_t n = first ? (end - first) / ps : 0;
         size_t nn = n ? n * 2 : 32;
-        uint64_t nf = (uint64_t)(uintptr_t)realloc((void *)(uintptr_t)first, nn * 8);
+        uint64_t nf = H2G(g_realloc(G2H(first), nn * ps));
         last = nf + (last - first);
         first = nf;
-        end = nf + nn * 8;
+        end = nf + nn * ps;
     }
-    mem_wr(last, 8, ARG(1));
-    last += 8;
-    mem_wr(t, 8, first); mem_wr(t + 8, 8, last); mem_wr(t + 16, 8, end);
+    wr_ptr(last, ARG(1));
+    last += ps;
+    wr_ptr(t, first); wr_ptr(t + ps, last); wr_ptr(t + 2 * ps, end);
     RET(0);
 }
 HLE(crt__execute_onexit_table) {
     uint64_t t = ARG(0);
-    uint64_t first = mem_rd(t, 8), last = mem_rd(t + 8, 8);
-    mem_wr(t, 8, 0); mem_wr(t + 8, 8, 0); mem_wr(t + 16, 8, 0);
+    const uint64_t ps = (uint64_t)PSZ;
+    uint64_t first = rd_ptr(t), last = rd_ptr(t + ps);
+    wr_ptr(t, 0); wr_ptr(t + ps, 0); wr_ptr(t + 2 * ps, 0);
     while (last > first) {
-        last -= 8;
-        uint64_t fn = mem_rd(last, 8);
+        last -= ps;
+        uint64_t fn = rd_ptr(last);
         if (fn) soul_guest_call(st, fn, 0, NULL);
     }
-    free((void *)(uintptr_t)first);
+    g_free(G2H(first));
     RET(0);
 }
 HLE(crt__crt_atexit) { push_atexit(ARG(0)); RET(0); }
@@ -1484,12 +1616,12 @@ HLE(crt__get_stream_buffer_pointers) { RET(0); }
 static void *data_fmode(void) { return &g_fmode; }
 static void *data_commode(void) { return &g_commode; }
 static void *data_argc(void) { build_args(); return &g_argc; }
-static void *data_argv(void) { build_args(); return &g_argv; }
-static void *data_wargv(void) { build_args(); return &g_wargv; }
-static void *data_environ(void) { build_args(); return &g_environ; }
-static void *data_wenviron(void) { build_args(); return &g_wenviron; }
-static void *data_acmdln(void) { build_args(); return &g_acmdln; }
-static void *data_wcmdln(void) { build_args(); return &g_wcmdln; }
+static void *data_argv(void) { build_args(); return &g_cg->argv; }
+static void *data_wargv(void) { build_args(); return &g_cg->wargv; }
+static void *data_environ(void) { build_args(); return &g_cg->environ_v; }
+static void *data_wenviron(void) { build_args(); return &g_cg->wenviron; }
+static void *data_acmdln(void) { build_args(); return &g_cg->acmdln; }
+static void *data_wcmdln(void) { build_args(); return &g_cg->wcmdln; }
 static void *data_mb_cur_max(void) { return &g_mb_cur_max; }
 static void *data_errno(void) { return &g_errno; }
 
@@ -1535,16 +1667,16 @@ const HleEntry hle_crt_table[] = {
     { "_wremove", crt__wremove, NULL }, { "_wunlink", crt__wremove, NULL }, { "rename", crt_rename, NULL }, { "_access", crt__access, NULL },
     { "_waccess", crt__waccess, NULL }, { "_mkdir", crt__mkdir, NULL }, { "_wmkdir", crt__wmkdir, NULL }, { "_rmdir", crt__rmdir, NULL },
     { "_chdir", crt__chdir, NULL }, { "_getcwd", crt__getcwd, NULL }, { "_wgetcwd", crt__wgetcwd, NULL }, { "_fullpath", crt__fullpath, NULL },
-    { "_stat64", crt__stat64, NULL }, { "_stat64i32", crt__stat64i32, NULL }, { "_stat", crt__stat64i32, NULL }, { "_stati64", crt__stat64, NULL },
-    { "_wstat64", crt__wstat64, NULL }, { "_wstat64i32", crt__wstat64i32, NULL }, { "_wstat", crt__wstat64i32, NULL },
-    { "_fstat64", crt__fstat64, NULL }, { "_fstat64i32", crt__fstat64i32, NULL }, { "_fstat", crt__fstat64i32, NULL },
+    { "_stat64", crt__stat64, NULL }, { "_stat64i32", crt__stat64i32, NULL }, { "_stat", crt__stat_plain, NULL }, { "_stat32", crt__stat32, NULL }, { "_stati64", crt__stat64, NULL },
+    { "_wstat64", crt__wstat64, NULL }, { "_wstat64i32", crt__wstat64i32, NULL }, { "_wstat", crt__wstat_plain, NULL },
+    { "_fstat64", crt__fstat64, NULL }, { "_fstat64i32", crt__fstat64i32, NULL }, { "_fstat", crt__fstat_plain, NULL }, { "_fstat32", crt__fstat32, NULL },
     { "_open", crt__open, NULL }, { "_close", crt__close, NULL }, { "_read", crt__read, NULL }, { "_write", crt__write, NULL },
     { "_lseek", crt__lseek, NULL }, { "_lseeki64", crt__lseeki64, NULL }, { "_filelength", crt__filelength, NULL },
     { "_get_osfhandle", crt__get_osfhandle, NULL }, { "perror", crt_perror, NULL },
     // memory
     { "malloc", crt_malloc, NULL }, { "calloc", crt_calloc, NULL }, { "realloc", crt_realloc, NULL }, { "free", crt_free, NULL },
     { "_msize", crt__msize, NULL }, { "_recalloc", crt__recalloc, NULL }, { "_aligned_malloc", crt__aligned_malloc, NULL },
-    { "_aligned_free", crt_free, NULL }, { "_aligned_realloc", crt__aligned_realloc, NULL }, { "_expand", crt__expand, NULL },
+    { "_aligned_free", crt__aligned_free, NULL }, { "_aligned_realloc", crt__aligned_realloc, NULL }, { "_expand", crt__expand, NULL },
     { "_callnewh", crt__callnewh, NULL }, { "_free_base", crt_free, NULL }, { "_malloc_base", crt_malloc, NULL }, { "_calloc_base", crt_calloc, NULL }, { "_realloc_base", crt_realloc, NULL },
     // strings
     { "strlen", crt_strlen, NULL }, { "strnlen", crt_strnlen, NULL }, { "strcpy", crt_strcpy, NULL }, { "strncpy", crt_strncpy, NULL },
@@ -1633,14 +1765,14 @@ const HleEntry hle_crt_table[] = {
     { "_get_current_locale", crt__get_current_locale, NULL }, { "_getpid", crt__getpid, NULL }, { "_beginthreadex", crt__beginthreadex, NULL },
     { "_beginthread", crt__beginthread, NULL }, { "_sleep", crt__sleep, NULL },
     { "_endthreadex", crt__endthreadex, NULL }, { "_endthread", crt__endthread, NULL }, { "_Thrd_yield", crt__Thrd_yield, NULL },
-    { "_setjmp", crt__setjmp, NULL }, { "setjmp", crt__setjmp, NULL }, { "_setjmpex", crt__setjmp, NULL }, { "longjmp", crt_longjmp, NULL }, { "_longjmp", crt_longjmp, NULL },
+    { "_setjmp", crt__setjmp, NULL }, { "_setjmp3", crt__setjmp, NULL }, { "setjmp", crt__setjmp, NULL }, { "_setjmpex", crt__setjmp, NULL }, { "longjmp", crt_longjmp, NULL }, { "_longjmp", crt_longjmp, NULL },
     // time
-    { "time", crt_time64, NULL }, { "_time64", crt_time64, NULL }, { "_time32", crt_time32, NULL }, { "clock", crt_clock, NULL }, { "difftime", crt_difftime, NULL },
-    { "_difftime64", crt_difftime, NULL }, { "localtime", crt_localtime64, NULL }, { "_localtime64", crt_localtime64, NULL }, { "_localtime32", crt_localtime32, NULL },
-    { "gmtime", crt_gmtime64, NULL }, { "_gmtime64", crt_gmtime64, NULL }, { "localtime_s", crt_localtime64_s, NULL }, { "_localtime64_s", crt_localtime64_s, NULL },
-    { "gmtime_s", crt_gmtime64_s, NULL }, { "_gmtime64_s", crt_gmtime64_s, NULL }, { "mktime", crt_mktime64, NULL }, { "_mktime64", crt_mktime64, NULL },
+    { "time", crt_time_plain, NULL }, { "_time64", crt_time64, NULL }, { "_time32", crt_time32, NULL }, { "clock", crt_clock, NULL }, { "difftime", crt_difftime_plain, NULL }, { "_difftime32", crt_difftime32, NULL },
+    { "_difftime64", crt_difftime, NULL }, { "localtime", crt_localtime_plain, NULL }, { "_localtime64", crt_localtime64, NULL }, { "_localtime32", crt_localtime32, NULL },
+    { "gmtime", crt_gmtime_plain, NULL }, { "_gmtime32", crt_gmtime32, NULL }, { "_gmtime64", crt_gmtime64, NULL }, { "localtime_s", crt_localtime64_s, NULL }, { "_localtime64_s", crt_localtime64_s, NULL },
+    { "gmtime_s", crt_gmtime64_s, NULL }, { "_gmtime64_s", crt_gmtime64_s, NULL }, { "mktime", crt_mktime_plain, NULL }, { "_mktime32", crt_mktime32, NULL }, { "_mktime64", crt_mktime64, NULL },
     { "_mkgmtime64", crt_mkgmtime64, NULL }, { "_mkgmtime", crt_mkgmtime64, NULL }, { "strftime", crt_strftime, NULL }, { "wcsftime", crt_wcsftime, NULL },
-    { "asctime", crt_asctime, NULL }, { "ctime", crt_ctime64, NULL }, { "_ctime64", crt_ctime64, NULL }, { "_ftime", crt_ftime64, NULL }, { "_ftime64", crt_ftime64, NULL },
+    { "asctime", crt_asctime, NULL }, { "ctime", crt_ctime_plain, NULL }, { "_ctime32", crt_ctime32, NULL }, { "_ctime64", crt_ctime64, NULL }, { "_ftime", crt_ftime64, NULL }, { "_ftime64", crt_ftime64, NULL },
     { "_strdate", crt__strdate, NULL }, { "_strtime", crt__strtime, NULL }, { "_tzset", crt__tzset, NULL }, { "_timezone", NULL, data_timezone },
     { "_daylight", NULL, data_daylight }, { "__timezone", crt___timezone, NULL }, { "__daylight", crt___daylight, NULL },
     // startup

@@ -255,7 +255,7 @@ void reg_shutdown(void) { reg_save(); }
 // ---- strings between the ANSI (UTF-8) and wide APIs ------------------------------------------
 static char *astr(uint64_t p, int wide) {
     if (!p) return NULL;
-    return wide ? w2u_dup((const uint16_t *)(uintptr_t)p) : strdup((const char *)(uintptr_t)p);
+    return wide ? w2u_dup((const uint16_t *)G2H(p)) : strdup((const char *)G2H(p));
 }
 static int is_str(uint32_t t) { return t == REG_SZ || t == REG_EXPAND_SZ || t == REG_MULTI_SZ; }
 
@@ -290,7 +290,7 @@ static uint32_t give_value(const RVal *v, int wide, uint64_t type_out, uint64_t 
         uint32_t cap = (uint32_t)mem_rd(cb_out, 4);
         if (data) {
             if (cap < size) r = ERROR_MORE_DATA;
-            else memcpy((void *)(uintptr_t)data, src, size);
+            else memcpy(G2H(data), src, size);
         }
         mem_wr(cb_out, 4, size);
     } else if (data) r = ERROR_INVALID_PARAMETER;
@@ -302,14 +302,14 @@ static uint32_t give_value(const RVal *v, int wide, uint64_t type_out, uint64_t 
 static void open_key(X86State *st, int wide, int ex) {
     RKey *k = key_of(ARG(0));
     uint64_t out = ex ? hle_arg(st, 4) : ARG(2);
-    if (out) mem_wr(out, 8, 0);
+    if (out) wr_ptr(out, 0);
     if (!k) { RET(ERROR_INVALID_HANDLE); return; }
     char *sub = astr(ARG(1), wide);
     RKey *r = walk(k, sub, 0);
     free(sub);
     if (!r) { RET(ERROR_FILE_NOT_FOUND); return; }
     uint64_t h = handle_for(r);
-    if (out) mem_wr(out, 8, h);
+    if (out) wr_ptr(out, h);
     RET(h ? 0 : ERROR_NOT_ENOUGH_MEMORY);
 }
 HLE(r_RegOpenKeyExA) { open_key(st, 0, 1); }
@@ -319,7 +319,7 @@ HLE(r_RegOpenKeyW) { open_key(st, 1, 0); }
 static void create_key(X86State *st, int wide, int ex) {
     RKey *k = key_of(ARG(0));
     uint64_t out = ex ? hle_arg(st, 7) : ARG(2), disp = ex ? hle_arg(st, 8) : 0;
-    if (out) mem_wr(out, 8, 0);
+    if (out) wr_ptr(out, 0);
     if (!k) { RET(ERROR_INVALID_HANDLE); return; }
     char *sub = astr(ARG(1), wide);
     RKey *exist = walk(k, sub, 0);
@@ -327,7 +327,7 @@ static void create_key(X86State *st, int wide, int ex) {
     free(sub);
     if (disp) mem_wr(disp, 4, exist ? 2 : 1); // REG_OPENED_EXISTING_KEY / REG_CREATED_NEW_KEY
     uint64_t h = handle_for(r);
-    if (out) mem_wr(out, 8, h);
+    if (out) wr_ptr(out, h);
     RET(0);
 }
 HLE(r_RegCreateKeyExA) { create_key(st, 0, 1); }
@@ -359,7 +359,7 @@ static void set_value(X86State *st, int wide) {
     if (!k) { RET(ERROR_INVALID_HANDLE); return; }
     char *name = astr(ARG(1), wide);
     uint32_t type = (uint32_t)ARG(3), size = (uint32_t)hle_arg(st, 5);
-    const uint8_t *data = (const uint8_t *)(uintptr_t)hle_arg(st, 4);
+    const uint8_t *data = (const uint8_t *)G2H(hle_arg(st, 4));
     if (wide || !is_str(type)) val_set(k, name, type, data, data ? size : 0);
     else { uint32_t n; uint8_t *c = to_stored(type, data, size, &n); val_set(k, name, type, c, n); free(c); }
     free(name);
@@ -418,7 +418,7 @@ static void sh_set_value(X86State *st, int wide) {
     char *sub = astr(ARG(1), wide), *name = astr(ARG(2), wide);
     RKey *r = walk(k, sub, 1);
     uint32_t type = (uint32_t)ARG(3), size = (uint32_t)hle_arg(st, 5);
-    const uint8_t *data = (const uint8_t *)(uintptr_t)hle_arg(st, 4);
+    const uint8_t *data = (const uint8_t *)G2H(hle_arg(st, 4));
     if (wide || !is_str(type)) val_set(r, name, type, data, size);
     else { uint32_t n; uint8_t *c = to_stored(type, data, size, &n); val_set(r, name, type, c, n); free(c); }
     free(sub); free(name);
@@ -476,8 +476,8 @@ static uint32_t put_name(const char *name, uint64_t buf, uint64_t cch_ptr, int w
     uint32_t cap = (uint32_t)mem_rd(cch_ptr, 4);
     size_t need = wide ? (size_t)u2w(name, -1, NULL, 0) : strlen(name);
     if (!buf || need + 1 > cap) { mem_wr(cch_ptr, 4, (uint32_t)need + (buf ? 0 : 1)); return ERROR_MORE_DATA; }
-    if (wide) u2w(name, -1, (uint16_t *)(uintptr_t)buf, cap);
-    else { memcpy((void *)(uintptr_t)buf, name, need); ((char *)(uintptr_t)buf)[need] = 0; }
+    if (wide) u2w(name, -1, (uint16_t *)G2H(buf), cap);
+    else { memcpy(G2H(buf), name, need); ((char *)G2H(buf))[need] = 0; }
     mem_wr(cch_ptr, 4, (uint32_t)need);
     return 0;
 }
@@ -533,8 +533,8 @@ static void query_info(X86State *st, int wide) {
 }
 HLE(r_RegQueryInfoKeyA) { query_info(st, 0); }
 HLE(r_RegQueryInfoKeyW) { query_info(st, 1); }
-HLE(r_RegOpenCurrentUser) { if (ARG(1)) mem_wr(ARG(1), 8, 0xFFFFFFFF80000001ull); RET(0); }
-HLE(r_RegConnectRegistry) { if (hle_arg(st, 2)) mem_wr(hle_arg(st, 2), 8, ARG(1)); RET(0); }
+HLE(r_RegOpenCurrentUser) { if (ARG(1)) wr_ptr(ARG(1), 0xFFFFFFFF80000001ull); RET(0); }
+HLE(r_RegConnectRegistry) { if (hle_arg(st, 2)) wr_ptr(hle_arg(st, 2), ARG(1)); RET(0); }
 HLE_STUB_RET(r_RegNotifyChangeKeyValue, 0)
 HLE_STUB_RET(r_RegSetKeySecurity, 0)
 

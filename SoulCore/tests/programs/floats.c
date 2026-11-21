@@ -5,8 +5,9 @@ int main(void) {
     double x = 0.0;
     for (int i = 1; i <= 1000; i++) x += 1.0 / ((double)i * i);
     printf("basel=%.12f pi2/6=%.12f\n", x, M_PI * M_PI / 6);
+    // exactly representable steps: x87 (32-bit) and SSE (64-bit) round differently otherwise
     float f = 1.0f;
-    for (int i = 0; i < 20; i++) f = f * 1.1f + 0.5f;
+    for (int i = 0; i < 8; i++) f = f * 1.25f + 0.5f;
     printf("f=%.6f %g %e\n", f, f, (double)f);
     printf("sqrt=%.10f sin=%.10f cos=%.10f exp=%.10f log=%.10f pow=%.6f\n", sqrt(2.0), sin(1.0), cos(1.0), exp(1.5), log(10.0), pow(2.5, 3.3));
     printf("floor=%.1f ceil=%.1f round=%.1f fmod=%.3f atan2=%.6f\n", floor(-2.5), ceil(-2.5), round(2.5), fmod(10.3, 3.0), atan2(1.0, -1.0));

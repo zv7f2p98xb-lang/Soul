@@ -48,6 +48,7 @@ typedef struct HleThunk {
     const char *dll;
     const char *name;
     int warned;
+    uint16_t argbytes; // 32-bit programs: bytes of stack arguments a stdcall function removes
 } HleThunk;
 
 #define SOUL_THUNK_STRIDE 16
@@ -143,8 +144,11 @@ int hle_is_system_dll(const char *dll);
 void hle_invoke(X86State *st, uint32_t id);
 uint32_t hle_thunk_for(SoulProcess *p, HleFn fn, const char *dll, const char *name);
 
-// Argument access for the Win64 calling convention inside HLE functions.
+// Argument access inside HLE functions. 64-bit programs use the Win64 calling convention
+// (RCX, RDX, R8, R9, then the stack); 32-bit programs pass every argument on the stack
+// (stdcall / cdecl), so argument n is the 32-bit value at [ESP + 4 + 4n].
 static inline uint64_t hle_arg(X86State *st, int n) {
+    if (g_mode32) return mem_rd((uint32_t)(st->gpr[RSP] + 4 + 4 * (uint32_t)n), 4);
     switch (n) {
     case 0: return st->gpr[RCX];
     case 1: return st->gpr[RDX];
@@ -153,11 +157,51 @@ static inline uint64_t hle_arg(X86State *st, int n) {
     default: return mem_rd(st->gpr[RSP] + 8 + 8 * (uint64_t)n, 8);
     }
 }
+// Return values. Host pointers into the guest window become guest addresses; in 32-bit mode
+// 64-bit results are split into EDX:EAX (EDX is caller-saved, so setting it is harmless).
+static inline void hle_ret(X86State *st, uint64_t v) {
+    if (g_mode32) {
+        if (v - g_gbase < 0x100000000ull) v -= g_gbase;
+        st->gpr[RAX] = (uint32_t)v;
+        st->gpr[RDX] = (uint32_t)(v >> 32);
+        return;
+    }
+    st->gpr[RAX] = v;
+}
 #define ARG(n) hle_arg(st, (n))
-#define PTR(n) ((void *)(uintptr_t)hle_arg(st, (n)))
-#define RET(v) (st->gpr[RAX] = (uint64_t)(v))
+#define PTR(n) G2H(hle_arg(st, (n)))
+#define RET(v) hle_ret(st, (uint64_t)(v))
+
+// Pointer-sized guest memory access (4 bytes for 32-bit programs, 8 for 64-bit ones).
+#define PSZ (g_mode32 ? 4 : 8)
+static inline uint64_t rd_ptr(uint64_t a) { return mem_rd(a, PSZ); }
+static inline void wr_ptr(uint64_t a, uint64_t v) { mem_wr(a, PSZ, v); }
+// Thread environment block fields (TEB64 through GS, TEB32 through FS).
+static inline uint64_t teb_of(const X86State *st) { return g_mode32 ? st->fs_base : st->gs_base; }
+#define TEB_LASTERR (g_mode32 ? 0x34 : 0x68)
+#define TEB_TLSPTR (g_mode32 ? 0x2C : 0x58)
+#define TEB_TLSSLOTS (g_mode32 ? 0xE10 : 0x1480)
+
+// gwin.c: 4 GB guest window for 32-bit programs and the heap for memory handed to the guest
+int gwin_init(void);
+void gwin_release(void);
+uint64_t gwin_map(uint64_t want, size_t size);
+void gwin_unmap(uint64_t a, size_t size);
+int gwin_contains(uint64_t a);
+void *g_malloc(size_t n);
+void *g_calloc(size_t a, size_t b);
+void *g_realloc(void *p, size_t n);
+void g_free(void *p);
+size_t g_msize(void *p);
+char *g_strdup(const char *s);
+void gheap_reset(void);
+// Allocates guest-visible memory of the given size: in the window for 32-bit programs,
+// anywhere (mmap) for 64-bit ones. Returns a host pointer.
+void *g_pages(size_t size);
+void g_pages_free(void *p, size_t size);
 
 // pe.c
+int pe_machine(const char *host_path); // 0x14C (i386), 0x8664 (x64) or 0
 struct PEModule {
     char name[128];      // lower-case file name, e.g. "foo.dll"
     char host_path[1024];

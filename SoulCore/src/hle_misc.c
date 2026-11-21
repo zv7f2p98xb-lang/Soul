@@ -6,8 +6,8 @@
 #include <unistd.h>
 #include <wctype.h>
 
-#define CSTR(n) ((const char *)(uintptr_t)hle_arg(st, (n)))
-#define WSTR(n) ((const uint16_t *)(uintptr_t)hle_arg(st, (n)))
+#define CSTR(n) ((const char *)G2H(hle_arg(st, (n))))
+#define WSTR(n) ((const uint16_t *)G2H(hle_arg(st, (n))))
 
 static void random_bytes(void *buf, size_t n) {
     int fd = open("/dev/urandom", O_RDONLY);
@@ -112,10 +112,10 @@ static void user_name(X86State *st, int wide) {
 HLE(adv_GetUserNameA) { user_name(st, 0); }
 HLE(adv_GetUserNameW) { user_name(st, 1); }
 HLE(adv_SystemFunction036) { random_bytes(PTR(0), (uint32_t)ARG(1)); RET(1); }
-HLE(adv_CryptAcquireContext) { mem_wr(ARG(0), 8, 0x5000); RET(1); }
+HLE(adv_CryptAcquireContext) { wr_ptr(ARG(0), 0x5000); RET(1); }
 HLE(adv_CryptGenRandom) { random_bytes(PTR(2), (uint32_t)ARG(1)); RET(1); }
 HLE_STUB_RET(adv_CryptReleaseContext, 1)
-HLE(adv_OpenProcessToken) { mem_wr(ARG(2), 8, 0x6000); RET(1); }
+HLE(adv_OpenProcessToken) { wr_ptr(ARG(2), 0x6000); RET(1); }
 HLE(adv_GetTokenInformation) { if (hle_arg(st, 4)) mem_wr(hle_arg(st, 4), 4, 0); set_last_error(st, ERROR_INVALID_PARAMETER); RET(0); }
 HLE_STUB_RET(adv_EventRegister, 0)
 HLE_STUB_RET(adv_EventUnregister, 0)
@@ -152,13 +152,14 @@ HLE(sh_SHGetKnownFolderPath) {
     else if (d1 == 0xF1B32785) p = "C:\\users\\soul\\AppData\\Local";
     else if (d1 == 0xFDD39AD0) p = "C:\\users\\soul\\Documents";
     else if (d1 == 0xB4BFCC3A) p = "C:\\users\\soul\\Desktop";
-    else if (d1 == 0x905E63B6) p = "C:\\Program Files";
+    else if (d1 == 0x905E63B6) p = g_mode32 ? "C:\\Program Files (x86)" : "C:\\Program Files";
+    else if (d1 == 0x7C5A40EF) p = "C:\\Program Files (x86)";
     else if (d1 == 0x62AB5D82) p = "C:\\ProgramData";
-    mem_wr(ARG(3), 8, (uint64_t)(uintptr_t)u2w_dup(p));
+    wr_ptr(ARG(3), H2G(u2w_gdup(p)));
     RET(0);
 }
-HLE(ole_CoTaskMemFree) { free(PTR(0)); RET(0); }
-HLE(ole_CoTaskMemAlloc) { RET(malloc(ARG(0) ? ARG(0) : 1)); }
+HLE(ole_CoTaskMemFree) { g_free(PTR(0)); RET(0); }
+HLE(ole_CoTaskMemAlloc) { RET(g_malloc(ARG(0) ? ARG(0) : 1)); }
 HLE_STUB_RET(ole_CoInitialize, 0)
 HLE_STUB_RET(ole_CoUninitialize, 0)
 HLE_STUB_RET(ole_CoCreateInstance, 0x80040154)
@@ -181,17 +182,17 @@ HLE(sh_CommandLineToArgvW) {
         *out = 0;
         argv[argc++] = start;
     }
-    size_t total = sizeof(uint64_t) * (size_t)(argc + 1);
+    const size_t psz = (size_t)PSZ;
+    size_t total = psz * (size_t)(argc + 1);
     for (int i = 0; i < argc; i++) total += (u2w(argv[i], -1, NULL, 0) + 1) * 2;
-    uint8_t *blk = malloc(total);
-    uint64_t *ptrs = (uint64_t *)blk;
-    uint16_t *strs = (uint16_t *)(blk + sizeof(uint64_t) * (size_t)(argc + 1));
+    uint8_t *blk = g_malloc(total); // freed by the program with LocalFree
+    uint16_t *strs = (uint16_t *)(blk + psz * (size_t)(argc + 1));
     for (int i = 0; i < argc; i++) {
-        ptrs[i] = (uint64_t)(uintptr_t)strs;
+        wr_ptr(H2G(blk) + psz * (size_t)i, H2G(strs));
         size_t n = u2w(argv[i], -1, strs, total);
         strs += n + 1;
     }
-    ptrs[argc] = 0;
+    wr_ptr(H2G(blk) + psz * (size_t)argc, 0);
     mem_wr(ARG(1), 4, (uint32_t)argc);
     free(s);
     RET(blk);
@@ -210,12 +211,13 @@ static uint64_t shell_open(const char *target) {
 HLE(sh_ShellExecuteA) { RET(shell_open((const char *)PTR(2))); }
 HLE(sh_ShellExecuteW) { char *t = ARG(2) ? w2u_dup(WSTR(2)) : NULL; RET(shell_open(t)); free(t); }
 static void shell_execute_ex(X86State *st, int wide) {
-    uint8_t *info = PTR(0);
-    uint64_t file; memcpy(&file, info + 24, 8);
-    char *t = !file ? NULL : wide ? w2u_dup((const uint16_t *)(uintptr_t)file) : strdup((const char *)(uintptr_t)file);
+    // SHELLEXECUTEINFO: cbSize, fMask, hwnd, lpVerb, lpFile, ... hInstApp
+    uint64_t info = ARG(0);
+    uint64_t file = rd_ptr(info + (g_mode32 ? 16 : 24));
+    char *t = !file ? NULL : wide ? w2u_dup((const uint16_t *)G2H(file)) : strdup((const char *)G2H(file));
     uint64_t r = shell_open(t);
     free(t);
-    memcpy(info + 56, &r, 8); // hInstApp
+    wr_ptr(info + (g_mode32 ? 32 : 56), r); // hInstApp
     RET(r > 32);
 }
 HLE(sh_ShellExecuteExA) { shell_execute_ex(st, 0); }

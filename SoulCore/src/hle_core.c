@@ -1,6 +1,7 @@
 // SoulCore - HLE core: import thunks, handles, paths, strings, console streams.
 #include "hle.h"
 #include "gui.h"
+#include "stdcall_args.h"
 #include <ctype.h>
 #include <errno.h>
 #include <strings.h>
@@ -50,6 +51,19 @@ static const HleEntry *find_entry(const char *name) {
     return NULL;
 }
 
+// Stack bytes a 32-bit system function removes on return (0 = cdecl or unknown).
+static uint16_t stdcall_bytes(const char *name) {
+    if (!name || name[0] == '#') return 0;
+    int lo = 0, hi = K_STDCALL_ARGS_COUNT - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        int c = strcmp(k_stdcall_args[mid].name, name);
+        if (!c) return k_stdcall_args[mid].bytes;
+        if (c < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return 0;
+}
+
 uint32_t hle_thunk_for(SoulProcess *p, HleFn fn, const char *dll, const char *name) {
     for (uint32_t i = 1; i < p->thunk_count; i++) {
         HleThunk *t = &p->thunks[i];
@@ -61,6 +75,15 @@ uint32_t hle_thunk_for(SoulProcess *p, HleFn fn, const char *dll, const char *na
     t->fn = fn;
     t->dll = dll ? strdup(dll) : NULL;
     t->name = name ? strdup(name) : NULL;
+    t->argbytes = 0;
+    if (g_mode32 && (!dll || hle_is_system_dll(dll))) {
+        // C runtime DLLs are cdecl even where a same-named stdcall function exists elsewhere
+        char k[128];
+        dll_key(dll ? dll : "", k, sizeof k);
+        int crt = strncmp(k, "msvc", 4) == 0 || strncmp(k, "ucrt", 4) == 0 || strncmp(k, "vcruntime", 9) == 0 ||
+                  strcmp(k, "crtdll") == 0 || strncmp(k, "api-ms-win-crt-", 15) == 0;
+        if (!crt) t->argbytes = stdcall_bytes(name);
+    }
     uint8_t *c = p->thunk_mem + (size_t)id * SOUL_THUNK_STRIDE;
     c[0] = 0xCC; c[1] = 0x53; c[2] = 0x43;
     memcpy(c + 3, &id, 4);
@@ -81,7 +104,7 @@ static void hle_unimplemented(X86State *st) {
 uint64_t hle_get_proc(SoulProcess *p, const char *dll, const char *name) {
     const HleEntry *e = find_entry(name);
     if (!e) return 0;
-    if (e->data) return (uint64_t)(uintptr_t)e->data();
+    if (e->data) return H2G(e->data());
     uint32_t id = hle_thunk_for(p, e->fn, dll, name);
     return id ? p->thunk_base + (uint64_t)id * SOUL_THUNK_STRIDE : 0;
 }
@@ -116,11 +139,14 @@ void hle_invoke(X86State *st, uint32_t id) {
     th->cur_thunk = id;
     g_hs.api_calls++;
     if (__builtin_expect(g_proc->verbose > 1, 0))
-        soul_log("[api] %s!%s rcx=%llx rdx=%llx r8=%llx\n", t->dll ? t->dll : "", t->name ? t->name : "?",
-                 (unsigned long long)st->gpr[RCX], (unsigned long long)st->gpr[RDX], (unsigned long long)st->gpr[R8]);
+        soul_log("[api] %s!%s %llx %llx %llx\n", t->dll ? t->dll : "", t->name ? t->name : "?",
+                 (unsigned long long)hle_arg(st, 0), (unsigned long long)hle_arg(st, 1), (unsigned long long)hle_arg(st, 2));
     t->fn(st);
     th->cur_thunk = prev;
-    if (!th->skip_ret) st->rip = pop64(st);
+    if (!th->skip_ret) {
+        st->rip = pop64(st);
+        if (g_mode32) st->gpr[RSP] = (uint32_t)(st->gpr[RSP] + t->argbytes); // stdcall: callee removes arguments
+    }
     th->skip_ret = 0;
 }
 
@@ -161,10 +187,10 @@ void h_free(uint64_t h) {
 uint64_t h_std(int which) { return g_hs.std_handles[which]; }
 
 void set_last_error(X86State *st, uint32_t e) {
-    if (st && st->gs_base) mem_wr(st->gs_base + 0x68, 4, e);
+    if (st && teb_of(st)) mem_wr(teb_of(st) + TEB_LASTERR, 4, e);
 }
 uint32_t get_last_error(X86State *st) {
-    return (st && st->gs_base) ? (uint32_t)mem_rd(st->gs_base + 0x68, 4) : 0;
+    return (st && teb_of(st)) ? (uint32_t)mem_rd(teb_of(st) + TEB_LASTERR, 4) : 0;
 }
 
 uint32_t errno_to_win(int e) {
@@ -258,6 +284,13 @@ uint16_t *u2w_dup(const char *s) {
     if (!s) return NULL;
     size_t n = u2w(s, -1, NULL, 0);
     uint16_t *w = malloc((n + 1) * 2);
+    u2w(s, -1, w, n + 1);
+    return w;
+}
+uint16_t *u2w_gdup(const char *s) {
+    if (!s) return NULL;
+    size_t n = u2w(s, -1, NULL, 0);
+    uint16_t *w = g_malloc((n + 1) * 2);
     u2w(s, -1, w, n + 1);
     return w;
 }
@@ -472,6 +505,7 @@ int wild_match(const char *pat, const char *s) {
 typedef struct VmRegion { uint64_t base, size; struct VmRegion *next; } VmRegion;
 static VmRegion *g_regions;
 
+// Regions are kept as guest addresses; vm_alloc returns a host pointer.
 void *vm_alloc(uint64_t addr, size_t size, int *existed) {
     size = (size + 0xFFFF) & ~(size_t)0xFFFF;
     if (existed) *existed = 0;
@@ -479,30 +513,37 @@ void *vm_alloc(uint64_t addr, size_t size, int *existed) {
         for (VmRegion *r = g_regions; r; r = r->next) {
             if (addr >= r->base && addr < r->base + r->size) {
                 if (existed) *existed = 1;
-                return (void *)(uintptr_t)addr; // commit inside reservation
+                return G2H(addr); // commit inside reservation
             }
         }
     }
-    void *want = (void *)(uintptr_t)(addr & ~0xFFFFull);
-    void *p = mmap(want, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p == MAP_FAILED) return NULL;
-    if (addr && p != want) {
-        munmap(p, size);
-        return NULL;
+    uint64_t base;
+    if (g_mode32) {
+        base = gwin_map(addr & ~0xFFFFull, size);
+        if (!base || (addr && base != (addr & ~0xFFFFull))) { if (base) gwin_unmap(base, size); return NULL; }
+    } else {
+        void *want = (void *)(uintptr_t)(addr & ~0xFFFFull);
+        void *p = mmap(want, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED) return NULL;
+        if (addr && p != want) {
+            munmap(p, size);
+            return NULL;
+        }
+        base = (uint64_t)(uintptr_t)p;
     }
     VmRegion *r = malloc(sizeof *r);
-    r->base = (uint64_t)(uintptr_t)p;
+    r->base = base;
     r->size = size;
     r->next = g_regions;
     g_regions = r;
-    return p;
+    return G2H(base);
 }
 
 int vm_free(uint64_t addr) {
     for (VmRegion **pr = &g_regions; *pr; pr = &(*pr)->next) {
         VmRegion *r = *pr;
         if (r->base == addr) {
-            munmap((void *)(uintptr_t)r->base, r->size);
+            g_pages_free(G2H(r->base), r->size);
             *pr = r->next;
             free(r);
             return 1;
@@ -544,7 +585,7 @@ int vm_query(uint64_t addr, uint64_t *base, uint64_t *alloc_base, uint64_t *size
 static void vm_free_all(void) {
     while (g_regions) {
         VmRegion *n = g_regions->next;
-        munmap((void *)(uintptr_t)g_regions->base, g_regions->size);
+        g_pages_free(G2H(g_regions->base), g_regions->size);
         free(g_regions);
         g_regions = n;
     }
@@ -554,13 +595,12 @@ static void vm_free_all(void) {
 
 static void env_add(const char *kv) {
     g_hs.env = realloc(g_hs.env, sizeof(char *) * (size_t)(g_hs.env_count + 2));
-    g_hs.env[g_hs.env_count++] = strdup(kv);
+    g_hs.env[g_hs.env_count++] = g_strdup(kv);
     g_hs.env[g_hs.env_count] = NULL;
 }
 
 void hle_init(SoulProcess *p) {
-    // keep nothing from a previous run
-    for (int i = 0; i < g_hs.env_count; i++) free(g_hs.env[i]);
+    // keep nothing from a previous run (hle_shutdown released the environment)
     free(g_hs.env);
     memset(&g_hs, 0, sizeof g_hs);
     p->hle_state = &g_hs;
@@ -568,7 +608,7 @@ void hle_init(SoulProcess *p) {
     g_hs.std_handles[0] = h_alloc(H_CONIN, &o);
     g_hs.std_handles[1] = h_alloc(H_CONOUT, &o);
     g_hs.std_handles[2] = h_alloc(H_CONERR, &o);
-    g_hs.process_heap = 0x00000000ABCD0000ull;
+    g_hs.process_heap = g_mode32 ? 0x00ABCD00ull : 0x00000000ABCD0000ull;
     g_hs.con_attr = 7;
     g_hs.tls_next = 0;
     snprintf(g_hs.con_title, sizeof g_hs.con_title, "%s", p->exe_win);
@@ -584,9 +624,15 @@ void hle_init(SoulProcess *p) {
     env_add("OS=Windows_NT");
     env_add("PATH=C:\\windows\\system32;C:\\windows");
     env_add("PATHEXT=.COM;.EXE;.BAT;.CMD");
-    env_add("PROCESSOR_ARCHITECTURE=AMD64");
+    if (g_mode32) { // a 32-bit program on 64-bit Windows (WOW64)
+        env_add("PROCESSOR_ARCHITECTURE=x86");
+        env_add("PROCESSOR_ARCHITEW6432=AMD64");
+    } else {
+        env_add("PROCESSOR_ARCHITECTURE=AMD64");
+    }
     env_add("ProgramData=C:\\ProgramData");
-    env_add("ProgramFiles=C:\\Program Files");
+    env_add(g_mode32 ? "ProgramFiles=C:\\Program Files (x86)" : "ProgramFiles=C:\\Program Files");
+    env_add("ProgramW6432=C:\\Program Files");
     env_add("ProgramFiles(x86)=C:\\Program Files (x86)");
     env_add("PUBLIC=C:\\users\\Public");
     env_add("SystemDrive=C:");
@@ -600,7 +646,7 @@ void hle_init(SoulProcess *p) {
     // ensure the standard directory layout exists inside the container
     const char *dirs[] = { "windows", "windows/system32", "users", "users/soul", "users/soul/Temp",
                            "users/soul/AppData", "users/soul/AppData/Roaming", "users/soul/AppData/Local",
-                           "users/soul/Documents", "users/soul/Desktop", "ProgramData", "Program Files", NULL };
+                           "users/soul/Documents", "users/soul/Desktop", "ProgramData", "Program Files", "Program Files (x86)", NULL };
     for (int i = 0; dirs[i]; i++) {
         char d[1200];
         snprintf(d, sizeof d, "%s/%s", p->drive_c, dirs[i]);
@@ -619,9 +665,14 @@ void hle_shutdown(SoulProcess *p) {
         if (o->type == H_FREE) continue;
         if (o->fd >= 0) close(o->fd);
         if (o->dir) closedir(o->dir);
-        if (o->type == H_MAPPING && o->ptr) free(o->ptr);
+        if (o->type == H_MAPPING && o->ptr) g_free(o->ptr);
     }
     memset(g_hs.handles, 0, sizeof g_hs.handles);
+    k32_shutdown();
+    for (int i = 0; i < g_hs.env_count; i++) g_free(g_hs.env[i]);
+    free(g_hs.env);
+    g_hs.env = NULL;
+    g_hs.env_count = 0;
     gui_shutdown();
     gl_reset();
     reg_shutdown();

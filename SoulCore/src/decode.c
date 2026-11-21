@@ -2,6 +2,8 @@
 #include "decode.h"
 #include <string.h>
 
+extern int g_mode32;
+
 enum { I_NONE, I_B, I_W, I_Z, I_V, I_ENTER, I_MOFFS, I_REL8, I_REL32 };
 
 static int map1_modrm(uint8_t op) {
@@ -88,9 +90,10 @@ int x86_decode(const uint8_t *p, uint64_t addr, X86Insn *in) {
         if (b == 0x64) { in->seg = SEG_FS; in->rex = 0; p++; continue; }
         if (b == 0x65) { in->seg = SEG_GS; in->rex = 0; p++; continue; }
         if (b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26) { in->rex = 0; p++; continue; }
-        if ((b & 0xF0) == 0x40) { in->rex = b; p++; continue; }
+        if ((b & 0xF0) == 0x40 && !g_mode32) { in->rex = b; p++; continue; }
         break;
     }
+    if (g_mode32) in->adsize32 = 1; // 32-bit addressing (0x67 16-bit addressing is not supported)
     uint8_t rexW = (in->rex >> 3) & 1, rexR = (in->rex >> 2) & 1, rexX = (in->rex >> 1) & 1, rexB = in->rex & 1;
     in->opsize = rexW ? 8 : (in->p66 ? 2 : 4);
 
@@ -117,6 +120,7 @@ int x86_decode(const uint8_t *p, uint64_t addr, X86Insn *in) {
             immk = map2_imm(op2);
         }
     } else {
+        if (g_mode32 && (op == 0x9A || op == 0xEA)) return -1; // far call / jmp
         if (op == 0xC4 || op == 0xC5 || op == 0x62 || op == 0x8F) {
             // VEX / EVEX / XOP. 0x8F /0 is POP Ev, everything else is XOP.
             if (op == 0x8F && ((p[0] >> 3) & 7) == 0) {
@@ -157,7 +161,7 @@ int x86_decode(const uint8_t *p, uint64_t addr, X86Insn *in) {
                     in->ea_base = (uint8_t)(base | (rexB << 3));
                 }
             } else if (rm == 5 && in->mod == 0) {
-                in->ea_base = EA_RIP;
+                in->ea_base = g_mode32 ? EA_NONE : EA_RIP; // 32-bit mode: absolute disp32
                 int32_t d; memcpy(&d, p, 4); p += 4; in->disp = d;
             } else {
                 in->ea_base = (uint8_t)(rm | (rexB << 3));

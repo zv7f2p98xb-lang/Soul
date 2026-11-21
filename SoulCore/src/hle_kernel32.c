@@ -17,8 +17,8 @@
 #define HOST_MSIZE(p) malloc_usable_size(p)
 #endif
 
-#define CSTR(n) ((const char *)(uintptr_t)hle_arg(st, (n)))
-#define WSTR(n) ((const uint16_t *)(uintptr_t)hle_arg(st, (n)))
+#define CSTR(n) ((const char *)G2H(hle_arg(st, (n))))
+#define WSTR(n) ((const uint16_t *)G2H(hle_arg(st, (n))))
 #define FAIL(err) do { set_last_error(st, (err)); RET(0); return; } while (0)
 #define INVALID_HANDLE ((uint64_t)-1)
 
@@ -30,7 +30,7 @@ void env_set_value(const char *name, const char *value);
 static char *arg_str(X86State *st, int n, int wide) {
     uint64_t p = hle_arg(st, n);
     if (!p) return NULL;
-    return wide ? w2u_dup((const uint16_t *)(uintptr_t)p) : strdup((const char *)(uintptr_t)p);
+    return wide ? w2u_dup((const uint16_t *)G2H(p)) : strdup((const char *)G2H(p));
 }
 
 // Copy a UTF-8 string into a guest A/W buffer with Win32 "returns length or required size" semantics.
@@ -38,12 +38,12 @@ static uint64_t put_str(uint64_t buf, uint64_t cap, const char *s, int wide) {
     if (wide) {
         size_t n = u2w(s, -1, NULL, 0);
         if (!buf || n + 1 > cap) return n + 1;
-        u2w(s, -1, (uint16_t *)(uintptr_t)buf, cap);
+        u2w(s, -1, (uint16_t *)G2H(buf), cap);
         return n;
     }
     size_t n = strlen(s);
     if (!buf || n + 1 > cap) return n + 1;
-    memcpy((void *)(uintptr_t)buf, s, n + 1);
+    memcpy(G2H(buf), s, n + 1);
     return n;
 }
 
@@ -75,13 +75,13 @@ HLE(k32_WriteFile) {
     if (!o) FAIL(ERROR_INVALID_HANDLE);
     int64_t w;
     if (o->type == H_CONOUT || o->type == H_CONERR) {
-        con_write(o->type == H_CONOUT ? 1 : 2, (const char *)(uintptr_t)buf, n);
+        con_write(o->type == H_CONOUT ? 1 : 2, (const char *)G2H(buf), n);
         w = (int64_t)n;
     } else if (o->type == H_NULLDEV) {
         w = (int64_t)n;
     } else if (o->type == H_FILE) {
         if (o->append) lseek(o->fd, 0, SEEK_END);
-        w = write(o->fd, (const void *)(uintptr_t)buf, n);
+        w = write(o->fd, (const void *)G2H(buf), n);
         if (w < 0) { if (written) mem_wr(written, 4, 0); FAIL(errno_to_win(errno)); }
     } else FAIL(ERROR_INVALID_HANDLE);
     if (written) mem_wr(written, 4, (uint64_t)w);
@@ -96,13 +96,13 @@ HLE(k32_ReadFile) {
     if (o->type == H_CONIN) {
         // raw console reads deliver CRLF line endings
         size_t want = n > 1 ? n - 1 : n;
-        r = (int64_t)con_read((char *)(uintptr_t)buf, want, 1);
-        char *b = (char *)(uintptr_t)buf;
+        r = (int64_t)con_read((char *)G2H(buf), want, 1);
+        char *b = (char *)G2H(buf);
         if (r > 0 && b[r - 1] == '\n' && (uint64_t)r < n) { b[r - 1] = '\r'; b[r] = '\n'; r++; }
     } else if (o->type == H_NULLDEV) {
         r = 0;
     } else if (o->type == H_FILE) {
-        r = read(o->fd, (void *)(uintptr_t)buf, n);
+        r = read(o->fd, G2H(buf), n);
         if (r < 0) { if (rd) mem_wr(rd, 4, 0); FAIL(errno_to_win(errno)); }
     } else FAIL(ERROR_INVALID_HANDLE);
     if (rd) mem_wr(rd, 4, (uint64_t)r);
@@ -540,7 +540,7 @@ static void full_path(X86State *st, int wide) {
         char *bs = strrchr(norm, '\\');
         size_t off = bs ? (size_t)(bs + 1 - norm) : 0;
         if (wide) off = u2w(norm, (long)off, NULL, 0);
-        mem_wr(ARG(3), 8, base + off * (wide ? 2 : 1));
+        wr_ptr(ARG(3), base + off * (wide ? 2 : 1));
     }
     RET(r);
 }
@@ -593,18 +593,26 @@ static uint64_t fake_module(const char *dll) {
     for (; dll[i] && i < sizeof key - 1; i++) key[i] = (char)tolower((unsigned char)dll[i]);
     key[i] = 0;
     if (!strchr(key, '.')) strncat(key, ".dll", sizeof key - strlen(key) - 1);
-    for (FakeMod *m = g_fake_mods; m; m = m->next) if (strcmp(m->name, key) == 0) return (uint64_t)(uintptr_t)m->mem;
+    for (FakeMod *m = g_fake_mods; m; m = m->next) if (strcmp(m->name, key) == 0) return H2G(m->mem);
     FakeMod *m = calloc(1, sizeof *m);
     snprintf(m->name, sizeof m->name, "%s", key);
-    m->mem = calloc(1, 4096);
+    m->mem = g_pages(4096);
     m->mem[0] = 'M'; m->mem[1] = 'Z';
     m->next = g_fake_mods;
     g_fake_mods = m;
-    return (uint64_t)(uintptr_t)m->mem;
+    return H2G(m->mem);
 }
 static const char *fake_module_name(uint64_t h) {
-    for (FakeMod *m = g_fake_mods; m; m = m->next) if ((uint64_t)(uintptr_t)m->mem == h) return m->name;
+    for (FakeMod *m = g_fake_mods; m; m = m->next) if (H2G(m->mem) == h) return m->name;
     return NULL;
+}
+// Per-process kernel32 state: fake system modules and cached command lines.
+static char *g_cmdline_a;
+static uint16_t *g_cmdline_w;
+void k32_shutdown(void) {
+    while (g_fake_mods) { FakeMod *n = g_fake_mods->next; g_pages_free(g_fake_mods->mem, 4096); free(g_fake_mods); g_fake_mods = n; }
+    g_free(g_cmdline_a); g_cmdline_a = NULL;
+    g_free(g_cmdline_w); g_cmdline_w = NULL;
 }
 static PEModule *module_by_handle(uint64_t h) {
     for (PEModule *m = g_proc->modules; m; m = m->next) if (m->base == h) return m;
@@ -661,7 +669,7 @@ static void get_module_handle_ex(X86State *st, int wide) {
         r = get_module_handle(st, s);
         free(s);
     }
-    if (ARG(2)) mem_wr(ARG(2), 8, r);
+    if (ARG(2)) wr_ptr(ARG(2), r);
     if (!r) FAIL(ERROR_MOD_NOT_FOUND);
     RET(1);
 }
@@ -699,7 +707,7 @@ HLE(k32_GetModuleFileNameW) { module_file_name(st, 1); }
 HLE(k32_GetProcAddress) {
     uint64_t h = ARG(0), np = ARG(1);
     int ordinal = np < 0x10000 ? (int)np : 0;
-    const char *name = ordinal ? NULL : (const char *)(uintptr_t)np;
+    const char *name = ordinal ? NULL : (const char *)G2H(np);
     PEModule *m = module_by_handle(h);
     uint64_t r = 0;
     if (m) r = pe_find_export(m, name, ordinal);
@@ -717,12 +725,8 @@ HLE_STUB_RET(k32_DisableThreadLibraryCalls, 1)
 
 // ---- process / environment -----------------------------------------------------------------
 
-HLE(k32_GetCommandLineA) { RET(g_proc->cmdline); }
-HLE(k32_GetCommandLineW) {
-    static uint16_t *w;
-    if (!w) w = u2w_dup(g_proc->cmdline);
-    RET(w);
-}
+HLE(k32_GetCommandLineA) { if (!g_cmdline_a) g_cmdline_a = g_strdup(g_proc->cmdline); RET(g_cmdline_a); }
+HLE(k32_GetCommandLineW) { if (!g_cmdline_w) g_cmdline_w = u2w_gdup(g_proc->cmdline); RET(g_cmdline_w); }
 static void get_env_var(X86State *st, int wide) {
     char *n = arg_str(st, 0, wide);
     const char *v = n ? env_get_value(n) : NULL;
@@ -747,12 +751,12 @@ static void env_block(X86State *st, int wide) {
     for (int i = 0; i < h->env_count; i++) total += (wide ? u2w(h->env[i], -1, NULL, 0) : strlen(h->env[i])) + 1;
     total += 1;
     if (wide) {
-        uint16_t *b = malloc(total * 2), *p = b;
+        uint16_t *b = g_malloc(total * 2), *p = b;
         for (int i = 0; i < h->env_count; i++) { size_t n = u2w(h->env[i], -1, p, total); p += n + 1; }
         *p = 0;
         RET(b);
     } else {
-        char *b = malloc(total), *p = b;
+        char *b = g_malloc(total), *p = b;
         for (int i = 0; i < h->env_count; i++) { size_t n = strlen(h->env[i]); memcpy(p, h->env[i], n + 1); p += n + 1; }
         *p = 0;
         RET(b);
@@ -760,7 +764,7 @@ static void env_block(X86State *st, int wide) {
 }
 HLE(k32_GetEnvironmentStringsA) { env_block(st, 0); }
 HLE(k32_GetEnvironmentStringsW) { env_block(st, 1); }
-HLE(k32_FreeEnvironmentStrings) { free(PTR(0)); RET(1); }
+HLE(k32_FreeEnvironmentStrings) { g_free(PTR(0)); RET(1); }
 static void expand_env(X86State *st, int wide) {
     char *s = arg_str(st, 0, wide);
     char out[4096];
@@ -787,10 +791,18 @@ HLE(k32_ExpandEnvironmentStringsW) { expand_env(st, 1); }
 static void startup_info(X86State *st, int wide) {
     (void)wide;
     uint8_t *b = PTR(0);
+    uint64_t hin = h_std(0), hout = h_std(1), herr = h_std(2);
+    if (g_mode32) { // STARTUPINFO32: 68 bytes, std handles at 56/60/64
+        memset(b, 0, 68);
+        uint32_t cb = 68;
+        memcpy(b, &cb, 4);
+        memcpy(b + 56, &hin, 4); memcpy(b + 60, &hout, 4); memcpy(b + 64, &herr, 4);
+        RET(0);
+        return;
+    }
     memset(b, 0, 104);
     uint32_t cb = 104;
     memcpy(b, &cb, 4);
-    uint64_t hin = h_std(0), hout = h_std(1), herr = h_std(2);
     memcpy(b + 80, &hin, 8); memcpy(b + 88, &hout, 8); memcpy(b + 96, &herr, 8);
     RET(0);
 }
@@ -834,8 +846,19 @@ HLE(k32_GetVersionExW) { version_ex(st); }
 HLE(ntdll_RtlGetVersion) { version_ex(st); RET(0); }
 HLE(k32_VerifyVersionInfoW) { RET(1); }
 HLE(k32_VerSetConditionMask) { RET(ARG(0)); }
-static void system_info(X86State *st) {
+static void system_info(X86State *st, int native) {
     uint8_t *b = PTR(0);
+    if (g_mode32) { // SYSTEM_INFO32 (36 bytes); a 32-bit program sees an x86 CPU unless it asks for the native one
+        memset(b, 0, 36);
+        uint16_t arch = native ? 9 : 0, level = 6, rev = 0x3C03;
+        uint32_t page = 4096, minaddr = 0x10000, maxaddr = 0x7FFEFFFF, mask = 1, ncpu = 1, ptype = native ? 8664 : 586, gran = 65536;
+        memcpy(b, &arch, 2); memcpy(b + 4, &page, 4); memcpy(b + 8, &minaddr, 4); memcpy(b + 12, &maxaddr, 4);
+        memcpy(b + 16, &mask, 4); memcpy(b + 20, &ncpu, 4); memcpy(b + 24, &ptype, 4); memcpy(b + 28, &gran, 4);
+        memcpy(b + 32, &level, 2); memcpy(b + 34, &rev, 2);
+        RET(0);
+        return;
+    }
+    (void)native;
     memset(b, 0, 48);
     uint16_t arch = 9; // PROCESSOR_ARCHITECTURE_AMD64
     uint32_t page = 4096, ncpu = 1, ptype = 8664, gran = 65536;
@@ -846,8 +869,8 @@ static void system_info(X86State *st) {
     memcpy(b + 44, &level, 2); memcpy(b + 46, &rev, 2);
     RET(0);
 }
-HLE(k32_GetSystemInfo) { system_info(st); }
-HLE(k32_GetNativeSystemInfo) { system_info(st); }
+HLE(k32_GetSystemInfo) { system_info(st, 0); }
+HLE(k32_GetNativeSystemInfo) { system_info(st, 1); }
 HLE(k32_IsProcessorFeaturePresent) {
     uint32_t f = (uint32_t)ARG(0);
     // PF_XMMI_INSTRUCTIONS_AVAILABLE(6), PF_XMMI64(10), PF_NX(12), PF_COMPARE_EXCHANGE128(14), PF_FASTFAIL(23), PF_RDTSC(8)
@@ -866,10 +889,21 @@ HLE(k32_RaiseException) {
 }
 HLE(k32_SetUnhandledExceptionFilter) { RET(0); }
 HLE(k32_UnhandledExceptionFilter) { RET(1); }
-HLE(k32_AddVectoredExceptionHandler) { static int dummy; RET(&dummy); }
+HLE(k32_AddVectoredExceptionHandler) { RET(0x5EC0); }
 HLE(k32_RemoveVectoredExceptionHandler) { RET(1); }
 HLE(k32_RtlCaptureContext) {
     uint8_t *c = PTR(0);
+    if (g_mode32) { // CONTEXT (x86): flags at 0, Ebp/Eip/SegCs/EFlags/Esp/SegSs from 0xB4
+        memset(c, 0, 0x2CC);
+        uint32_t v = 0x10007;
+        memcpy(c, &v, 4);
+        static const int off[8] = { 0xB0, 0xAC, 0xA8, 0xA4, -1, 0xB4, 0xA0, 0x9C }; // eax ecx edx ebx (esp) ebp esi edi
+        for (int r = 0; r < 8; r++) if (off[r] >= 0) { v = (uint32_t)st->gpr[r]; memcpy(c + off[r], &v, 4); }
+        v = (uint32_t)mem_rd(st->gpr[RSP], 4); memcpy(c + 0xB8, &v, 4);
+        v = (uint32_t)(st->gpr[RSP] + 4); memcpy(c + 0xC4, &v, 4);
+        RET(0);
+        return;
+    }
     memset(c, 0, 1232);
     uint32_t flags = 0x10000B; // CONTEXT_FULL
     memcpy(c + 0x30, &flags, 4);
@@ -884,20 +918,20 @@ HLE(k32_RtlVirtualUnwind) { RET(0); }
 HLE(k32_RtlUnwindEx) { soul_fatal(st, "Yapılandırılmış istisna işleme (SEH unwind) desteklenmiyor"); }
 HLE(k32_RtlPcToFileHeader) {
     PEModule *m = module_by_addr(ARG(0));
-    mem_wr(ARG(1), 8, m ? m->base : 0);
+    wr_ptr(ARG(1), m ? m->base : 0);
     RET(m ? m->base : 0);
 }
 HLE(k32_EncodePointer) { RET(ARG(0)); }
 HLE_STUB_RET(k32_SetErrorMode, 0)
 HLE_STUB_RET(k32_GetErrorMode, 0)
 HLE(k32_SetProcessAffinityMask) { RET(1); }
-HLE(k32_GetProcessAffinityMask) { if (ARG(1)) mem_wr(ARG(1), 8, 1); if (ARG(2)) mem_wr(ARG(2), 8, 1); RET(1); }
+HLE(k32_GetProcessAffinityMask) { if (ARG(1)) wr_ptr(ARG(1), 1); if (ARG(2)) wr_ptr(ARG(2), 1); RET(1); }
 HLE_STUB_RET(k32_SetThreadPriority, 1)
 HLE_STUB_RET(k32_GetThreadPriority, 0)
 HLE_STUB_RET(k32_SetPriorityClass, 1)
 HLE(k32_GetPriorityClass) { RET(0x20); }
 HLE_STUB_RET(k32_GetCurrentProcessorNumber, 0)
-HLE(k32_IsWow64Process) { if (ARG(1)) mem_wr(ARG(1), 4, 0); RET(1); }
+HLE(k32_IsWow64Process) { if (ARG(1)) mem_wr(ARG(1), 4, g_mode32 ? 1 : 0); RET(1); } // 32-bit programs run "under WOW64"
 HLE_STUB_RET(k32_SetThreadDescription, 0)
 HLE(k32_GetProcessTimes) {
     uint64_t now = filetime_from_unix((double)time(NULL));
@@ -981,13 +1015,17 @@ static void deadlock(X86State *st, const char *what) {
 }
 
 // critical sections: RTL_CRITICAL_SECTION { DebugInfo, LockCount, RecursionCount, OwningThread, LockSemaphore, SpinCount }
+#define CS_REC (g_mode32 ? 8 : 12)
+#define CS_OWNER (g_mode32 ? 12 : 16)
+#define CS_SPIN (g_mode32 ? 20 : 32)
+#define CS_SIZE (g_mode32 ? 24u : 40u)
 static void cs_enter(X86State *st, uint64_t cs) {
     uint32_t me = cur_tid();
     for (;;) {
-        uint64_t owner = mem_rd(cs + 16, 8);
+        uint64_t owner = rd_ptr(cs + CS_OWNER);
         if (owner == 0 || owner == me) {
-            mem_wr(cs + 16, 8, me);
-            mem_wr(cs + 12, 4, mem_rd(cs + 12, 4) + 1);
+            wr_ptr(cs + CS_OWNER, me);
+            mem_wr(cs + CS_REC, 4, mem_rd(cs + CS_REC, 4) + 1);
             return;
         }
         if (g_proc->terminate) return;
@@ -996,20 +1034,20 @@ static void cs_enter(X86State *st, uint64_t cs) {
     }
 }
 static void cs_leave(uint64_t cs) {
-    int32_t rec = (int32_t)mem_rd(cs + 12, 4) - 1;
-    if (rec <= 0) { mem_wr(cs + 12, 4, 0); mem_wr(cs + 16, 8, 0); gil_notify(); }
-    else mem_wr(cs + 12, 4, (uint32_t)rec);
+    int32_t rec = (int32_t)mem_rd(cs + CS_REC, 4) - 1;
+    if (rec <= 0) { mem_wr(cs + CS_REC, 4, 0); wr_ptr(cs + CS_OWNER, 0); gil_notify(); }
+    else mem_wr(cs + CS_REC, 4, (uint32_t)rec);
 }
-HLE(k32_InitializeCriticalSection) { uint64_t spin = mem_rd(ARG(0) + 32, 8); memset(PTR(0), 0, 40); (void)spin; RET(0); }
-HLE(k32_InitializeCriticalSectionEx) { memset(PTR(0), 0, 40); mem_wr(ARG(0) + 32, 8, (uint32_t)ARG(1)); RET(1); }
+HLE(k32_InitializeCriticalSection) { memset(PTR(0), 0, CS_SIZE); RET(0); }
+HLE(k32_InitializeCriticalSectionEx) { memset(PTR(0), 0, CS_SIZE); wr_ptr(ARG(0) + CS_SPIN, (uint32_t)ARG(1)); RET(1); }
 HLE(k32_EnterCriticalSection) { cs_enter(st, ARG(0)); RET(0); }
 HLE(k32_LeaveCriticalSection) { cs_leave(ARG(0)); RET(0); }
 HLE(k32_TryEnterCriticalSection) {
-    uint64_t cs = ARG(0), owner = mem_rd(cs + 16, 8);
+    uint64_t cs = ARG(0), owner = rd_ptr(cs + CS_OWNER);
     uint32_t me = cur_tid();
     if (owner && owner != me) { RET(0); return; }
-    mem_wr(cs + 16, 8, me);
-    mem_wr(cs + 12, 4, mem_rd(cs + 12, 4) + 1);
+    wr_ptr(cs + CS_OWNER, me);
+    mem_wr(cs + CS_REC, 4, mem_rd(cs + CS_REC, 4) + 1);
     RET(1);
 }
 HLE_STUB_RET(k32_DeleteCriticalSection, 0)
@@ -1017,35 +1055,35 @@ HLE_STUB_RET(k32_DeleteCriticalSection, 0)
 // slim reader/writer locks: 0 = free, 1 = exclusive, 2*n = n shared owners
 static void srw_acquire(X86State *st, uint64_t l, int shared) {
     for (;;) {
-        uint64_t v = mem_rd(l, 8);
-        if (shared ? v != 1 : v == 0) { mem_wr(l, 8, shared ? v + 2 : 1); return; }
+        uint64_t v = rd_ptr(l);
+        if (shared ? v != 1 : v == 0) { wr_ptr(l, shared ? v + 2 : 1); return; }
         if (g_proc->terminate) return;
         if (!g_proc->threads) deadlock(st, "SRW kilidi");
         wait_until(-1, 0);
     }
 }
 static void srw_release(uint64_t l, int shared) {
-    uint64_t v = mem_rd(l, 8);
+    uint64_t v = rd_ptr(l);
     if (shared) v = v >= 2 ? v - 2 : 0; else v = 0;
-    mem_wr(l, 8, v);
+    wr_ptr(l, v);
     if (v == 0) gil_notify();
 }
-HLE(k32_InitializeSRWLock) { mem_wr(ARG(0), 8, 0); RET(0); }
+HLE(k32_InitializeSRWLock) { wr_ptr(ARG(0), 0); RET(0); }
 HLE(k32_AcquireSRWLockExclusive) { srw_acquire(st, ARG(0), 0); RET(0); }
 HLE(k32_AcquireSRWLockShared) { srw_acquire(st, ARG(0), 1); RET(0); }
 HLE(k32_ReleaseSRWLockExclusive) { srw_release(ARG(0), 0); RET(0); }
 HLE(k32_ReleaseSRWLockShared) { srw_release(ARG(0), 1); RET(0); }
-HLE(k32_TryAcquireSRWLockExclusive) { uint64_t v = mem_rd(ARG(0), 8); if (v) { RET(0); return; } mem_wr(ARG(0), 8, 1); RET(1); }
-HLE(k32_TryAcquireSRWLockShared) { uint64_t v = mem_rd(ARG(0), 8); if (v == 1) { RET(0); return; } mem_wr(ARG(0), 8, v + 2); RET(1); }
+HLE(k32_TryAcquireSRWLockExclusive) { uint64_t v = rd_ptr(ARG(0)); if (v) { RET(0); return; } wr_ptr(ARG(0), 1); RET(1); }
+HLE(k32_TryAcquireSRWLockShared) { uint64_t v = rd_ptr(ARG(0)); if (v == 1) { RET(0); return; } wr_ptr(ARG(0), v + 2); RET(1); }
 
 // condition variables: the guest word is a wake-up generation counter
-HLE(k32_InitializeConditionVariable) { mem_wr(ARG(0), 8, 0); RET(0); }
-HLE(k32_WakeConditionVariable) { mem_wr(ARG(0), 8, mem_rd(ARG(0), 8) + 1); gil_notify(); RET(0); }
+HLE(k32_InitializeConditionVariable) { wr_ptr(ARG(0), 0); RET(0); }
+HLE(k32_WakeConditionVariable) { wr_ptr(ARG(0), rd_ptr(ARG(0)) + 1); gil_notify(); RET(0); }
 static int cv_sleep(X86State *st, uint64_t cv, uint32_t ms) {
-    uint64_t gen = mem_rd(cv, 8);
+    uint64_t gen = rd_ptr(cv);
     double dl = deadline_for(ms);
     int timeout = 0;
-    while (mem_rd(cv, 8) == gen) {
+    while (rd_ptr(cv) == gen) {
         if (g_proc->terminate) { timeout = 1; break; }
         if (ms == 0xFFFFFFFF && !g_proc->threads) deadlock(st, "koşul değişkeni");
         if (wait_until(dl, 0)) { timeout = 1; break; }
@@ -1054,12 +1092,12 @@ static int cv_sleep(X86State *st, uint64_t cv, uint32_t ms) {
 }
 HLE(k32_SleepConditionVariableCS) {
     uint64_t cv = ARG(0), cs = ARG(1);
-    uint32_t rec = (uint32_t)mem_rd(cs + 12, 4);
-    mem_wr(cs + 12, 4, 0); mem_wr(cs + 16, 8, 0);
+    uint32_t rec = (uint32_t)mem_rd(cs + CS_REC, 4);
+    mem_wr(cs + CS_REC, 4, 0); wr_ptr(cs + CS_OWNER, 0);
     gil_notify();
     int timeout = cv_sleep(st, cv, (uint32_t)ARG(2));
     cs_enter(st, cs);
-    mem_wr(cs + 12, 4, rec ? rec : 1);
+    mem_wr(cs + CS_REC, 4, rec ? rec : 1);
     if (timeout) { set_last_error(st, 1460); RET(0); return; }
     RET(1);
 }
@@ -1087,27 +1125,27 @@ HLE(k32_WakeByAddress) { gil_notify(); RET(0); }
 
 HLE(k32_InitOnceExecuteOnce) {
     uint64_t once = ARG(0);
-    if (mem_rd(once, 8) == 0) {
-        mem_wr(once, 8, 1);
+    if (rd_ptr(once) == 0) {
+        wr_ptr(once, 1);
         uint64_t args[3] = { once, ARG(2), ARG(3) };
         uint64_t r = soul_guest_call(st, ARG(1), 3, args) & 0xFFFFFFFF;
-        if (!r) { mem_wr(once, 8, 0); gil_notify(); RET(0); return; }
-        mem_wr(once, 8, 2);
+        if (!r) { wr_ptr(once, 0); gil_notify(); RET(0); return; }
+        wr_ptr(once, 2);
         gil_notify();
     }
-    while (mem_rd(once, 8) == 1 && !g_proc->terminate) wait_until(-1, 0);
+    while (rd_ptr(once) == 1 && !g_proc->terminate) wait_until(-1, 0);
     RET(1);
 }
 HLE(k32_InitOnceBeginInitialize) {
     uint64_t once = ARG(0);
-    while (mem_rd(once, 8) == 1 && !g_proc->terminate) wait_until(-1, 0);
-    int done = mem_rd(once, 8) == 2;
-    if (!done) mem_wr(once, 8, 1);
+    while (rd_ptr(once) == 1 && !g_proc->terminate) wait_until(-1, 0);
+    int done = rd_ptr(once) == 2;
+    if (!done) wr_ptr(once, 1);
     if (ARG(2)) mem_wr(ARG(2), 4, done ? 0 : 1);
-    if (ARG(3)) mem_wr(ARG(3), 8, 0);
+    if (ARG(3)) wr_ptr(ARG(3), 0);
     RET(1);
 }
-HLE(k32_InitOnceComplete) { mem_wr(ARG(0), 8, ((uint32_t)ARG(1) & 4) ? 0 : 2); gil_notify(); RET(1); }
+HLE(k32_InitOnceComplete) { wr_ptr(ARG(0), ((uint32_t)ARG(1) & 4) ? 0 : 2); gil_notify(); RET(1); }
 
 static uint64_t make_sync(HType t, int signaled, int manual, long count) {
     HObj *o;
@@ -1204,7 +1242,7 @@ HLE(k32_WaitForSingleObjectEx) { uint64_t h = ARG(0); RET(wait_objects(st, 1, &h
 HLE(k32_WaitForMultipleObjects) {
     uint32_t n = (uint32_t)ARG(0);
     uint64_t hs_[64];
-    for (uint32_t i = 0; i < n && i < 64; i++) hs_[i] = mem_rd(ARG(1) + 8u * i, 8);
+    for (uint32_t i = 0; i < n && i < 64; i++) hs_[i] = rd_ptr(ARG(1) + (uint64_t)PSZ * i);
     RET(wait_objects(st, n, hs_, ARG(2) != 0, (uint32_t)ARG(3)));
 }
 HLE(k32_DuplicateHandle) {
@@ -1215,7 +1253,7 @@ HLE(k32_DuplicateHandle) {
         o->ptr = soul_cur_thread();
         h = nh;
     }
-    if (ARG(3)) mem_wr(ARG(3), 8, h);
+    if (ARG(3)) wr_ptr(ARG(3), h);
     RET(1);
 }
 
@@ -1249,77 +1287,79 @@ HLE(k32_ExitThread) {
     soul_exit_thread(st, (uint32_t)code);
 }
 
-// TLS: TEB+0x1480 holds 64 slots
+// TLS: the TEB holds 64 slots (TEB64+0x1480, TEB32+0xE10)
 HLE(k32_TlsAlloc) {
     HleState *h = hs();
     if (h->tls_next >= 64) { RET(0xFFFFFFFF); return; }
     uint64_t idx = h->tls_next++;
-    mem_wr(st->gs_base + 0x1480 + idx * 8, 8, 0);
+    wr_ptr(teb_of(st) + TEB_TLSSLOTS + idx * PSZ, 0);
     RET(idx);
 }
 HLE_STUB_RET(k32_TlsFree, 1)
-HLE(k32_TlsGetValue) { uint64_t i = (uint32_t)ARG(0); set_last_error(st, 0); RET(i < 64 ? mem_rd(st->gs_base + 0x1480 + i * 8, 8) : 0); }
-HLE(k32_TlsSetValue) { uint64_t i = (uint32_t)ARG(0); if (i >= 64) FAIL(ERROR_INVALID_PARAMETER); mem_wr(st->gs_base + 0x1480 + i * 8, 8, ARG(1)); RET(1); }
+HLE(k32_TlsGetValue) { uint64_t i = (uint32_t)ARG(0); set_last_error(st, 0); RET(i < 64 ? rd_ptr(teb_of(st) + TEB_TLSSLOTS + i * PSZ) : 0); }
+HLE(k32_TlsSetValue) { uint64_t i = (uint32_t)ARG(0); if (i >= 64) FAIL(ERROR_INVALID_PARAMETER); wr_ptr(teb_of(st) + TEB_TLSSLOTS + i * PSZ, ARG(1)); RET(1); }
 HLE(k32_FlsAlloc) { HleState *h = hs(); if (h->fls_next >= 128) { RET(0xFFFFFFFF); return; } RET(h->fls_next++); }
 HLE_STUB_RET(k32_FlsFree, 1)
 HLE(k32_FlsGetValue) { uint64_t i = (uint32_t)ARG(0); RET(i < 128 ? st->thread->fls[i] : 0); }
 HLE(k32_FlsSetValue) { uint64_t i = (uint32_t)ARG(0); if (i >= 128) FAIL(ERROR_INVALID_PARAMETER); st->thread->fls[i] = ARG(1); RET(1); }
 
 // Interlocked singly linked lists
-HLE(k32_InitializeSListHead) { memset(PTR(0), 0, 16); RET(0); }
+#define SL_NEXT (g_mode32 ? 0 : 8)
+#define SL_DEPTH (g_mode32 ? 4 : 0)
+HLE(k32_InitializeSListHead) { memset(PTR(0), 0, g_mode32 ? 8 : 16); RET(0); }
 HLE(k32_InterlockedPushEntrySList) {
     uint64_t head = ARG(0), e = ARG(1);
-    uint64_t first = mem_rd(head + 8, 8);
-    mem_wr(e, 8, first);
-    mem_wr(head + 8, 8, e);
-    mem_wr(head, 2, mem_rd(head, 2) + 1);
+    uint64_t first = rd_ptr(head + SL_NEXT);
+    wr_ptr(e, first);
+    wr_ptr(head + SL_NEXT, e);
+    mem_wr(head + SL_DEPTH, 2, mem_rd(head + SL_DEPTH, 2) + 1);
     RET(first);
 }
 HLE(k32_InterlockedPopEntrySList) {
     uint64_t head = ARG(0);
-    uint64_t first = mem_rd(head + 8, 8);
-    if (first) { mem_wr(head + 8, 8, mem_rd(first, 8)); mem_wr(head, 2, mem_rd(head, 2) - 1); }
+    uint64_t first = rd_ptr(head + SL_NEXT);
+    if (first) { wr_ptr(head + SL_NEXT, rd_ptr(first)); mem_wr(head + SL_DEPTH, 2, mem_rd(head + SL_DEPTH, 2) - 1); }
     RET(first);
 }
-HLE(k32_InterlockedFlushSList) { uint64_t head = ARG(0); uint64_t first = mem_rd(head + 8, 8); mem_wr(head + 8, 8, 0); mem_wr(head, 2, 0); RET(first); }
-HLE(k32_QueryDepthSList) { RET(mem_rd(ARG(0), 2)); }
+HLE(k32_InterlockedFlushSList) { uint64_t head = ARG(0); uint64_t first = rd_ptr(head + SL_NEXT); wr_ptr(head + SL_NEXT, 0); mem_wr(head + SL_DEPTH, 2, 0); RET(first); }
+HLE(k32_QueryDepthSList) { RET(mem_rd(ARG(0) + SL_DEPTH, 2)); }
 
 // ---- memory --------------------------------------------------------------------------------------
 
 HLE(k32_GetProcessHeap) { RET(hs()->process_heap); }
-HLE(k32_GetProcessHeaps) { if (ARG(0) >= 1 && ARG(1)) mem_wr(ARG(1), 8, hs()->process_heap); RET(1); }
+HLE(k32_GetProcessHeaps) { if (ARG(0) >= 1 && ARG(1)) wr_ptr(ARG(1), hs()->process_heap); RET(1); }
 HLE(k32_HeapCreate) { RET(hs()->process_heap + 0x10000 + (hs()->api_calls & 0xFFF0)); }
 HLE_STUB_RET(k32_HeapDestroy, 1)
 HLE(k32_HeapAlloc) {
     size_t n = ARG(2) ? ARG(2) : 1;
-    void *p = ((uint32_t)ARG(1) & 8) ? calloc(1, n) : malloc(n);
+    void *p = ((uint32_t)ARG(1) & 8) ? g_calloc(1, n) : g_malloc(n);
     if (!p) set_last_error(st, ERROR_NOT_ENOUGH_MEMORY);
     RET(p);
 }
-HLE(k32_HeapFree) { free(PTR(2)); RET(1); }
+HLE(k32_HeapFree) { g_free(PTR(2)); RET(1); }
 HLE(k32_HeapReAlloc) {
     void *old = PTR(2);
     size_t n = ARG(3) ? ARG(3) : 1;
-    size_t os = old ? HOST_MSIZE(old) : 0;
+    size_t os = old ? g_msize(old) : 0;
     if ((uint32_t)ARG(1) & 0x10) { RET(n <= os ? old : NULL); return; } // HEAP_REALLOC_IN_PLACE_ONLY
-    void *p = realloc(old, n);
+    void *p = g_realloc(old, n);
     if (p && ((uint32_t)ARG(1) & 8) && n > os) memset((char *)p + os, 0, n - os);
     RET(p);
 }
-HLE(k32_HeapSize) { RET(ARG(2) ? HOST_MSIZE(PTR(2)) : (uint64_t)-1); }
+HLE(k32_HeapSize) { RET(ARG(2) ? g_msize(PTR(2)) : (uint64_t)-1); }
 HLE_STUB_RET(k32_HeapValidate, 1)
 HLE_STUB_RET(k32_HeapSetInformation, 1)
 HLE(k32_HeapQueryInformation) { if (ARG(2)) mem_wr(ARG(2), 4, 2); RET(1); }
 HLE_STUB_RET(k32_HeapLock, 1)
 HLE(k32_LocalAlloc) {
     size_t n = ARG(1) ? ARG(1) : 1;
-    RET(((uint32_t)ARG(0) & 0x40) ? calloc(1, n) : malloc(n));
+    RET(((uint32_t)ARG(0) & 0x40) ? g_calloc(1, n) : g_malloc(n));
 }
-HLE(k32_LocalFree) { free(PTR(0)); RET(0); }
-HLE(k32_LocalReAlloc) { RET(realloc(PTR(0), ARG(1) ? ARG(1) : 1)); }
+HLE(k32_LocalFree) { g_free(PTR(0)); RET(0); }
+HLE(k32_LocalReAlloc) { RET(g_realloc(PTR(0), ARG(1) ? ARG(1) : 1)); }
 HLE(k32_GlobalLock) { RET(ARG(0)); }
 HLE_STUB_RET(k32_GlobalUnlock, 1)
-HLE(k32_GlobalSize) { RET(ARG(0) ? HOST_MSIZE(PTR(0)) : 0); }
+HLE(k32_GlobalSize) { RET(ARG(0) ? g_msize(PTR(0)) : 0); }
 HLE(k32_GlobalMemoryStatusEx) {
     uint8_t *b = PTR(0);
     uint32_t len = 64, load = 30;
@@ -1351,6 +1391,17 @@ HLE(k32_VirtualQuery) {
     uint64_t base, abase, size;
     int type;
     uint8_t *b = PTR(1);
+    if (g_mode32) { // MEMORY_BASIC_INFORMATION32: 7 DWORDs
+        uint32_t v[7] = { 0 };
+        if (!vm_query(ARG(0), &base, &abase, &size, &type)) {
+            v[0] = (uint32_t)(ARG(0) & ~0xFFFull); v[3] = 0x1000; v[4] = 0x10000; v[5] = 1;
+        } else {
+            v[0] = (uint32_t)base; v[1] = (uint32_t)abase; v[2] = 0x40; v[3] = (uint32_t)size; v[4] = 0x1000; v[5] = 0x40; v[6] = (uint32_t)type;
+        }
+        memcpy(b, v, 28);
+        RET(28);
+        return;
+    }
     memset(b, 0, 48);
     if (!vm_query(ARG(0), &base, &abase, &size, &type)) {
         uint64_t page = ARG(0) & ~0xFFFull;
@@ -1387,7 +1438,7 @@ HLE(k32_MultiByteToWideChar) {
     if (need > (size_t)dlen) FAIL(ERROR_INSUFFICIENT_BUFFER);
     uint16_t *tmp = malloc((need + 1) * 2);
     u2w(src, l, tmp, need + 1);
-    memcpy((void *)(uintptr_t)dst, tmp, need * 2);
+    memcpy(G2H(dst), tmp, need * 2);
     free(tmp);
     RET(need);
 }
@@ -1405,7 +1456,7 @@ HLE(k32_WideCharToMultiByte) {
     if (need > (size_t)dlen) FAIL(ERROR_INSUFFICIENT_BUFFER);
     char *tmp = malloc(need + 1);
     w2u(src, l, tmp, need + 1);
-    memcpy((void *)(uintptr_t)dst, tmp, need);
+    memcpy(G2H(dst), tmp, need);
     free(tmp);
     RET(need);
 }
@@ -1454,14 +1505,14 @@ HLE(k32_GetStringTypeExW) {
 }
 static void lcmap(X86State *st, int argbase) {
     uint32_t flags = (uint32_t)ARG(argbase);
-    const uint16_t *src = (const uint16_t *)(uintptr_t)hle_arg(st, argbase + 1);
+    const uint16_t *src = (const uint16_t *)G2H(hle_arg(st, argbase + 1));
     int n = (int)(int32_t)hle_arg(st, argbase + 2);
     uint64_t dst = hle_arg(st, argbase + 3);
     int dn = (int)(int32_t)hle_arg(st, argbase + 4);
     if (n < 0) n = (int)wstrlen(src) + 1;
     if (!dst || !dn) { RET(n); return; }
     if (dn < n) FAIL(ERROR_INSUFFICIENT_BUFFER);
-    uint16_t *d = (uint16_t *)(uintptr_t)dst;
+    uint16_t *d = (uint16_t *)G2H(dst);
     for (int i = 0; i < n; i++) {
         wint_t c = src[i];
         if (flags & 0x100) c = towlower(c);
@@ -1482,11 +1533,11 @@ static int cmp_w(const uint16_t *a, int na, const uint16_t *b, int nb, int icase
     }
     return na == nb ? 2 : na < nb ? 1 : 3;
 }
-HLE(k32_CompareStringW) { RET(cmp_w((const uint16_t *)PTR(2), (int)(int32_t)ARG(3), (const uint16_t *)(uintptr_t)hle_arg(st, 4), (int)(int32_t)hle_arg(st, 5), ((uint32_t)ARG(1) & 1) != 0)); }
-HLE(k32_CompareStringEx) { RET(cmp_w((const uint16_t *)PTR(2), (int)(int32_t)ARG(3), (const uint16_t *)(uintptr_t)hle_arg(st, 4), (int)(int32_t)hle_arg(st, 5), ((uint32_t)ARG(1) & 1) != 0)); }
+HLE(k32_CompareStringW) { RET(cmp_w((const uint16_t *)PTR(2), (int)(int32_t)ARG(3), (const uint16_t *)G2H(hle_arg(st, 4)), (int)(int32_t)hle_arg(st, 5), ((uint32_t)ARG(1) & 1) != 0)); }
+HLE(k32_CompareStringEx) { RET(cmp_w((const uint16_t *)PTR(2), (int)(int32_t)ARG(3), (const uint16_t *)G2H(hle_arg(st, 4)), (int)(int32_t)hle_arg(st, 5), ((uint32_t)ARG(1) & 1) != 0)); }
 HLE(k32_CompareStringOrdinal) { RET(cmp_w(WSTR(0), (int)(int32_t)ARG(1), WSTR(2), (int)(int32_t)ARG(3), ARG(4) != 0)); }
 HLE(k32_CompareStringA) {
-    const char *a = (const char *)PTR(2), *b = (const char *)(uintptr_t)hle_arg(st, 4);
+    const char *a = (const char *)PTR(2), *b = (const char *)G2H(hle_arg(st, 4));
     int na = (int)(int32_t)ARG(3), nb = (int)(int32_t)hle_arg(st, 5);
     if (na < 0) na = (int)strlen(a);
     if (nb < 0) nb = (int)strlen(b);
@@ -1606,9 +1657,9 @@ static void format_message(X86State *st, int wide) {
     uint32_t size = (uint32_t)hle_arg(st, 5);
     if (flags & 0x100) { // ALLOCATE_BUFFER
         size_t n = wide ? (u2w(msg, -1, NULL, 0) + 1) * 2 : strlen(msg) + 1;
-        void *p = malloc(n);
+        void *p = g_malloc(n);
         if (wide) u2w(msg, -1, p, n / 2); else memcpy(p, msg, n);
-        mem_wr(buf, 8, (uint64_t)(uintptr_t)p);
+        wr_ptr(buf, H2G(p));
         RET(wide ? n / 2 - 1 : n - 1);
         return;
     }
@@ -1642,7 +1693,7 @@ HLE(k32_CreateFileMappingW) {
     if (!size) FAIL(ERROR_INVALID_PARAMETER);
     HObj *o;
     uint64_t h = h_alloc(H_MAPPING, &o);
-    o->ptr = calloc(1, size);
+    o->ptr = g_calloc(1, size);
     o->len = size;
     if (f && f->fd >= 0) { off_t pos = lseek(f->fd, 0, SEEK_CUR); lseek(f->fd, 0, SEEK_SET); ssize_t rr = read(f->fd, o->ptr, size); (void)rr; lseek(f->fd, pos, SEEK_SET); }
     RET(h);

@@ -30,6 +30,7 @@ static inline uint64_t ea_addr(const X86State *st, const X86Insn *in) {
     uint64_t a = ea_noseg(st, in);
     if (in->seg == SEG_FS) a += st->fs_base;
     else if (in->seg == SEG_GS) a += st->gs_base;
+    if (g_mode32) a = (uint32_t)a;
     return a;
 }
 
@@ -52,12 +53,16 @@ static inline void reg_wr(X86State *st, const X86Insn *in, int r, int size, uint
     }
 }
 
+// Stack slots are 8 bytes in 64-bit mode and 4 bytes in 32-bit mode.
 static inline void push64(X86State *st, uint64_t v) {
+    if (g_mode32) { st->gpr[RSP] = (uint32_t)(st->gpr[RSP] - 4); mem_wr(st->gpr[RSP], 4, v); return; }
     st->gpr[RSP] -= 8;
     mem_wr(st->gpr[RSP], 8, v);
 }
 static inline uint64_t pop64(X86State *st) {
+    if (g_mode32) { uint64_t v = mem_rd(st->gpr[RSP], 4); st->gpr[RSP] = (uint32_t)(st->gpr[RSP] + 4); return v; }
     uint64_t v = mem_rd(st->gpr[RSP], 8);
     st->gpr[RSP] += 8;
     return v;
 }
+static inline int stack_slot(void) { return g_mode32 ? 4 : 8; }

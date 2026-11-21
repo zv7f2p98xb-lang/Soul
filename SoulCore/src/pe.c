@@ -1,4 +1,4 @@
-// SoulCore - PE32+ (x86-64 Windows executable / DLL) loader.
+// SoulCore - PE loader for x64 (PE32+) and x86 (PE32) Windows executables and DLLs.
 #include "hle.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,10 +25,23 @@ typedef struct {
     uint32_t LoaderFlags, NumberOfRvaAndSizes;
     DataDir dirs[16];
 } OptHeader64;
+typedef struct {
+    uint16_t Magic; uint8_t MajorLinker, MinorLinker;
+    uint32_t SizeOfCode, SizeOfInitializedData, SizeOfUninitializedData, AddressOfEntryPoint, BaseOfCode, BaseOfData;
+    uint32_t ImageBase;
+    uint32_t SectionAlignment, FileAlignment;
+    uint16_t MajorOS, MinorOS, MajorImage, MinorImage, MajorSubsystem, MinorSubsystem;
+    uint32_t Win32Version, SizeOfImage, SizeOfHeaders, CheckSum;
+    uint16_t Subsystem, DllCharacteristics;
+    uint32_t SizeOfStackReserve, SizeOfStackCommit, SizeOfHeapReserve, SizeOfHeapCommit;
+    uint32_t LoaderFlags, NumberOfRvaAndSizes;
+    DataDir dirs[16];
+} OptHeader32;
 typedef struct { char Name[8]; uint32_t VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData, PointerToRelocations, PointerToLinenumbers; uint16_t NumberOfRelocations, NumberOfLinenumbers; uint32_t Characteristics; } SectionHeader;
 typedef struct { uint32_t OriginalFirstThunk, TimeDateStamp, ForwarderChain, Name, FirstThunk; } ImportDesc;
 typedef struct { uint32_t Characteristics, TimeDateStamp; uint16_t Major, Minor; uint32_t Name, Base, NumberOfFunctions, NumberOfNames, AddressOfFunctions, AddressOfNames, AddressOfNameOrdinals; } ExportDir;
 typedef struct { uint64_t StartAddressOfRawData, EndAddressOfRawData, AddressOfIndex, AddressOfCallBacks; uint32_t SizeOfZeroFill, Characteristics; } TlsDir64;
+typedef struct { uint32_t StartAddressOfRawData, EndAddressOfRawData, AddressOfIndex, AddressOfCallBacks, SizeOfZeroFill, Characteristics; } TlsDir32;
 #pragma pack(pop)
 
 enum { DIR_EXPORT = 0, DIR_IMPORT = 1, DIR_RESOURCE = 2, DIR_EXCEPTION = 3, DIR_BASERELOC = 5, DIR_TLS = 9 };
@@ -59,7 +72,9 @@ static uint8_t *read_file(const char *path, size_t *len) {
     return b;
 }
 
-static int parse_headers(const uint8_t *file, size_t len, const FileHeader **fh, const OptHeader64 **oh,
+// Parses the headers of a PE32 (x86) or PE32+ (x64) file. The optional header is returned
+// normalized to the PE32+ layout in *oh.
+static int parse_headers(const uint8_t *file, size_t len, const FileHeader **fh, OptHeader64 *oh,
                          const SectionHeader **sh, char *err, size_t errlen) {
     if (len < 0x40 || file[0] != 'M' || file[1] != 'Z') { snprintf(err, errlen, "Geçerli bir Windows programı değil (MZ imzası yok)"); return -1; }
     uint32_t peoff; memcpy(&peoff, file + 0x3C, 4);
@@ -68,18 +83,66 @@ static int parse_headers(const uint8_t *file, size_t len, const FileHeader **fh,
         return -1;
     }
     *fh = (const FileHeader *)(file + peoff + 4);
-    if ((*fh)->Machine == 0x14C) { snprintf(err, errlen, "32-bit (x86) programlar henüz desteklenmiyor; yalnızca 64-bit (x64) programlar çalışır"); return -1; }
-    if ((*fh)->Machine == 0xAA64) { snprintf(err, errlen, "Bu bir ARM64 Windows programı; Soul x64 programları çalıştırır"); return -1; }
-    if ((*fh)->Machine != 0x8664) { snprintf(err, errlen, "Desteklenmeyen işlemci mimarisi (0x%04x)", (*fh)->Machine); return -1; }
-    *oh = (const OptHeader64 *)((const uint8_t *)*fh + sizeof(FileHeader));
-    if ((*oh)->Magic != 0x20B) { snprintf(err, errlen, "PE32+ başlığı bekleniyordu"); return -1; }
-    if ((*oh)->dirs[14].Size != 0) { snprintf(err, errlen, ".NET (CLR) programları desteklenmiyor"); return -1; }
-    *sh = (const SectionHeader *)((const uint8_t *)*oh + (*fh)->SizeOfOptionalHeader);
+    if ((*fh)->Machine == 0xAA64) { snprintf(err, errlen, "Bu bir ARM64 Windows programı; Soul x86 ve x64 programları çalıştırır"); return -1; }
+    if ((*fh)->Machine != 0x8664 && (*fh)->Machine != 0x14C) { snprintf(err, errlen, "Desteklenmeyen işlemci mimarisi (0x%04x)", (*fh)->Machine); return -1; }
+    const uint8_t *ohp = (const uint8_t *)*fh + sizeof(FileHeader);
+    if ((size_t)(ohp - file) + sizeof(OptHeader64) > len) { snprintf(err, errlen, "Bozuk PE başlığı"); return -1; }
+    uint16_t magic; memcpy(&magic, ohp, 2);
+    if ((*fh)->Machine == 0x8664) {
+        if (magic != 0x20B) { snprintf(err, errlen, "PE32+ başlığı bekleniyordu"); return -1; }
+        memcpy(oh, ohp, sizeof *oh);
+    } else {
+        if (magic != 0x10B) { snprintf(err, errlen, "PE32 başlığı bekleniyordu"); return -1; }
+        OptHeader32 o; memcpy(&o, ohp, sizeof o);
+        memset(oh, 0, sizeof *oh);
+        oh->Magic = o.Magic; oh->MajorLinker = o.MajorLinker; oh->MinorLinker = o.MinorLinker;
+        oh->SizeOfCode = o.SizeOfCode; oh->SizeOfInitializedData = o.SizeOfInitializedData;
+        oh->SizeOfUninitializedData = o.SizeOfUninitializedData; oh->AddressOfEntryPoint = o.AddressOfEntryPoint;
+        oh->BaseOfCode = o.BaseOfCode; oh->ImageBase = o.ImageBase;
+        oh->SectionAlignment = o.SectionAlignment; oh->FileAlignment = o.FileAlignment;
+        oh->MajorOS = o.MajorOS; oh->MinorOS = o.MinorOS; oh->MajorImage = o.MajorImage; oh->MinorImage = o.MinorImage;
+        oh->MajorSubsystem = o.MajorSubsystem; oh->MinorSubsystem = o.MinorSubsystem;
+        oh->Win32Version = o.Win32Version; oh->SizeOfImage = o.SizeOfImage; oh->SizeOfHeaders = o.SizeOfHeaders;
+        oh->CheckSum = o.CheckSum; oh->Subsystem = o.Subsystem; oh->DllCharacteristics = o.DllCharacteristics;
+        oh->SizeOfStackReserve = o.SizeOfStackReserve; oh->SizeOfStackCommit = o.SizeOfStackCommit;
+        oh->SizeOfHeapReserve = o.SizeOfHeapReserve; oh->SizeOfHeapCommit = o.SizeOfHeapCommit;
+        oh->LoaderFlags = o.LoaderFlags; oh->NumberOfRvaAndSizes = o.NumberOfRvaAndSizes;
+        memcpy(oh->dirs, o.dirs, sizeof oh->dirs);
+    }
+    if (oh->NumberOfRvaAndSizes < 16) memset(&oh->dirs[oh->NumberOfRvaAndSizes], 0, sizeof(DataDir) * (16 - oh->NumberOfRvaAndSizes));
+    if (oh->dirs[14].Size != 0) { snprintf(err, errlen, ".NET (CLR) programları desteklenmiyor"); return -1; }
+    *sh = (const SectionHeader *)(ohp + (*fh)->SizeOfOptionalHeader);
     if ((const uint8_t *)(*sh + (*fh)->NumberOfSections) > file + len) { snprintf(err, errlen, "Bozuk bölüm tablosu"); return -1; }
     return 0;
 }
 
+int pe_machine(const char *host_path) {
+    FILE *f = fopen(host_path, "rb");
+    if (!f) return 0;
+    uint8_t b[4096];
+    size_t n = fread(b, 1, sizeof b, f);
+    fclose(f);
+    if (n < 0x40 || b[0] != 'M' || b[1] != 'Z') return 0;
+    uint32_t peoff; memcpy(&peoff, b + 0x3C, 4);
+    if ((size_t)peoff + 6 > n || memcmp(b + peoff, "PE\0\0", 4) != 0) return 0;
+    uint16_t m; memcpy(&m, b + peoff + 4, 2);
+    return m;
+}
+
+// Data directories of a mapped image (PE32 or PE32+ header).
+static const DataDir *img_dirs(const uint8_t *img) {
+    uint32_t lfanew; memcpy(&lfanew, img + 0x3C, 4);
+    const uint8_t *ohp = img + lfanew + 24;
+    uint16_t magic; memcpy(&magic, ohp, 2);
+    return magic == 0x10B ? ((const OptHeader32 *)(const void *)ohp)->dirs : ((const OptHeader64 *)(const void *)ohp)->dirs;
+}
+
 static void *map_image(uint64_t preferred, size_t size) {
+    if (g_mode32) {
+        uint64_t a = gwin_map(preferred, size);
+        if (!a) a = gwin_map(0, size);
+        return a ? G2H(a) : NULL;
+    }
     void *want = (void *)(uintptr_t)preferred;
 #ifdef MAP_FIXED_NOREPLACE
     void *p = mmap(want, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE, -1, 0);
@@ -128,7 +191,7 @@ PEModule *pe_find_loaded(SoulProcess *p, const char *name) {
 
 uint64_t pe_find_export(PEModule *m, const char *name, int ordinal) {
     if (!m->export_rva) return 0;
-    uint8_t *img = (uint8_t *)(uintptr_t)m->base;
+    uint8_t *img = (uint8_t *)G2H(m->base);
     const ExportDir *ed = (const ExportDir *)(img + m->export_rva);
     const uint32_t *funcs = (const uint32_t *)(img + ed->AddressOfFunctions);
     uint32_t idx = UINT32_MAX;
@@ -170,24 +233,28 @@ uint64_t pe_find_export(PEModule *m, const char *name, int ordinal) {
 static int resolve_imports(SoulProcess *p, PEModule *m, const OptHeader64 *oh, char *err, size_t errlen) {
     const DataDir *d = &oh->dirs[DIR_IMPORT];
     if (!d->VirtualAddress) return 0;
-    uint8_t *img = (uint8_t *)(uintptr_t)m->base;
+    uint8_t *img = (uint8_t *)G2H(m->base);
+    const int psz = g_mode32 ? 4 : 8;
+    const uint64_t ord_flag = g_mode32 ? 0x80000000ull : (1ull << 63);
     for (const ImportDesc *id = (const ImportDesc *)(img + d->VirtualAddress); id->Name; id++) {
         const char *dll = (const char *)(img + id->Name);
-        uint64_t *iat = (uint64_t *)(img + id->FirstThunk);
-        const uint64_t *ilt = (const uint64_t *)(img + (id->OriginalFirstThunk ? id->OriginalFirstThunk : id->FirstThunk));
+        uint8_t *iat = img + id->FirstThunk;
+        const uint8_t *ilt = img + (id->OriginalFirstThunk ? id->OriginalFirstThunk : id->FirstThunk);
         if (!hle_is_system_dll(dll) && !pe_find_loaded(p, dll)) {
             char e2[256] = {0};
             if (!pe_load_dependency(p, dll, e2, sizeof e2)) {
                 if (p->verbose) soul_log("[yükleyici] %s bulunamadı: %s (sahte işlevler kullanılacak)\n", dll, e2);
             }
         }
-        for (size_t i = 0; ilt[i]; i++) {
-            uint64_t v = ilt[i];
+        for (size_t i = 0;; i++) {
+            uint64_t v = 0;
+            memcpy(&v, ilt + i * psz, (size_t)psz);
+            if (!v) break;
             uint64_t addr;
-            if (v & (1ull << 63)) addr = hle_resolve_import(p, dll, NULL, (int)(v & 0xFFFF));
+            if (v & ord_flag) addr = hle_resolve_import(p, dll, NULL, (int)(v & 0xFFFF));
             else addr = hle_resolve_import(p, dll, (const char *)(img + (uint32_t)v + 2), 0);
             if (!addr) { snprintf(err, errlen, "İçe aktarım çözülemedi: %s", dll); return -1; }
-            iat[i] = addr;
+            memcpy(iat + i * psz, &addr, (size_t)psz);
         }
     }
     return 0;
@@ -197,20 +264,26 @@ PEModule *pe_load(SoulProcess *p, const char *host_path, const char *win_path, c
     size_t len = 0;
     uint8_t *file = read_file(host_path, &len);
     if (!file) { snprintf(err, errlen, "Dosya okunamadı: %s", host_path); return NULL; }
-    const FileHeader *fh; const OptHeader64 *oh; const SectionHeader *sh;
-    if (parse_headers(file, len, &fh, &oh, &sh, err, errlen) != 0) { free(file); return NULL; }
+    const FileHeader *fh; OptHeader64 ohbuf, *oh = &ohbuf; const SectionHeader *sh;
+    if (parse_headers(file, len, &fh, oh, &sh, err, errlen) != 0) { free(file); return NULL; }
+    if ((fh->Machine == 0x14C) != (g_mode32 != 0)) {
+        snprintf(err, errlen, "%s: %s", base_name(host_path),
+                 g_mode32 ? "64-bit bir DLL 32-bit programa yüklenemez" : "32-bit bir DLL 64-bit programa yüklenemez");
+        free(file);
+        return NULL;
+    }
 
     size_t size = (oh->SizeOfImage + 0xFFFF) & ~(size_t)0xFFFF;
     uint8_t *img = map_image(oh->ImageBase, size);
     if (!img) { snprintf(err, errlen, "Bellek ayrılamadı (%zu bayt)", size); free(file); return NULL; }
-    uint64_t delta = (uint64_t)(uintptr_t)img - oh->ImageBase;
+    uint64_t delta = H2G(img) - oh->ImageBase;
     memcpy(img, file, oh->SizeOfHeaders < len ? oh->SizeOfHeaders : len);
     for (int i = 0; i < fh->NumberOfSections; i++) {
         const SectionHeader *s = &sh[i];
         size_t raw = s->SizeOfRawData;
         if (s->VirtualSize && raw > s->VirtualSize) raw = s->VirtualSize;
         if ((size_t)s->PointerToRawData + raw > len) raw = s->PointerToRawData < len ? len - s->PointerToRawData : 0;
-        if (s->VirtualAddress + raw > size) { snprintf(err, errlen, "Bozuk bölüm"); munmap(img, size); free(file); return NULL; }
+        if (s->VirtualAddress + raw > size) { snprintf(err, errlen, "Bozuk bölüm"); g_pages_free(img, size); free(file); return NULL; }
         if (raw) memcpy(img + s->VirtualAddress, file + s->PointerToRawData, raw);
     }
     // keep a copy of headers we need after freeing the file
@@ -220,21 +293,22 @@ PEModule *pe_load(SoulProcess *p, const char *host_path, const char *win_path, c
     if (delta && apply_relocs(img, delta, &ohc) != 0) {
         snprintf(err, errlen, "Program 0x%llx adresine yüklenemedi ve yer değiştirme bilgisi yok",
                  (unsigned long long)ohc.ImageBase);
-        munmap(img, size);
+        g_pages_free(img, size);
         return NULL;
     }
     // Update ImageBase in the in-memory header like the Windows loader does.
     {
         uint32_t peoff; memcpy(&peoff, img + 0x3C, 4);
-        OptHeader64 *ohm = (OptHeader64 *)(img + peoff + 4 + sizeof(FileHeader));
-        ohm->ImageBase = (uint64_t)(uintptr_t)img;
+        uint8_t *ohm = img + peoff + 4 + sizeof(FileHeader);
+        if (g_mode32) { uint32_t b = (uint32_t)H2G(img); memcpy(ohm + 28, &b, 4); }
+        else ((OptHeader64 *)(void *)ohm)->ImageBase = H2G(img);
     }
 
     PEModule *m = calloc(1, sizeof(PEModule));
     lower_copy(m->name, base_name(host_path), sizeof m->name);
     snprintf(m->host_path, sizeof m->host_path, "%s", host_path);
     snprintf(m->win_path, sizeof m->win_path, "%s", win_path ? win_path : base_name(host_path));
-    m->base = (uint64_t)(uintptr_t)img;
+    m->base = H2G(img);
     m->size = size;
     m->entry = ohc.AddressOfEntryPoint ? m->base + ohc.AddressOfEntryPoint : 0;
     m->is_dll = (file_chars & 0x2000) != 0;
@@ -299,44 +373,52 @@ PEModule *pe_load_dependency(SoulProcess *p, const char *dll, char *err, size_t 
 
 // Static TLS: every module with a TLS directory gets an index; each guest thread
 // gets its own copy of the module's TLS template in TEB->ThreadLocalStoragePointer.
-static uint8_t *tls_block(const TlsTemplate *t) {
-    uint8_t *blk = calloc(1, t->raw + t->zero + 16);
-    if (t->raw) memcpy(blk, (void *)(uintptr_t)t->start, t->raw);
-    return blk;
+static uint64_t tls_block(const TlsTemplate *t) {
+    uint8_t *blk = g_calloc(1, t->raw + t->zero + 16);
+    if (t->raw) memcpy(blk, G2H(t->start), t->raw);
+    return H2G(blk);
+}
+
+static void tls_callbacks(X86State *st, uint64_t list, uint64_t module_base, uint64_t reason) {
+    if (!list) return;
+    for (uint64_t a = list;; a += (uint64_t)PSZ) {
+        uint64_t cb = rd_ptr(a);
+        if (!cb) break;
+        uint64_t args[3] = { module_base, reason, 0 };
+        soul_guest_call(st, cb, 3, args);
+    }
 }
 
 static void init_tls(SoulProcess *p, X86State *st, PEModule *m, int index) {
     if (!m->tls_rva || p->tls_count >= SOUL_MAX_TLS_MODULES) return;
-    TlsDir64 *td = (TlsDir64 *)(uintptr_t)(m->base + m->tls_rva);
-    TlsTemplate *t = &p->tls[p->tls_count++];
-    t->start = td->StartAddressOfRawData;
-    t->raw = (size_t)(td->EndAddressOfRawData - td->StartAddressOfRawData);
-    t->zero = td->SizeOfZeroFill;
-    t->index = index;
-    t->callbacks = td->AddressOfCallBacks;
-    t->module_base = m->base;
-    uint64_t *slots = (uint64_t *)(uintptr_t)mem_rd(st->gs_base + 0x58, 8);
-    slots[index] = (uint64_t)(uintptr_t)tls_block(t);
-    if (td->AddressOfIndex) mem_wr(td->AddressOfIndex, 4, (uint64_t)index);
-    if (td->AddressOfCallBacks) {
-        for (uint64_t *cb = (uint64_t *)(uintptr_t)td->AddressOfCallBacks; *cb; cb++) {
-            uint64_t args[3] = { m->base, 1 /* DLL_PROCESS_ATTACH */, 0 };
-            soul_guest_call(st, *cb, 3, args);
-        }
+    uint64_t start, end, idx_addr, callbacks, zero;
+    if (g_mode32) {
+        const TlsDir32 *td = G2H(m->base + m->tls_rva);
+        start = td->StartAddressOfRawData; end = td->EndAddressOfRawData; idx_addr = td->AddressOfIndex;
+        callbacks = td->AddressOfCallBacks; zero = td->SizeOfZeroFill;
+    } else {
+        const TlsDir64 *td = G2H(m->base + m->tls_rva);
+        start = td->StartAddressOfRawData; end = td->EndAddressOfRawData; idx_addr = td->AddressOfIndex;
+        callbacks = td->AddressOfCallBacks; zero = td->SizeOfZeroFill;
     }
+    TlsTemplate *t = &p->tls[p->tls_count++];
+    t->start = start;
+    t->raw = (size_t)(end - start);
+    t->zero = (size_t)zero;
+    t->index = index;
+    t->callbacks = callbacks;
+    t->module_base = m->base;
+    uint64_t slots = rd_ptr(teb_of(st) + TEB_TLSPTR);
+    wr_ptr(slots + (uint64_t)index * PSZ, tls_block(t));
+    if (idx_addr) mem_wr(idx_addr, 4, (uint64_t)index);
+    tls_callbacks(st, callbacks, m->base, 1 /* DLL_PROCESS_ATTACH */);
 }
 
 void pe_init_thread_tls(SoulProcess *p, X86State *st, uint64_t teb, int attach) {
-    uint64_t *slots = (uint64_t *)(uintptr_t)mem_rd(teb + 0x58, 8);
-    for (int i = 0; i < p->tls_count; i++) slots[p->tls[i].index] = (uint64_t)(uintptr_t)tls_block(&p->tls[i]);
+    uint64_t slots = rd_ptr(teb + TEB_TLSPTR);
+    for (int i = 0; i < p->tls_count; i++) wr_ptr(slots + (uint64_t)p->tls[i].index * PSZ, tls_block(&p->tls[i]));
     if (!attach) return;
-    for (int i = 0; i < p->tls_count; i++) {
-        if (!p->tls[i].callbacks) continue;
-        for (uint64_t *cb = (uint64_t *)(uintptr_t)p->tls[i].callbacks; *cb; cb++) {
-            uint64_t args[3] = { p->tls[i].module_base, 2 /* DLL_THREAD_ATTACH */, 0 };
-            soul_guest_call(st, *cb, 3, args);
-        }
-    }
+    for (int i = 0; i < p->tls_count; i++) tls_callbacks(st, p->tls[i].callbacks, p->tls[i].module_base, 2 /* DLL_THREAD_ATTACH */);
     for (PEModule *m = p->modules; m; m = m->next) {
         if (m->is_dll && m->entry && m->initialized) {
             uint64_t args[3] = { m->base, 2, 0 };
@@ -375,7 +457,7 @@ void pe_unload_all(SoulProcess *p) {
     PEModule *m = p->modules;
     while (m) {
         PEModule *n = m->next;
-        munmap((void *)(uintptr_t)m->base, m->size);
+        g_pages_free(G2H(m->base), m->size);
         free(m);
         m = n;
     }
@@ -389,7 +471,7 @@ int soul_pe_inspect(const char *path, SoulPEInfo *info) {
     size_t len;
     uint8_t *file = read_file(path, &len);
     if (!file) return -1;
-    const FileHeader *fh = NULL; const OptHeader64 *oh = NULL; const SectionHeader *sh = NULL;
+    const FileHeader *fh = NULL; OptHeader64 ohbuf, *oh = &ohbuf; const SectionHeader *sh = NULL;
     char err[256];
     if (len >= 0x40 && file[0] == 'M' && file[1] == 'Z') {
         uint32_t peoff; memcpy(&peoff, file + 0x3C, 4);
@@ -399,9 +481,9 @@ int soul_pe_inspect(const char *path, SoulPEInfo *info) {
             info->is_dll = (fh->Characteristics & 0x2000) != 0;
         }
     }
-    if (fh && parse_headers(file, len, &fh, &oh, &sh, err, sizeof err) == 0) {
+    if (fh && parse_headers(file, len, &fh, oh, &sh, err, sizeof err) == 0) {
         info->valid = 1;
-        info->is_64bit = 1;
+        info->is_64bit = fh->Machine == 0x8664;
         info->is_gui = oh->Subsystem == 2;
         info->image_base = oh->ImageBase;
         info->size_of_image = oh->SizeOfImage;
@@ -477,11 +559,11 @@ int soul_pe_extract_icon(const char *path, unsigned char **out, size_t *outlen) 
     size_t len;
     uint8_t *file = read_file(path, &len);
     if (!file) return -1;
-    const FileHeader *fh; const OptHeader64 *oh; const SectionHeader *sh;
+    const FileHeader *fh; OptHeader64 ohbuf, *oh = &ohbuf; const SectionHeader *sh;
     char err[128];
     int rc = -1;
     uint8_t *img = NULL;
-    if (parse_headers(file, len, &fh, &oh, &sh, err, sizeof err) != 0) goto done;
+    if (parse_headers(file, len, &fh, oh, &sh, err, sizeof err) != 0) goto done;
     if (!oh->dirs[DIR_RESOURCE].VirtualAddress || oh->SizeOfImage > 512u * 1024 * 1024) goto done;
     img = calloc(1, oh->SizeOfImage);
     if (!img) goto done;
@@ -548,8 +630,8 @@ static int res_name_eq(const uint8_t *rsrc, uint32_t name_field, uint64_t want, 
     uint16_t len; memcpy(&len, ds, 2);
     const uint16_t *a = (const uint16_t *)(const void *)(ds + 2);
     char tmp[256];
-    if (wide) w2u((const uint16_t *)(uintptr_t)want, -1, tmp, sizeof tmp);
-    else snprintf(tmp, sizeof tmp, "%s", (const char *)(uintptr_t)want);
+    if (wide) w2u((const uint16_t *)G2H(want), -1, tmp, sizeof tmp);
+    else snprintf(tmp, sizeof tmp, "%s", (const char *)G2H(want));
     size_t n = strlen(tmp);
     if (n != len) return 0;
     for (size_t i = 0; i < n; i++) {
@@ -566,10 +648,10 @@ static uint64_t res_key(uint64_t v, int wide) {
     if (v < 0x10000) return v;
     // "#123" means the integer id 123
     if (wide) {
-        const uint16_t *w = (const uint16_t *)(uintptr_t)v;
+        const uint16_t *w = (const uint16_t *)G2H(v);
         if (w[0] == '#') { uint64_t n = 0; for (int i = 1; w[i] >= '0' && w[i] <= '9'; i++) n = n * 10 + (w[i] - '0'); return n; }
     } else {
-        const char *s = (const char *)(uintptr_t)v;
+        const char *s = (const char *)G2H(v);
         if (s[0] == '#') return (uint64_t)strtoul(s + 1, NULL, 10);
     }
     return v;
@@ -589,10 +671,8 @@ const void *pe_resource(uint64_t module_base, uint64_t type, uint64_t name, int 
     PEModule *m = NULL;
     for (PEModule *it = p->modules; it; it = it->next) if (it->base == module_base) m = it;
     if (!m) return NULL;
-    const uint8_t *img = (const uint8_t *)(uintptr_t)m->base;
-    uint32_t lfanew; memcpy(&lfanew, img + 0x3C, 4);
-    const OptHeader64 *oh = (const OptHeader64 *)(const void *)(img + lfanew + 24);
-    uint32_t rva = oh->dirs[DIR_RESOURCE].VirtualAddress;
+    const uint8_t *img = (const uint8_t *)G2H(m->base);
+    uint32_t rva = img_dirs(img)[DIR_RESOURCE].VirtualAddress;
     if (!rva) return NULL;
     const uint8_t *rsrc = img + rva;
     type = res_key(type, wide);

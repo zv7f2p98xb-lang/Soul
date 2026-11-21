@@ -16,7 +16,7 @@ static inline Xmm src_rm(X86State *st, const X86Insn *in, int bytes) {
     Xmm v;
     if (in->mod == 3) return st->xmm[in->rm];
     memset(&v, 0, sizeof(v));
-    memcpy(&v, (void *)(uintptr_t)ea_addr(st, in), (size_t)bytes);
+    memcpy(&v, (void *)G2H(ea_addr(st, in)), (size_t)bytes);
     return v;
 }
 static inline void store_rm(X86State *st, const X86Insn *in, const Xmm *v, int bytes) {
@@ -24,7 +24,7 @@ static inline void store_rm(X86State *st, const X86Insn *in, const Xmm *v, int b
         if (bytes == 16) st->xmm[in->rm] = *v;
         else memcpy(&st->xmm[in->rm], v, (size_t)bytes);
     } else {
-        memcpy((void *)(uintptr_t)ea_addr(st, in), v, (size_t)bytes);
+        memcpy((void *)G2H(ea_addr(st, in)), v, (size_t)bytes);
     }
 }
 

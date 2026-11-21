@@ -58,7 +58,7 @@ char *fmt_vformat(const char *fmt, ArgSrc *a, int wide_fmt, size_t *outlen) {
             if (*f == '*') { prec = (int)(int32_t)arg_next(a); f++; if (prec < 0) prec = -1; }
             else while (isdigit((unsigned char)*f)) prec = prec * 10 + (*f++ - '0');
         }
-        int lsize = 0; // 0 default(int), 1 hh, 2 h, 3 l, 4 ll/64, 5 L
+        int lsize = 0; // 0 default(int), 1 hh, 2 h, 3 l, 4 ll/64, 5 L, 6 pointer-sized (z t I)
         int wideflag = 0, narrowflag = 0;
         for (;;) {
             if (*f == 'h') { f++; if (*f == 'h') { f++; lsize = 1; } else { lsize = 2; narrowflag = 1; } }
@@ -69,17 +69,19 @@ char *fmt_vformat(const char *fmt, ArgSrc *a, int wide_fmt, size_t *outlen) {
                 f++;
                 if (f[0] == '6' && f[1] == '4') { f += 2; lsize = 4; }
                 else if (f[0] == '3' && f[1] == '2') { f += 2; lsize = 0; }
-                else lsize = 4;
+                else lsize = 6;
             }
-            else if (*f == 'z' || *f == 'j' || *f == 't') { f++; lsize = 4; }
+            else if (*f == 'j') { f++; lsize = 4; }
+            else if (*f == 'z' || *f == 't') { f++; lsize = 6; }
             else break;
         }
+        if (lsize == 6) lsize = g_mode32 ? 0 : 4; // size_t / ptrdiff_t follow the pointer size
         char conv = *f ? *f++ : 0;
         char spec[64];
         char tmp[512];
         switch (conv) {
         case 'd': case 'i': case 'u': case 'o': case 'x': case 'X': {
-            uint64_t raw = arg_next(a);
+            uint64_t raw = lsize == 4 ? arg_next64(a) : arg_next(a);
             int is_signed = (conv == 'd' || conv == 'i');
             long long sv; unsigned long long uv;
             switch (lsize) {
@@ -100,7 +102,8 @@ char *fmt_vformat(const char *fmt, ArgSrc *a, int wide_fmt, size_t *outlen) {
         }
         case 'p': {
             uint64_t v = arg_next(a);
-            int n = snprintf(tmp, sizeof tmp, "%016llX", (unsigned long long)v);
+            int n = g_mode32 ? snprintf(tmp, sizeof tmp, "%08llX", (unsigned long long)v)
+                             : snprintf(tmp, sizeof tmp, "%016llX", (unsigned long long)v);
             int pad = width > n ? width - n : 0;
             int left = strchr(flags, '-') != NULL;
             if (!left) sb_pad(&b, ' ', pad);
@@ -109,7 +112,7 @@ char *fmt_vformat(const char *fmt, ArgSrc *a, int wide_fmt, size_t *outlen) {
             break;
         }
         case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A': {
-            uint64_t raw = arg_next(a);
+            uint64_t raw = arg_next64(a);
             double v; memcpy(&v, &raw, 8);
             char *sp = spec;
             *sp++ = '%';
@@ -154,19 +157,19 @@ char *fmt_vformat(const char *fmt, ArgSrc *a, int wide_fmt, size_t *outlen) {
             size_t n;
             if (conv == 'Z') { // ANSI_STRING / UNICODE_STRING
                 if (ptr) {
-                    uint16_t len; memcpy(&len, (void *)(uintptr_t)ptr, 2);
-                    uint64_t buf = mem_rd(ptr + 8, 8);
-                    if (wide) { str = malloc(len * 2u + 4); w2u((const uint16_t *)(uintptr_t)buf, len / 2, str, len * 2u + 4); }
-                    else { str = malloc(len + 1u); memcpy(str, (void *)(uintptr_t)buf, len); str[len] = 0; }
+                    uint16_t len; memcpy(&len, G2H(ptr), 2);
+                    uint64_t buf = mem_rd(ptr + PSZ, PSZ);
+                    if (wide) { str = malloc(len * 2u + 4); w2u((const uint16_t *)G2H(buf), len / 2, str, len * 2u + 4); }
+                    else { str = malloc(len + 1u); memcpy(str, G2H(buf), len); str[len] = 0; }
                 }
                 s = str ? str : "(null)";
             } else if (!ptr) {
                 s = "(null)";
             } else if (wide) {
-                str = w2u_dup((const uint16_t *)(uintptr_t)ptr);
+                str = w2u_dup((const uint16_t *)G2H(ptr));
                 s = str;
             } else {
-                s = (const char *)(uintptr_t)ptr;
+                s = (const char *)G2H(ptr);
             }
             n = strlen(s);
             if (prec >= 0) n = utf8_prefix_bytes(s, n, (size_t)prec);
@@ -257,8 +260,9 @@ int fmt_scan(InSrc *in, const char *fmt, ArgSrc *a, int wide_fmt) {
             if (*f == 'h') { f++; if (*f == 'h') { f++; lsize = 1; } else lsize = 2; }
             else if (*f == 'l') { f++; if (*f == 'l') { f++; lsize = 4; } else { lsize = 3; wide = 1; } }
             else if (*f == 'L') { f++; lsize = 5; }
-            else if (*f == 'I') { f++; if (f[0] == '6' && f[1] == '4') { f += 2; lsize = 4; } else if (f[0] == '3' && f[1] == '2') { f += 2; lsize = 0; } else lsize = 4; }
-            else if (*f == 'z' || *f == 'j' || *f == 't') { f++; lsize = 4; }
+            else if (*f == 'I') { f++; if (f[0] == '6' && f[1] == '4') { f += 2; lsize = 4; } else if (f[0] == '3' && f[1] == '2') { f += 2; lsize = 0; } else lsize = g_mode32 ? 0 : 4; }
+            else if (*f == 'j') { f++; lsize = 4; }
+            else if (*f == 'z' || *f == 't') { f++; lsize = g_mode32 ? 0 : 4; }
             else if (*f == 'w') { f++; wide = 1; }
             else break;
         }
@@ -321,8 +325,8 @@ int fmt_scan(InSrc *in, const char *fmt, ArgSrc *a, int wide_fmt) {
                 }
                 int w = (conv == 'S') ? !wide_fmt : (wide || wide_fmt);
                 if (conv == 'S' && wide) w = 1;
-                if (w) u2w(buf, -1, (uint16_t *)(uintptr_t)p, (size_t)n + 1);
-                else memcpy((void *)(uintptr_t)p, buf, (size_t)n + 1);
+                if (w) u2w(buf, -1, (uint16_t *)G2H(p), (size_t)n + 1);
+                else memcpy(G2H(p), buf, (size_t)n + 1);
                 assigned++;
             }
             continue;
@@ -351,7 +355,7 @@ int fmt_scan(InSrc *in, const char *fmt, ArgSrc *a, int wide_fmt) {
             if (!suppress) {
                 uint64_t v = (conv == 'd' || conv == 'i') ? (uint64_t)strtoll(buf, NULL, base) : strtoull(buf, NULL, base);
                 uint64_t p = arg_next(a);
-                int sz = conv == 'p' ? 8 : lsize == 1 ? 1 : lsize == 2 ? 2 : lsize == 4 ? 8 : 4;
+                int sz = conv == 'p' ? PSZ : lsize == 1 ? 1 : lsize == 2 ? 2 : lsize == 4 ? 8 : 4;
                 mem_wr(p, sz, v);
                 assigned++;
             }
@@ -373,8 +377,8 @@ int fmt_scan(InSrc *in, const char *fmt, ArgSrc *a, int wide_fmt) {
             any_input = 1;
             if (!suppress) {
                 uint64_t p = arg_next(a);
-                if (lsize == 3 || lsize == 5) { memcpy((void *)(uintptr_t)p, &v, 8); }
-                else { float fv = (float)v; memcpy((void *)(uintptr_t)p, &fv, 4); }
+                if (lsize == 3 || lsize == 5) { memcpy(G2H(p), &v, 8); }
+                else { float fv = (float)v; memcpy(G2H(p), &fv, 4); }
                 assigned++;
             }
             continue;

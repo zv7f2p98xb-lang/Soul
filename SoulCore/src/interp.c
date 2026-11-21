@@ -20,7 +20,7 @@ static inline void wr_loc(X86State *st, const X86Insn *in, Loc l, int size, uint
 }
 
 __attribute__((noreturn)) static void unsupported(X86State *st, const X86Insn *in) {
-    const uint8_t *b = (const uint8_t *)(uintptr_t)in->addr;
+    const uint8_t *b = (const uint8_t *)G2H(in->addr);
     soul_fatal(st, "Desteklenmeyen x86 komutu @%016llx: %02x %02x %02x %02x %02x %02x (map %d op %02x)",
                (unsigned long long)in->addr, b[0], b[1], b[2], b[3], b[4], b[5], in->map, in->op);
 }
@@ -187,7 +187,7 @@ static void do_string(X86State *st, const X86Insn *in) {
             uint64_t src = st->gpr[RSI] + seg_src, dst = st->gpr[RDI];
             uint64_t bytes = n * (uint64_t)size;
             if (step > 0 && (dst + bytes <= src || src + bytes <= dst)) {
-                memcpy((void *)(uintptr_t)dst, (void *)(uintptr_t)src, bytes);
+                memcpy((void *)G2H(dst), (void *)G2H(src), bytes);
                 st->gpr[RSI] += bytes; st->gpr[RDI] += bytes; st->gpr[RCX] = 0;
                 return;
             }
@@ -206,7 +206,7 @@ static void do_string(X86State *st, const X86Insn *in) {
         if (rep) {
             uint64_t n = st->gpr[RCX];
             if (step > 0 && size == 1) {
-                memset((void *)(uintptr_t)st->gpr[RDI], (int)v, n);
+                memset((void *)G2H(st->gpr[RDI]), (int)v, n);
                 st->gpr[RDI] += n; st->gpr[RCX] = 0;
                 return;
             }
@@ -396,10 +396,73 @@ static void do_bt(X86State *st, const X86Insn *in, int op, int64_t bitoff, int f
     wr_loc(st, in, l, size, v);
 }
 
+// Instructions that only exist in 32-bit mode (their opcodes are REX prefixes or invalid in 64-bit mode).
+static int exec_legacy32(X86State *st, const X86Insn *in) {
+    uint8_t op = in->op;
+    if (op >= 0x40 && op <= 0x4F) { Loc l = { 0, op & 7, 0 }; do_inc_dec(st, in, l, in->opsize, op >= 0x48); return 1; }
+    uint64_t f;
+    uint32_t al;
+    switch (op) {
+    case 0x06: case 0x0E: case 0x16: case 0x1E: push64(st, op == 0x0E ? 0x23 : 0x2B); return 1; // push segment register
+    case 0x07: case 0x17: case 0x1F: (void)pop64(st); return 1;                                   // pop segment register
+    case 0x60: { // PUSHA(D)
+        uint64_t sp = st->gpr[RSP];
+        for (int r = 0; r < 8; r++) push64(st, r == RSP ? sp : st->gpr[r] & size_mask(in->opsize));
+        return 1;
+    }
+    case 0x61: // POPA(D)
+        for (int r = 7; r >= 0; r--) { uint64_t v = pop64(st); if (r != RSP) reg_wr(st, in, r, in->opsize, v); }
+        return 1;
+    case 0x27: case 0x2F: { // DAA / DAS
+        f = x86_flags(st);
+        al = (uint32_t)st->gpr[RAX] & 0xFF;
+        uint32_t old = al;
+        int cf = (f & F_CF) != 0, af = 0, ncf = 0;
+        if ((al & 0x0F) > 9 || (f & F_AF)) { al = op == 0x27 ? al + 6 : al - 6; af = 1; ncf = cf || (op == 0x27 ? al > 0xFF : old < 6); }
+        if (old > 0x99 || cf) { al = op == 0x27 ? al + 0x60 : al - 0x60; ncf = 1; }
+        al &= 0xFF;
+        reg_wr(st, in, RAX, 1, al);
+        x86_set_flags(st, al, 1, ncf, 0, af);
+        return 1;
+    }
+    case 0x37: case 0x3F: { // AAA / AAS
+        f = x86_flags(st);
+        uint32_t ax = (uint32_t)st->gpr[RAX] & 0xFFFF;
+        int adj = (ax & 0x0F) > 9 || (f & F_AF);
+        if (adj) ax = op == 0x37 ? ax + 0x106 : ax - 0x106;
+        ax = (ax & 0xFF0F);
+        reg_wr(st, in, RAX, 2, ax);
+        x86_set_flags(st, ax & 0xFF, 1, adj, 0, adj);
+        return 1;
+    }
+    case 0xD4: { // AAM imm8
+        uint32_t base = (uint32_t)(in->imm & 0xFF);
+        if (!base) soul_fatal(st, "AAM 0 ile bölme");
+        al = (uint32_t)st->gpr[RAX] & 0xFF;
+        uint32_t ax = ((al / base) << 8) | (al % base);
+        reg_wr(st, in, RAX, 2, ax);
+        x86_set_flags(st, ax & 0xFF, 1, 0, 0, 0);
+        return 1;
+    }
+    case 0xD5: { // AAD imm8
+        uint32_t ax = (uint32_t)st->gpr[RAX] & 0xFFFF;
+        uint32_t r = ((ax & 0xFF) + (ax >> 8) * (uint32_t)(in->imm & 0xFF)) & 0xFF;
+        reg_wr(st, in, RAX, 2, r);
+        x86_set_flags(st, r, 1, 0, 0, 0);
+        return 1;
+    }
+    case 0xD6: reg_wr(st, in, RAX, 1, (x86_flags(st) & F_CF) ? 0xFF : 0); return 1; // SALC
+    case 0x63: case 0xCE: return 1;                                                   // ARPL / INTO
+    default: return 0;
+    }
+}
+
 static void exec_map1(X86State *st, const X86Insn *in) {
     uint8_t op = in->op;
     uint64_t next = in->addr + in->len;
+    if (g_mode32) next = (uint32_t)next;
     st->rip = next;
+    if (g_mode32 && exec_legacy32(st, in)) return;
 
     if (op < 0x40 && (op & 7) < 6) {
         int aop = op >> 3, form = op & 7;
@@ -519,7 +582,7 @@ static void exec_map1(X86State *st, const X86Insn *in) {
     case 0x8E: return; // MOV Sreg, Ev: ignored in flat 64-bit mode
     case 0x8F: {
         uint64_t v = pop64(st);
-        wr_loc(st, in, loc_e(st, in), 8, v);
+        wr_loc(st, in, loc_e(st, in), stack_slot(), v);
         return;
     }
     case 0x90:
@@ -596,7 +659,7 @@ static void exec_map1(X86State *st, const X86Insn *in) {
         push64(st, st->gpr[RBP]);
         uint64_t frame = st->gpr[RSP];
         unsigned level = (unsigned)(in->imm2 & 31);
-        for (unsigned i = 1; i < level; i++) { st->gpr[RBP] -= 8; push64(st, mem_rd(st->gpr[RBP], 8)); }
+        for (unsigned i = 1; i < level; i++) { st->gpr[RBP] -= (uint64_t)stack_slot(); push64(st, mem_rd(st->gpr[RBP], stack_slot())); }
         if (level) push64(st, frame);
         st->gpr[RBP] = frame;
         st->gpr[RSP] -= in->imm;
@@ -604,7 +667,7 @@ static void exec_map1(X86State *st, const X86Insn *in) {
     }
     case 0xC9: st->gpr[RSP] = st->gpr[RBP]; st->gpr[RBP] = pop64(st); return;
     case 0xCC: {
-        const uint8_t *b = (const uint8_t *)(uintptr_t)in->addr;
+        const uint8_t *b = (const uint8_t *)G2H(in->addr);
         if (b[1] == 0x53 && b[2] == 0x43) {
             uint32_t id; memcpy(&id, b + 3, 4);
             st->rip = in->addr;
@@ -653,9 +716,9 @@ static void exec_map1(X86State *st, const X86Insn *in) {
         int r = in->reg & 7;
         switch (r) {
         case 0: case 1: do_inc_dec(st, in, loc_e(st, in), in->opsize, r); return;
-        case 2: { uint64_t t = rd_loc(st, in, loc_e(st, in), 8); push64(st, next); st->rip = t; return; }
-        case 4: st->rip = rd_loc(st, in, loc_e(st, in), 8); return;
-        case 6: push64(st, rd_loc(st, in, loc_e(st, in), 8)); return;
+        case 2: { uint64_t t = rd_loc(st, in, loc_e(st, in), stack_slot()); push64(st, next); st->rip = t; return; }
+        case 4: st->rip = rd_loc(st, in, loc_e(st, in), stack_slot()); return;
+        case 6: push64(st, rd_loc(st, in, loc_e(st, in), stack_slot())); return;
         default: unsupported(st, in);
         }
     }
@@ -731,7 +794,7 @@ static void exec_map0f(X86State *st, const X86Insn *in) {
         if (in->mod == 3) return; // LFENCE/MFENCE/SFENCE
         switch (in->reg & 7) {
         case 0: { // FXSAVE
-            uint8_t *p = (uint8_t *)(uintptr_t)ea_addr(st, in);
+            uint8_t *p = (uint8_t *)G2H(ea_addr(st, in));
             memset(p, 0, 512);
             memcpy(p, &st->fcw, 2);
             memcpy(p + 24, &st->mxcsr, 4);
@@ -739,7 +802,7 @@ static void exec_map0f(X86State *st, const X86Insn *in) {
             return;
         }
         case 1: { // FXRSTOR
-            uint8_t *p = (uint8_t *)(uintptr_t)ea_addr(st, in);
+            uint8_t *p = (uint8_t *)G2H(ea_addr(st, in));
             memcpy(&st->fcw, p, 2);
             memcpy(&st->mxcsr, p + 24, 4);
             for (int i = 0; i < 16; i++) memcpy(&st->xmm[i], p + 160 + 16 * i, 16);
@@ -865,11 +928,12 @@ int g_interp_profile;
 
 void x86_interp_step(X86State *st) {
     X86Insn in;
-    const uint8_t *code = (const uint8_t *)(uintptr_t)st->rip;
+    const uint8_t *code = (const uint8_t *)G2H(st->rip);
     if (x86_decode(code, st->rip, &in) != 0) {
         soul_fatal(st, "Çözülemeyen komut @%016llx: %02x %02x %02x %02x %02x (AVX/VEX desteklenmiyor olabilir)",
                    (unsigned long long)st->rip, code[0], code[1], code[2], code[3], code[4]);
     }
     if (__builtin_expect(g_interp_profile, 0)) g_interp_hist[in.map * 256 + in.op]++;
     x86_exec(st, &in);
+    if (g_mode32) st->rip = (uint32_t)st->rip;
 }

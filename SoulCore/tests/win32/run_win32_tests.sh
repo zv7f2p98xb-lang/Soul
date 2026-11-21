@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Windows-specific programs (Win32 API, C++, threads) compared against recorded output.
+# Windows-specific programs (Win32 API, C++, threads) compared against recorded output,
+# built as 64-bit and as 32-bit executables.
 # Usage: tests/win32/run_win32_tests.sh [soulrun-command...]
 set -u
 cd "$(dirname "$0")"
@@ -11,6 +12,10 @@ x86_64-w64-mingw32-gcc -O2 -o "$OUT/winapi.exe" winapi.c || exit 1
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/threads.exe" threads.c || exit 1
 x86_64-w64-mingw32-g++ -O2 -static -o "$OUT/cpp.exe" cpp.cpp || exit 1
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/registry.exe" registry.c || exit 1
+# the same programs as 32-bit (x86) executables
+i686-w64-mingw32-gcc -O2 -o "$OUT/threads32.exe" threads.c || exit 1
+i686-w64-mingw32-g++ -O2 -static -o "$OUT/cpp32.exe" cpp.cpp || exit 1
+i686-w64-mingw32-gcc -O2 -o "$OUT/registry32.exe" registry.c || exit 1
 pass=0; fail=0
 check() {
   local name=$1; shift
@@ -24,5 +29,9 @@ check threads threads.exe
 check cpp cpp.exe
 check registry-write registry.exe yaz
 check registry-read registry.exe
+check threads threads32.exe
+check cpp cpp32.exe
+check registry-write registry32.exe yaz
+check registry-read registry32.exe
 echo "passed=$pass failed=$fail"
 [ $fail -eq 0 ]

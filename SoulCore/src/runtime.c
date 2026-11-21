@@ -229,6 +229,24 @@ uint64_t soul_guest_call(X86State *st, uint64_t fn, int nargs, const uint64_t *a
     uint64_t saved_rip = st->rip, saved_rsp = st->gpr[RSP];
     SoulThread *t = st->thread;
     if (++t->call_depth > 200) soul_fatal(st, "İç içe geri çağrı derinliği aşıldı");
+    if (g_mode32) {
+        // 32-bit: arguments on the stack right to left, then the return address. ESP is
+        // restored afterwards, so this works for stdcall and cdecl callbacks alike.
+        uint32_t sp32 = (uint32_t)((st->gpr[RSP] - 64) & ~0xFull);
+        sp32 -= (uint32_t)(4 * nargs);
+        sp32 &= ~0xFu;
+        for (int i = 0; i < nargs; i++) mem_wr(sp32 + 4u * (uint32_t)i, 4, args[i]);
+        sp32 -= 4;
+        mem_wr(sp32, 4, p->trap_addr);
+        st->gpr[RSP] = sp32;
+        st->rip = fn;
+        soul_run_until_trap(st);
+        uint64_t r = (uint32_t)st->gpr[RAX] | ((uint64_t)(uint32_t)st->gpr[RDX] << 32);
+        st->gpr[RSP] = saved_rsp;
+        st->rip = saved_rip;
+        t->call_depth--;
+        return r;
+    }
     uint64_t sp = (st->gpr[RSP] - 128) & ~0xFull;
     int stack_args = nargs > 4 ? nargs - 4 : 0;
     uint64_t area = (uint64_t)(32 + 8 * stack_args + 15) & ~0xFull;
@@ -270,9 +288,11 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
     X86State *st = t->st;
     const char *what = sig == SIGSEGV ? "Bellek erişim ihlali" : sig == SIGBUS ? "Hizalama/veri yolu hatası"
                      : sig == SIGILL ? "Geçersiz komut" : "Aritmetik hata";
+    uint64_t fa = (uint64_t)(uintptr_t)si->si_addr;
+    if (g_mode32 && fa - g_gbase < 0x100000000ull) fa -= g_gbase; // report the guest address
     if (!p->error[0])
         snprintf(p->error, sizeof p->error, "%s: adres 0x%llx (x86 RIP ~ 0x%llx%s)", what,
-                 (unsigned long long)(uintptr_t)si->si_addr,
+                 (unsigned long long)fa,
                  (unsigned long long)(t->block_rip ? t->block_rip : st->rip), t->is_main ? "" : ", yan iş parçacığı");
     p->exit_code = (int)0xC0000005;
     g_in_fault = 0;
@@ -300,60 +320,101 @@ static void restore_handlers(void) {
 
 // ---- process setup -------------------------------------------------------------------------------
 
+// UNICODE_STRING: { USHORT Length, MaximumLength; PWSTR Buffer } (buffer at +4 in 32-bit, +8 in 64-bit)
 static void unicode_string(uint8_t *at, const uint16_t *s) {
     uint16_t len = (uint16_t)(wstrlen(s) * 2), max = (uint16_t)(len + 2);
-    uint64_t ptr = (uint64_t)(uintptr_t)s;
-    memcpy(at, &len, 2); memcpy(at + 2, &max, 2); memcpy(at + 8, &ptr, 8);
+    uint64_t ptr = H2G(s);
+    memcpy(at, &len, 2); memcpy(at + 2, &max, 2); memcpy(at + PSZ, &ptr, (size_t)PSZ);
 }
 
 static uint16_t *g_pp_strings[3];
 static uint8_t *g_peb_block; // PEB, loader data and process parameters (shared by all threads)
 
+static uint16_t *g_wdup(const char *s) {
+    uint16_t *h = u2w_dup(s);
+    size_t n = (wstrlen(h) + 1) * 2;
+    uint16_t *g = g_malloc(n);
+    memcpy(g, h, n);
+    free(h);
+    return g;
+}
+
 static uint64_t make_teb(SoulProcess *p, SoulThread *t) {
     t->teb_size = 0x2000;
-    t->teb_block = mmap(NULL, t->teb_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    uint64_t tebv = (uint64_t)(uintptr_t)t->teb_block;
-    uint64_t *tls = calloc(64, sizeof(uint64_t));
-    mem_wr(tebv + 0x08, 8, t->stack_base);
-    mem_wr(tebv + 0x10, 8, t->stack_limit);
-    mem_wr(tebv + 0x30, 8, tebv);
-    mem_wr(tebv + 0x40, 8, 4242);
-    mem_wr(tebv + 0x48, 8, t->tid);
-    mem_wr(tebv + 0x58, 8, (uint64_t)(uintptr_t)tls);
-    mem_wr(tebv + 0x60, 8, (uint64_t)(uintptr_t)g_peb_block);
+    t->teb_block = g_pages(t->teb_size);
+    uint64_t tebv = H2G(t->teb_block);
+    uint64_t tls = H2G(g_calloc(64, (size_t)PSZ));
+    if (g_mode32) {
+        mem_wr(tebv + 0x00, 4, 0xFFFFFFFFu);      // SEH chain: end of list
+        mem_wr(tebv + 0x04, 4, t->stack_base);
+        mem_wr(tebv + 0x08, 4, t->stack_limit);
+        mem_wr(tebv + 0x18, 4, tebv);             // Self
+        mem_wr(tebv + 0x20, 4, 4242);             // ClientId.UniqueProcess
+        mem_wr(tebv + 0x24, 4, t->tid);
+        mem_wr(tebv + 0x2C, 4, tls);              // ThreadLocalStoragePointer
+        mem_wr(tebv + 0x30, 4, H2G(g_peb_block));
+        t->st->fs_base = tebv;
+    } else {
+        mem_wr(tebv + 0x08, 8, t->stack_base);
+        mem_wr(tebv + 0x10, 8, t->stack_limit);
+        mem_wr(tebv + 0x30, 8, tebv);
+        mem_wr(tebv + 0x40, 8, 4242);
+        mem_wr(tebv + 0x48, 8, t->tid);
+        mem_wr(tebv + 0x58, 8, tls);
+        mem_wr(tebv + 0x60, 8, H2G(g_peb_block));
+        t->st->gs_base = tebv;
+    }
     t->teb = tebv;
-    t->st->gs_base = tebv;
     (void)p;
     return tebv;
 }
 
 static void free_teb(SoulThread *t) {
     if (!t->teb_block) return;
-    uint64_t *tls = (uint64_t *)(uintptr_t)mem_rd(t->teb + 0x58, 8);
-    if (tls) { for (int i = 0; i < 64; i++) free((void *)(uintptr_t)tls[i]); free(tls); }
-    munmap(t->teb_block, t->teb_size);
+    uint64_t tls = rd_ptr(t->teb + TEB_TLSPTR);
+    if (tls) {
+        for (int i = 0; i < 64; i++) g_free(G2H(rd_ptr(tls + (uint64_t)i * PSZ)));
+        g_free(G2H(tls));
+    }
+    g_pages_free(t->teb_block, t->teb_size);
     t->teb_block = NULL;
 }
 
 static void setup_peb(SoulProcess *p) {
-    g_peb_block = mmap(NULL, 0x2000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    g_peb_block = g_pages(0x2000);
     uint8_t *peb = g_peb_block, *ldr = g_peb_block + 0x1000, *pp = g_peb_block + 0x1200;
-    uint64_t pebv = (uint64_t)(uintptr_t)peb;
+    uint64_t pebv = H2G(peb), ldrv = H2G(ldr);
+    for (int i = 0; i < 3; i++) g_free(g_pp_strings[i]);
+    g_pp_strings[0] = g_wdup(p->cwd_win);
+    g_pp_strings[1] = g_wdup(p->exe_win);
+    g_pp_strings[2] = g_wdup(p->cmdline);
+    if (g_mode32) {
+        mem_wr(pebv + 0x08, 4, p->main_module ? p->main_module->base : 0); // ImageBaseAddress
+        mem_wr(pebv + 0x0C, 4, ldrv);
+        mem_wr(pebv + 0x10, 4, H2G(pp));
+        mem_wr(pebv + 0x18, 4, hs()->process_heap);
+        mem_wr(pebv + 0x64, 4, 1);         // NumberOfProcessors
+        mem_wr(pebv + 0xA4, 4, 10);        // OSMajorVersion
+        mem_wr(pebv + 0xA8, 4, 0);
+        mem_wr(pebv + 0xAC, 2, 19045);     // OSBuildNumber
+        mem_wr(pebv + 0xB0, 4, 2);         // OSPlatformId
+        mem_wr(ldrv + 0x4, 1, 1);
+        for (int i = 0; i < 3; i++) { uint64_t l = ldrv + 0x0C + 8 * (uint64_t)i; mem_wr(l, 4, l); mem_wr(l + 4, 4, l); }
+        unicode_string(pp + 0x24, g_pp_strings[0]); // CurrentDirectory.DosPath
+        unicode_string(pp + 0x38, g_pp_strings[1]); // ImagePathName
+        unicode_string(pp + 0x40, g_pp_strings[2]); // CommandLine
+        return;
+    }
     mem_wr(pebv + 0x10, 8, p->main_module ? p->main_module->base : 0);
-    mem_wr(pebv + 0x18, 8, (uint64_t)(uintptr_t)ldr);
-    mem_wr(pebv + 0x20, 8, (uint64_t)(uintptr_t)pp);
+    mem_wr(pebv + 0x18, 8, ldrv);
+    mem_wr(pebv + 0x20, 8, H2G(pp));
     mem_wr(pebv + 0x30, 8, hs()->process_heap);
     mem_wr(pebv + 0x118, 4, 10);
     mem_wr(pebv + 0x11C, 4, 0);
     mem_wr(pebv + 0x120, 2, 19045);
     mem_wr(pebv + 0x124, 4, 2);
-    uint64_t ldrv = (uint64_t)(uintptr_t)ldr;
     mem_wr(ldrv + 0x4, 1, 1);
     for (int i = 0; i < 3; i++) { uint64_t l = ldrv + 0x10 + 16 * (uint64_t)i; mem_wr(l, 8, l); mem_wr(l + 8, 8, l); }
-    for (int i = 0; i < 3; i++) free(g_pp_strings[i]);
-    g_pp_strings[0] = u2w_dup(p->cwd_win);
-    g_pp_strings[1] = u2w_dup(p->exe_win);
-    g_pp_strings[2] = u2w_dup(p->cmdline);
     unicode_string(pp + 0x38, g_pp_strings[0]);
     unicode_string(pp + 0x60, g_pp_strings[1]);
     unicode_string(pp + 0x70, g_pp_strings[2]);
@@ -408,9 +469,9 @@ SoulThread *soul_thread_create(X86State *st, uint64_t fn, uint64_t arg, size_t s
     p->next_tid += 4;
     t->tid = p->next_tid;
     t->stack_size = stack < (1u << 20) ? (4u << 20) : (stack > (64u << 20) ? (64u << 20) : stack);
-    t->stack_mem = mmap(NULL, t->stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (t->stack_mem == MAP_FAILED) { free(t->st); free(t); return NULL; }
-    t->stack_limit = (uint64_t)(uintptr_t)t->stack_mem;
+    t->stack_mem = g_pages(t->stack_size);
+    if (!t->stack_mem) { free(t->st); free(t); return NULL; }
+    t->stack_limit = H2G(t->stack_mem);
     t->stack_base = t->stack_limit + t->stack_size;
     t->st->gpr[RSP] = t->stack_base - 64;
     make_teb(p, t);
@@ -493,9 +554,21 @@ int soul_process_create(const SoulLaunchOptions *o, SoulProcess **out, char *err
     if (bs && bs - p->cwd_win > 2) *bs = 0; else if (bs) bs[1] = 0;
     snprintf(p->cmdline, sizeof p->cmdline, "\"%s\"%s%s", p->exe_win, o->args && *o->args ? " " : "", o->args ? o->args : "");
 
-    p->thunk_mem = mmap(NULL, (size_t)SOUL_MAX_THUNKS * SOUL_THUNK_STRIDE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p->thunk_mem == MAP_FAILED) { snprintf(err, errlen, "Bellek ayrılamadı"); free(p); return -1; }
-    p->thunk_base = (uint64_t)(uintptr_t)p->thunk_mem;
+    // 32-bit (x86) programs run in a 4 GB guest window; 64-bit ones use host addresses directly.
+    g_mode32 = 0;
+    if (pe_machine(p->exe_host) == 0x14C) {
+        if (!gwin_init()) { snprintf(err, errlen, "32-bit program için bellek penceresi ayrılamadı"); free(p); return -1; }
+        g_mode32 = 1;
+    }
+    gheap_reset();
+    if (g_mode32) {
+        uint64_t a = gwin_map(0x7FE00000ull, (size_t)SOUL_MAX_THUNKS * SOUL_THUNK_STRIDE);
+        p->thunk_mem = a ? G2H(a) : NULL;
+    } else {
+        p->thunk_mem = g_pages((size_t)SOUL_MAX_THUNKS * SOUL_THUNK_STRIDE);
+    }
+    if (!p->thunk_mem) { snprintf(err, errlen, "Bellek ayrılamadı"); gwin_release(); g_mode32 = 0; free(p); return -1; }
+    p->thunk_base = H2G(p->thunk_mem);
     p->thunk_count = 1; // id 0 is the guest-call return trap
     p->trap_addr = p->thunk_base;
     p->thunk_mem[0] = 0xCC; p->thunk_mem[1] = 0x53; p->thunk_mem[2] = 0x43; p->thunk_mem[7] = 0xC3;
@@ -513,10 +586,12 @@ int soul_process_create(const SoulLaunchOptions *o, SoulProcess **out, char *err
     if (!m) {
         hle_shutdown(p);
         pe_unload_all(p);
-        munmap(p->thunk_mem, (size_t)SOUL_MAX_THUNKS * SOUL_THUNK_STRIDE);
+        g_pages_free(p->thunk_mem, (size_t)SOUL_MAX_THUNKS * SOUL_THUNK_STRIDE);
         free(st);
         g_proc = NULL;
         free(p);
+        gwin_release();
+        g_mode32 = 0;
         return -1;
     }
     if (m->is_dll) {
@@ -528,15 +603,16 @@ int soul_process_create(const SoulLaunchOptions *o, SoulProcess **out, char *err
 
     size_t stack = m->stack_reserve > (8u << 20) ? (size_t)m->stack_reserve : (8u << 20);
     if (stack > (256u << 20)) stack = 256u << 20;
-    void *sk = mmap(NULL, stack, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (sk == MAP_FAILED) { snprintf(err, errlen, "Yığın ayrılamadı"); soul_process_destroy(p); return -1; }
-    p->main_thread.stack_limit = (uint64_t)(uintptr_t)sk;
-    p->main_thread.stack_base = (uint64_t)(uintptr_t)sk + stack;
+    if (g_mode32 && stack > (64u << 20)) stack = 64u << 20;
+    void *sk = g_pages(stack);
+    if (!sk) { snprintf(err, errlen, "Yığın ayrılamadı"); soul_process_destroy(p); return -1; }
+    p->main_thread.stack_limit = H2G(sk);
+    p->main_thread.stack_base = H2G(sk) + stack;
     st->gpr[RSP] = p->main_thread.stack_base - 64;
     setup_peb(p);
     make_teb(p, &p->main_thread);
 
-    if (o->jit_enabled && jitmem_ready()) p->jit = jit_create(p);
+    if (o->jit_enabled && jitmem_ready() && !g_mode32) p->jit = jit_create(p);
     p->use_jit = p->jit != NULL;
     *out = p;
     return 0;
@@ -655,18 +731,19 @@ void soul_process_destroy(SoulProcess *p) {
     hle_shutdown(p);
     crt_process_end();
     pe_unload_all(p);
-    if (p->main_thread.stack_limit) munmap((void *)(uintptr_t)p->main_thread.stack_limit, (size_t)(p->main_thread.stack_base - p->main_thread.stack_limit));
+    if (p->main_thread.stack_limit) g_pages_free(G2H(p->main_thread.stack_limit), (size_t)(p->main_thread.stack_base - p->main_thread.stack_limit));
     free_teb(&p->main_thread);
     while (p->threads) {
         SoulThread *t = p->threads;
         p->threads = t->next;
         free_teb(t);
-        if (t->stack_mem) munmap(t->stack_mem, t->stack_size);
+        if (t->stack_mem) g_pages_free(t->stack_mem, t->stack_size);
         free(t->st);
         free(t);
     }
-    if (g_peb_block) { munmap(g_peb_block, 0x2000); g_peb_block = NULL; }
-    if (p->thunk_mem) munmap(p->thunk_mem, (size_t)SOUL_MAX_THUNKS * SOUL_THUNK_STRIDE);
+    for (int i = 0; i < 3; i++) { g_free(g_pp_strings[i]); g_pp_strings[i] = NULL; }
+    if (g_peb_block) { g_pages_free(g_peb_block, 0x2000); g_peb_block = NULL; }
+    if (p->thunk_mem) g_pages_free(p->thunk_mem, (size_t)SOUL_MAX_THUNKS * SOUL_THUNK_STRIDE);
     for (uint32_t i = 1; i < p->thunk_count; i++) { free((void *)p->thunks[i].dll); free((void *)p->thunks[i].name); }
     free(p->main_state);
     free(p->in_buf);
@@ -678,4 +755,7 @@ void soul_process_destroy(SoulProcess *p) {
     pthread_cond_destroy(&p->ev_cv);
     if (g_proc == p) g_proc = NULL;
     free(p);
+    gwin_release();
+    gheap_reset();
+    g_mode32 = 0;
 }
