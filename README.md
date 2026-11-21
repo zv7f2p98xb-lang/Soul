@@ -2,7 +2,7 @@
 
 Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) programları** Apple Silicon (M serisi) iPad'lerde — örneğin **iPad Air M3** — çalıştıran bir iPadOS uygulamasıdır. Programın x86-64 makine kodu çalışma anında **ARM64 koduna çevrilir (JIT)** ve doğrudan M çipinde çalışır; Windows API çağrıları ise iOS üzerinde yeniden yazılmış bir uyumluluk katmanı tarafından karşılanır.
 
-> Durum: **konsol ve pencereli (GUI) programlar çalışıyor** — C/C++ (MinGW, MSVC/UCRT) programları; dosya, klavye, renkli konsol, çoklu iş parçacığı, **Win32 pencereleri, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler ve diyaloglar**. DirectX/OpenGL oyunları ve 32-bit programlar **henüz yok** — ayrıntılar aşağıda.
+> Durum: **konsol ve pencereli (GUI) programlar çalışıyor** — C/C++ (MinGW, MSVC/UCRT) programları; dosya, klavye, renkli konsol, çoklu iş parçacığı, **Win32 pencereleri, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler ve diyaloglar** ve **OpenGL 1.x ile 3B grafik** (Soul'un kendi grafik çeviri katmanı). Direct3D oyunları ve 32-bit programlar **henüz yok** — ayrıntılar aşağıda.
 >
 > Ölçüm (CI'da Apple Silicon üzerinde iOS simülatörü, JIT açık): JIT Benchmark örneği **329 milyon x86 komutunu 0,18 sn'de** çalıştırdı (~1,8 milyar komut/sn), yorumlayıcıya göre ~20 kat hızlı.
 
@@ -56,13 +56,14 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) programları** 
 - **C: sürücüsü:** Dosyalar › iPad'imde › Soul › Soul › `drive_c`. Programların yazdığı dosyalar buradadır; buraya kopyaladığınız programları *C: sürücüsünü tara* ile kitaplığa ekleyebilirsiniz.
 - **Pencereli programlar:** program pencereleri bir masaüstünde gösterilir ve ekrana sığacak şekilde ölçeklenir. Dokunma sol tıktır (sürükleme = basılı tutup çekme), **uzun basış sağ tıktır**, iki parmakla kaydırma fare tekerleğidir; araç çubuğundaki *Sağ tık* modu tüm dokunuşları sağ tıka çevirir. iPad'e bağlı fare/izleme dörtgeni ve donanım klavyesi doğrudan çalışır (⌘ kısayolları Ctrl olarak gönderilir). Metin kutusuna dokununca ekran klavyesi açılır; *Klavye* düğmesiyle istendiğinde de açılabilir. Yeniden boyutlandırılabilir pencerelerde ⤢ düğmesi pencereyi ekran boyutuna getirir. Programın `printf` çıktısı *Konsol çıktısı* sayfasındadır.
 - **Konsol:** çıktı renkli gösterilir, alt satırdan programa klavye girdisi gönderilir; *Ctrl+Z* girdi sonudur. Üst çubukta çalışma süresi, MIPS, JIT oranı ve API çağrısı sayısı görünür.
-- **Örnekler:** pencereli — Çizim, Saat, Hesap Makinesi (GUI), Not Defteri, Yılan, Mayın Tarlası; konsol — Merhaba, Hesap Makinesi, Sayı Tahmin, Mandelbrot, JIT Benchmark, Sistem Bilgisi, İş Parçacıkları, C++ Demo.
+- **Örnekler:** 3B — Küp 3B (OpenGL); pencereli — Çizim, Saat, Hesap Makinesi (GUI), Not Defteri, Yılan, Mayın Tarlası; konsol — Merhaba, Hesap Makinesi, Sayı Tahmin, Mandelbrot, JIT Benchmark, Sistem Bilgisi, İş Parçacıkları, C++ Demo.
 
 ## Uyumluluk
 
 | Çalışır | Henüz çalışmaz |
 |---|---|
-| 64-bit konsol programları (MinGW, MSVC/UCRT) | DirectX / OpenGL / Vulkan oyunları (3B grafik) |
+| 64-bit konsol programları (MinGW, MSVC/UCRT) | Direct3D 9/11/12, Vulkan, OpenGL 2+ gölgelendiricileri (GLSL) |
+| OpenGL 1.x 3B grafik (WGL, sabit işlevli çizim hattı, doku, ışık, sis, saydamlık) | 3B grafiğin Metal (GPU) arka ucu — şimdilik CPU'da çizilir |
 | Pencereli programlar: user32 pencereleri, GDI, denetimler, menüler, diyaloglar, Dosya Aç/Kaydet | Ortak denetimlerin çoğu (ağaç/liste görünümü, sekmeler, araç çubukları) |
 | Dosya/klasör API'leri, ortam değişkenleri, zaman | 32-bit (x86) ve .NET programları, `.msi` kurulumları |
 | printf/scanf ailesi, C++ STL (statik libstdc++) | Alt süreç başlatma (`CreateProcess`, `system`) |
@@ -70,7 +71,27 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) programları** 
 | MessageBox, renkli konsol (SetConsoleTextAttribute) | Ağ (Winsock), kayıt defteri yazma, ses |
 | CreateThread, kritik bölge, SRW, koşul değişkeni, olay/mutex/semafor | Gerçek paralel çalışma (iş parçacıkları sırayla çalışır) |
 
-Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 → Metal) yığınını kullanır; Soul aynı temel fikri (JIT + API taklidi) sıfırdan, küçük bir çekirdekle uygular. Yol haritası: Direct3D → Metal, ses (waveOut/XAudio2), ortak denetimler ve dosya diyalogları.
+Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 → Metal) yığınını kullanır; Soul aynı temel fikri (JIT + API taklidi + grafik çeviri katmanı) sıfırdan, küçük bir çekirdekle uygular.
+
+### Grafik çeviri katmanı
+
+```
+ OpenGL 1.x (opengl32/glu32/WGL)   Direct3D 9 / 11 (sırada)
+              │                              │
+              ▼                              ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │ sgpu: GPU biçimli sabit işlevli çizim hattı (sgpu.h)     │
+ │ homojen uzayda kırpma, perspektif-doğru enterpolasyon,   │
+ │ derinlik/alfa testi, mipmap'li doku, sis, karıştırma     │
+ └──────────────────────────────────────────────────────────┘
+              │ CPU arka ucu (bugün)        │ Metal arka ucu (sırada)
+              ▼                              ▼
+     pencere çerçeve arabelleği       iPad GPU'su (Apple Silicon)
+```
+
+OpenGL ön yüzü (`opengl.c`) matris yığınlarını, `glBegin/glEnd` ve köşe dizilerini, köşe başına ışıklandırmayı, sisi, çoklu dokuyu, görüntüleme listelerini, `glPushAttrib`'i ve GLU (perspektif, `gluLookAt`, küre/silindir/disk, mipmap) işlevlerini uygular; `SwapBuffers` kareyi pencereye aktarır ve ekran yenileme hızına (60 FPS) göre bekler. Çizim hattı, ön yüzlerden bağımsız bir arayüz (`sg_triangles/sg_lines/sg_points`) sunar; bu sayede Direct3D ön yüzü ve Metal (GPU) arka ucu aynı yapıya eklenebilir. Madeira'nın kullandığı DXMT ölçeğine (Direct3D 11 + gölgelendirici derleyicisi → Metal) ulaşmak çok aşamalı bir yol: sıradaki adımlar Direct3D 9 sabit işlevli ön yüz, Metal arka ucu ve gölgelendirici (DXBC/GLSL) çevirisi.
+
+Yol haritası: Direct3D 9 → Metal arka ucu → gölgelendirici çevirisi (Direct3D 11), ses (waveOut/XAudio2), ağ, ortak denetimler.
 
 ## Geliştirme
 

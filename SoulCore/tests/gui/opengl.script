@@ -1,0 +1,9 @@
+# OpenGL through Soul's 3D pipeline: clear colour, lit sphere, textured cube, then close.
+waitwin 1
+wait 600
+pixel 2 2 141A29
+pixelnot 505 270 141A29
+pixelnot 290 340 141A29
+pixelnot 292 492 141A29
+dump opengl.ppm
+close

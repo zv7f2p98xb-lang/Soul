@@ -14,23 +14,26 @@ struct AboutView: View {
                           text: "x86-64 makine kodu temel bloklar halinde çözülür ve çalışma anında ARM64 komutlarına çevrilir. Tamsayı işlemleri, bellek erişimleri, dallanmalar ve kayan nokta işlemleri doğrudan M çipinde çalışır; EFLAGS bayrakları tembel (lazy) hesaplanır ve mümkün olduğunda ARM'ın NZCV bayraklarıyla eşlenir. Çevrilemeyen nadir komutlar (ör. x87, bazı SSE) blok içinden yorumlayıcıya devredilir.")
                 LayerCard(icon: "square.stack.3d.up.fill", color: .purple, title: "3 · Win32 uyumluluk katmanı",
                           text: "kernel32, msvcrt, UCRT (api-ms-win-crt-*), vcruntime, user32, gdi32, advapi32 ve shell32'nin yüzlerce işlevi iOS üzerinde yeniden yazıldı: dosyalar (C: sürücüsü uygulamanın Belgeler klasörüne bağlıdır), konsol, bellek, zaman, pencereler, mesaj kuyruğu, GDI çizimi, denetimler, menüler, diyaloglar, MessageBox ve daha fazlası.")
+                LayerCard(icon: "cube.transparent.fill", color: .orange, title: "4 · Grafik çeviri katmanı",
+                          text: "Programın 3B çizim çağrıları (OpenGL 1.x, WGL, GLU) Soul'un GPU biçimli çizim hattına (sgpu) çevrilir: kırpma, perspektif-doğru doku, derinlik tamponu, ışık, sis ve saydamlık. Kareler pencereye aktarılır; Direct3D ön yüzü ve Metal (GPU) arka ucu aynı yapıya eklenecek.")
 
                 Text("Neler çalışır?").font(.title2.weight(.semibold))
                 Bullet(ok: true, "64-bit konsol programları (C, C++, MinGW veya MSVC ile derlenmiş)")
                 Bullet(ok: true, "Dosya okuma/yazma, klasör listeleme, klavye girdisi, renkli konsol çıktısı")
                 Bullet(ok: true, "Programla gelen x64 DLL'ler, statik C++ çalışma zamanı, setjmp/longjmp, TLS")
                 Bullet(ok: true, "Pencereli (GUI) programlar: pencereler, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler, diyaloglar, zamanlayıcılar")
+                Bullet(ok: true, "OpenGL 1.x 3B grafik: Soul'un grafik çeviri katmanı (doku, ışık, sis, saydamlık, derinlik tamponu)")
                 Bullet(ok: true, "Dokunma → fare (uzun basış = sağ tık, iki parmak = tekerlek), donanım ve ekran klavyesi")
                 Bullet(ok: true, "Windows mesaj kutuları (MessageBox) iPad uyarısı olarak gösterilir")
                 Bullet(ok: true, "Çoklu iş parçacığı: CreateThread, kritik bölgeler, olaylar, semaforlar, koşul değişkenleri")
 
                 Text("Henüz çalışmayanlar").font(.title2.weight(.semibold))
-                Bullet(ok: false, "Direct3D / OpenGL / Vulkan kullanan 3B oyunlar, Steam ve web tabanlı başlatıcılar")
+                Bullet(ok: false, "Direct3D / Vulkan / gölgelendiricili (GLSL) OpenGL kullanan 3B oyunlar, Steam ve web tabanlı başlatıcılar")
                 Bullet(ok: false, "32-bit (x86) programlar, .NET programları, kurulum sihirbazları (.msi)")
                 Bullet(ok: false, "C++ istisnaları (throw), AVX komutları, alt süreç başlatma (CreateProcess)")
 
                 Text("Madeira ile fark").font(.title2.weight(.semibold))
-                Text("Madeira gibi projeler Steam oyunlarını çalıştırmak için Wine (Windows API'nin neredeyse tamamı), FEX-Emu (olgun bir x86→ARM64 JIT) ve DXMT (Direct3D 11 → Metal) yığınını birleştirir. Soul ise sıfırdan yazılmış, küçük ve anlaşılır bir çekirdek: aynı temel fikri (JIT + API taklidi) uygular: konsol ve GDI tabanlı pencereli programlar çalışır. Yol haritası: Direct3D → Metal, ses ve ağ.")
+                Text("Madeira gibi projeler Steam oyunlarını çalıştırmak için Wine (Windows API'nin neredeyse tamamı), FEX-Emu (olgun bir x86→ARM64 JIT) ve DXMT (Direct3D 11 → Metal) yığınını birleştirir. Soul ise sıfırdan yazılmış, küçük ve anlaşılır bir çekirdek: aynı temel fikri (JIT + API taklidi + grafik çeviri katmanı) uygular: konsol, GDI tabanlı pencereli programlar ve OpenGL 1.x 3B programlar çalışır. Yol haritası: Direct3D 9, Metal (GPU) arka ucu, gölgelendirici çevirisi (Direct3D 11), ses ve ağ.")
                     .foregroundStyle(.secondary)
             }
             .padding(24)

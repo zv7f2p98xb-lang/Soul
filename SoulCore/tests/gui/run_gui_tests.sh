@@ -12,18 +12,20 @@ mkdir -p "$OUT"
 x86_64-w64-mingw32-windres gui_basic.rc -O coff -o "$OUT/gui_basic.res" || exit 1
 x86_64-w64-mingw32-gcc -O2 -mwindows -o "$OUT/gui_basic.exe" gui_basic.c "$OUT/gui_basic.res" -lcomctl32 || exit 1
 x86_64-w64-mingw32-gcc -O2 -mwindows -o "$OUT/notepad.exe" ../../samples/notdefteri.c -lcomdlg32 || exit 1
+x86_64-w64-mingw32-gcc -O2 -mwindows -o "$OUT/kup3b.exe" ../../samples/kup3b.c -lopengl32 -lglu32 -lm || exit 1
 rm -rf "$OUT/drive"
 pass=0; fail=0
 check() {
   local name=$1 exe=$2
   local actual
-  actual=$(cd "$OUT" && timeout 300 "${RUNNER[@]}" --quiet --drive "$OUT/drive" --gui-script "$HERE/$name.script" "$exe" 2>"$OUT/$name.stderr" < /dev/null)
+  actual=$(cd "$OUT" && timeout 300 "${RUNNER[@]}" --quiet --drive "$OUT/drive" --gui-script "$HERE/$name.script" $exe 2>"$OUT/$name.stderr" < /dev/null)
   local code=$?
   if [ "$actual" == "$(cat "$name.expected")" ] && [ $code -ne 99 ]; then pass=$((pass+1)); echo "PASS $name";
   else fail=$((fail+1)); echo "FAIL $name (exit $code)"; diff <(echo "$actual") "$name.expected" | head -20; tail -20 "$OUT/$name.stderr"; fi
 }
 check basic gui_basic.exe
 check notepad notepad.exe
+check opengl "kup3b.exe --sabit"
 if [ "$(cat "$OUT/drive/users/soul/Documents/deneme.txt" 2>/dev/null)" == "Soul test" ]; then pass=$((pass+1)); echo "PASS notepad-file";
 else fail=$((fail+1)); echo "FAIL notepad-file: $(cat "$OUT/drive/users/soul/Documents/deneme.txt" 2>&1)"; fi
 echo "passed=$pass failed=$fail"

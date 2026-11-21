@@ -21,5 +21,7 @@ $CC -O2 -s -mwindows -o "$OUT/HesapMakinesiGUI.exe" hesapgui.c
 $CC -O2 -s -mwindows -o "$OUT/NotDefteri.exe" notdefteri.c -lcomdlg32
 $CC -O2 -s -mwindows -o "$OUT/Yilan.exe" yilan.c
 $CC -O2 -s -mwindows -o "$OUT/MayinTarlasi.exe" mayin.c
+# 3D (OpenGL through Soul's graphics layer)
+$CC -O2 -s -mwindows -o "$OUT/Kup3B.exe" kup3b.c -lopengl32 -lglu32 -lm
 cp samples.json "$OUT/samples.json"
 ls -la "$OUT"

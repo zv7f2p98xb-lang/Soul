@@ -1,5 +1,11 @@
 [
   {
+    "file": "Kup3B.exe",
+    "name": "Küp 3B (OpenGL)",
+    "description": "OpenGL ile dönen dokulu, ışıklı küp ve küre; sürükleyerek döndürün.",
+    "args": ""
+  },
+  {
     "file": "Cizim.exe",
     "name": "Çizim",
     "description": "Pencereli çizim programı: renk seçip parmakla çizin, resmi kaydedin.",

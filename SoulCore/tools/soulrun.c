@@ -175,6 +175,20 @@ static void *script_main(void *arg) {
             for (int j = 0; j < k; j++) fprintf(stderr, "[script] menü %*s%s (id=%u, bayrak=%x)\n", m[j].depth * 2, "", m[j].text, m[j].id, m[j].flags);
             continue;
         }
+        if (!strcmp(cmd, "pixelnot")) { // pixelnot x y RRGGBB [win]: the pixel must differ (something was drawn)
+            settle();
+            n = top_windows(w, 32);
+            int i = pick(w, n, d);
+            if (i < 0) { g_script_failed = 1; continue; }
+            uint32_t *px = malloc((size_t)w[i].width * (size_t)w[i].height * 4);
+            uint64_t ver = (uint64_t)-1;
+            soul_gui_copy(g_p, w[i].hwnd, px, (size_t)w[i].width * 4, w[i].width, w[i].height, &ver);
+            int x = atoi(a), y = atoi(b);
+            uint32_t bad = (uint32_t)strtoul(c, NULL, 16), got = px[(size_t)y * w[i].width + x] & 0xFFFFFF;
+            if (got == bad) { fprintf(stderr, "[script] HATA: piksel (%d,%d) hâlâ %06X\n", x, y, got); g_script_failed = 1; }
+            free(px);
+            continue;
+        }
         if (!strcmp(cmd, "pixel")) { // pixel x y RRGGBB [win]
             settle();
             n = top_windows(w, 32);

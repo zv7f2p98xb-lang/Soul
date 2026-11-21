@@ -313,6 +313,8 @@ void gui_unlock(void);
 uint64_t builtin_proc_addr(int ctl);
 
 extern const HleEntry hle_user32_table[];
+extern const HleEntry hle_opengl_table[];
+void gl_reset(void);
 extern const HleEntry hle_gdi32_table[];
 
 // ---- Win32 constants ----------------------------------------------------------------------------
