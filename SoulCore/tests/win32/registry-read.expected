@@ -1,0 +1,12 @@
+calistirma=1 tur=4
+dil uzunlugu=6 bayt=14
+kucuk tampon: 234 gereken=20
+RegGetValue: 0 genislik=800
+olmayan: 2
+alt anahtar=1 deger=4
+  anahtar Pencere
+  Calistirma = DWORD 2
+  Ad = "Soul kullanıcısı"
+  Dil = "Türkçe"
+  Ikili = tür 3, 4 bayt
+urun: Windows 10 Pro

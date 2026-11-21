@@ -20,6 +20,9 @@ typedef struct HleEntry {
 extern const HleEntry hle_kernel32_table[];
 extern const HleEntry hle_crt_table[];
 extern const HleEntry hle_misc_table[];
+extern const HleEntry hle_registry_table[];
+void reg_init(SoulProcess *p);
+void reg_shutdown(void);
 
 // ---- Win32 error codes --------------------------------------------------
 #define ERROR_SUCCESS 0

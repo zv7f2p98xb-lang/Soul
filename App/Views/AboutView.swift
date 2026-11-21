@@ -25,6 +25,7 @@ struct AboutView: View {
                 Bullet(ok: true, "OpenGL 1.x 3B grafik: Soul'un grafik çeviri katmanı (doku, ışık, sis, saydamlık, derinlik tamponu)")
                 Bullet(ok: true, "Dokunma → fare (uzun basış = sağ tık, iki parmak = tekerlek), donanım ve ekran klavyesi")
                 Bullet(ok: true, "Windows mesaj kutuları (MessageBox) iPad uyarısı olarak gösterilir")
+                Bullet(ok: true, "Kalıcı kayıt defteri: programlar ayarlarını kaydeder ve bir sonraki açılışta bulur; bağlantılar Safari'de açılır")
                 Bullet(ok: true, "Çoklu iş parçacığı: CreateThread, kritik bölgeler, olaylar, semaforlar, koşul değişkenleri")
 
                 Text("Henüz çalışmayanlar").font(.title2.weight(.semibold))

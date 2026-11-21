@@ -68,7 +68,8 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) programları** 
 | Dosya/klasör API'leri, ortam değişkenleri, zaman | 32-bit (x86) ve .NET programları, `.msi` kurulumları |
 | printf/scanf ailesi, C++ STL (statik libstdc++) | Alt süreç başlatma (`CreateProcess`, `system`) |
 | setjmp/longjmp, TLS, programla gelen x64 DLL'ler | C++ istisnaları (`throw`), SEH, AVX |
-| MessageBox, renkli konsol (SetConsoleTextAttribute) | Ağ (Winsock), kayıt defteri yazma, ses |
+| MessageBox, renkli konsol (SetConsoleTextAttribute) | Ağ (Winsock), ses |
+| Kalıcı kayıt defteri (programların ayarları korunur), web bağlantıları Safari'de açılır | Kurulum sihirbazları (çoğu 32-bit), başka program başlatma |
 | CreateThread, kritik bölge, SRW, koşul değişkeni, olay/mutex/semafor | Gerçek paralel çalışma (iş parçacıkları sırayla çalışır) |
 
 Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 → Metal) yığınını kullanır; Soul aynı temel fikri (JIT + API taklidi + grafik çeviri katmanı) sıfırdan, küçük bir çekirdekle uygular.

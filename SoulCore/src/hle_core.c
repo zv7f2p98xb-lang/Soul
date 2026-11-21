@@ -43,8 +43,8 @@ int hle_is_system_dll(const char *dll) {
 }
 
 static const HleEntry *find_entry(const char *name) {
-    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table, hle_gdi32_table, hle_opengl_table, hle_misc_table };
-    for (int t = 0; t < 7; t++)
+    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table };
+    for (int t = 0; t < 8; t++)
         for (const HleEntry *e = tables[t]; e->name; e++)
             if (strcmp(e->name, name) == 0) return e;
     return NULL;
@@ -608,6 +608,7 @@ void hle_init(SoulProcess *p) {
     }
     gui_reset();
     gl_reset();
+    reg_init(p);
 }
 
 void hle_shutdown(SoulProcess *p) {
@@ -623,5 +624,6 @@ void hle_shutdown(SoulProcess *p) {
     memset(g_hs.handles, 0, sizeof g_hs.handles);
     gui_shutdown();
     gl_reset();
+    reg_shutdown();
     vm_free_all();
 }

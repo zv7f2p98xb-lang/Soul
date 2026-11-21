@@ -1,6 +1,7 @@
 // SoulCore - user32 / advapi32 / shell32 / bcrypt / ntdll helpers.
 #include "hle.h"
 #include <ctype.h>
+#include <strings.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <wctype.h>
@@ -110,18 +111,6 @@ static void user_name(X86State *st, int wide) {
 }
 HLE(adv_GetUserNameA) { user_name(st, 0); }
 HLE(adv_GetUserNameW) { user_name(st, 1); }
-HLE(adv_RegOpenKeyEx) { if (hle_arg(st, 4)) mem_wr(hle_arg(st, 4), 8, 0); RET(ERROR_FILE_NOT_FOUND); }
-HLE(adv_RegOpenKey) { if (ARG(2)) mem_wr(ARG(2), 8, 0); RET(ERROR_FILE_NOT_FOUND); }
-HLE(adv_RegCreateKeyEx) { if (hle_arg(st, 7)) mem_wr(hle_arg(st, 7), 8, 0x80001234ull); if (hle_arg(st, 8)) mem_wr(hle_arg(st, 8), 4, 1); RET(0); }
-HLE_STUB_RET(adv_RegQueryValueEx, ERROR_FILE_NOT_FOUND)
-HLE_STUB_RET(adv_RegGetValue, ERROR_FILE_NOT_FOUND)
-HLE_STUB_RET(adv_RegSetValueEx, 0)
-HLE_STUB_RET(adv_RegCloseKey, 0)
-HLE_STUB_RET(adv_RegDeleteKey, 0)
-HLE_STUB_RET(adv_RegDeleteValue, 0)
-HLE_STUB_RET(adv_RegEnumKeyEx, 259)
-HLE_STUB_RET(adv_RegEnumValue, 259)
-HLE_STUB_RET(adv_RegQueryInfoKey, ERROR_FILE_NOT_FOUND)
 HLE(adv_SystemFunction036) { random_bytes(PTR(0), (uint32_t)ARG(1)); RET(1); }
 HLE(adv_CryptAcquireContext) { mem_wr(ARG(0), 8, 0x5000); RET(1); }
 HLE(adv_CryptGenRandom) { random_bytes(PTR(2), (uint32_t)ARG(1)); RET(1); }
@@ -207,7 +196,30 @@ HLE(sh_CommandLineToArgvW) {
     free(s);
     RET(blk);
 }
-HLE(sh_ShellExecute) { soul_log("[api] ShellExecute desteklenmiyor\n"); RET(2); }
+// Links (http, https, mailto) open in the iPad's browser / mail app; other targets are not supported.
+static uint64_t shell_open(const char *target) {
+    if (!target) return 2;
+    if (!strncasecmp(target, "http://", 7) || !strncasecmp(target, "https://", 8) || !strncasecmp(target, "mailto:", 7)) {
+        if (g_proc->opts.open_url) g_proc->opts.open_url(g_proc->opts.ctx, target);
+        else soul_log("[Soul] Bağlantı: %s\n", target);
+        return 42;
+    }
+    soul_log("[api] ShellExecute: '%s' açılamıyor (yalnızca web bağlantıları desteklenir)\n", target);
+    return 31; // SE_ERR_NOASSOC
+}
+HLE(sh_ShellExecuteA) { RET(shell_open((const char *)PTR(2))); }
+HLE(sh_ShellExecuteW) { char *t = ARG(2) ? w2u_dup(WSTR(2)) : NULL; RET(shell_open(t)); free(t); }
+static void shell_execute_ex(X86State *st, int wide) {
+    uint8_t *info = PTR(0);
+    uint64_t file; memcpy(&file, info + 24, 8);
+    char *t = !file ? NULL : wide ? w2u_dup((const uint16_t *)(uintptr_t)file) : strdup((const char *)(uintptr_t)file);
+    uint64_t r = shell_open(t);
+    free(t);
+    memcpy(info + 56, &r, 8); // hInstApp
+    RET(r > 32);
+}
+HLE(sh_ShellExecuteExA) { shell_execute_ex(st, 0); }
+HLE(sh_ShellExecuteExW) { shell_execute_ex(st, 1); }
 
 // ---- ntdll -----------------------------------------------------------------------------------
 
@@ -239,15 +251,7 @@ const HleEntry hle_misc_table[] = {
     { "GetProcessWindowStation", u32_GetProcessWindowStation, NULL }, { "GetUserObjectInformationW", u32_GetUserObjectInformationW, NULL },
     { "SetProcessDPIAware", u32_SetProcessDPIAware, NULL }, { "SetProcessDpiAwarenessContext", u32_SetProcessDpiAwarenessContext, NULL },
     { "GetDpiForSystem", u32_GetDpiForSystem, NULL },
-    { "GetUserNameA", adv_GetUserNameA, NULL }, { "GetUserNameW", adv_GetUserNameW, NULL }, { "RegOpenKeyExA", adv_RegOpenKeyEx, NULL },
-    { "RegOpenKeyExW", adv_RegOpenKeyEx, NULL }, { "RegOpenKeyA", adv_RegOpenKey, NULL }, { "RegOpenKeyW", adv_RegOpenKey, NULL },
-    { "RegCreateKeyExA", adv_RegCreateKeyEx, NULL }, { "RegCreateKeyExW", adv_RegCreateKeyEx, NULL }, { "RegQueryValueExA", adv_RegQueryValueEx, NULL },
-    { "RegQueryValueExW", adv_RegQueryValueEx, NULL }, { "RegGetValueA", adv_RegGetValue, NULL }, { "RegGetValueW", adv_RegGetValue, NULL },
-    { "RegSetValueExA", adv_RegSetValueEx, NULL }, { "RegSetValueExW", adv_RegSetValueEx, NULL }, { "RegCloseKey", adv_RegCloseKey, NULL },
-    { "RegDeleteKeyA", adv_RegDeleteKey, NULL }, { "RegDeleteKeyW", adv_RegDeleteKey, NULL }, { "RegDeleteValueA", adv_RegDeleteValue, NULL },
-    { "RegDeleteValueW", adv_RegDeleteValue, NULL }, { "RegEnumKeyExA", adv_RegEnumKeyEx, NULL }, { "RegEnumKeyExW", adv_RegEnumKeyEx, NULL },
-    { "RegEnumValueA", adv_RegEnumValue, NULL }, { "RegEnumValueW", adv_RegEnumValue, NULL }, { "RegQueryInfoKeyW", adv_RegQueryInfoKey, NULL },
-    { "SystemFunction036", adv_SystemFunction036, NULL }, { "CryptAcquireContextA", adv_CryptAcquireContext, NULL },
+    { "GetUserNameA", adv_GetUserNameA, NULL }, { "GetUserNameW", adv_GetUserNameW, NULL }, { "SystemFunction036", adv_SystemFunction036, NULL }, { "CryptAcquireContextA", adv_CryptAcquireContext, NULL },
     { "CryptAcquireContextW", adv_CryptAcquireContext, NULL }, { "CryptGenRandom", adv_CryptGenRandom, NULL }, { "CryptReleaseContext", adv_CryptReleaseContext, NULL },
     { "OpenProcessToken", adv_OpenProcessToken, NULL }, { "GetTokenInformation", adv_GetTokenInformation, NULL },
     { "EventRegister", adv_EventRegister, NULL }, { "EventUnregister", adv_EventUnregister, NULL }, { "EventWriteTransfer", adv_EventWriteTransfer, NULL },
@@ -258,7 +262,8 @@ const HleEntry hle_misc_table[] = {
     { "SHGetKnownFolderPath", sh_SHGetKnownFolderPath, NULL }, { "CoTaskMemFree", ole_CoTaskMemFree, NULL }, { "CoTaskMemAlloc", ole_CoTaskMemAlloc, NULL },
     { "CoInitialize", ole_CoInitialize, NULL }, { "CoInitializeEx", ole_CoInitialize, NULL }, { "CoUninitialize", ole_CoUninitialize, NULL },
     { "CoCreateInstance", ole_CoCreateInstance, NULL },
-    { "CommandLineToArgvW", sh_CommandLineToArgvW, NULL }, { "ShellExecuteA", sh_ShellExecute, NULL }, { "ShellExecuteW", sh_ShellExecute, NULL },
+    { "CommandLineToArgvW", sh_CommandLineToArgvW, NULL }, { "ShellExecuteA", sh_ShellExecuteA, NULL }, { "ShellExecuteW", sh_ShellExecuteW, NULL },
+    { "ShellExecuteExA", sh_ShellExecuteExA, NULL }, { "ShellExecuteExW", sh_ShellExecuteExW, NULL },
     { "NtQuerySystemInformation", nt_NtQuerySystemInformation, NULL }, { "NtQueryInformationProcess", nt_NtQueryInformationProcess, NULL },
     { "RtlNtStatusToDosError", nt_RtlNtStatusToDosError, NULL }, { "RtlGetNtVersionNumbers", nt_RtlGetNtVersionNumbers, NULL },
     { "GetFileVersionInfoSizeA", ver_GetFileVersionInfoSize, NULL }, { "GetFileVersionInfoSizeW", ver_GetFileVersionInfoSize, NULL },

@@ -24,6 +24,7 @@ enum {
 // MessageBox return values (Win32 IDOK, IDCANCEL, ...)
 typedef void (*SoulOutputFn)(void *ctx, int stream, const char *data, size_t len);
 typedef int (*SoulMessageBoxFn)(void *ctx, const char *title, const char *text, unsigned type);
+typedef void (*SoulOpenURLFn)(void *ctx, const char *url); // ShellExecute of a web/mail link
 
 typedef struct SoulLaunchOptions {
     const char *exe_path;     // host path of the .exe
@@ -36,6 +37,7 @@ typedef struct SoulLaunchOptions {
     SoulOutputFn output;
     SoulMessageBoxFn message_box;
     int gui_enabled;          // 1 = a UI shows windows and answers popup menus (soul_gui_*)
+    SoulOpenURLFn open_url;   // optional: open links the program hands to ShellExecute
 } SoulLaunchOptions;
 
 typedef struct SoulStats {

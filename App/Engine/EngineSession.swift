@@ -39,6 +39,11 @@ private let soulMessageBoxCallback: SoulMessageBoxFn = { ctx, title, text, type 
                                       type: type)
 }
 
+private let soulOpenURLCallback: SoulOpenURLFn = { _, url in
+    guard let url, let link = URL(string: String(cString: url)) else { return }
+    DispatchQueue.main.async { UIApplication.shared.open(link) }
+}
+
 /// Runs one Windows program on a dedicated thread and exposes its console to SwiftUI.
 final class EngineSession: ObservableObject, Identifiable {
     enum Phase: Equatable {
@@ -114,6 +119,7 @@ final class EngineSession: ObservableObject, Identifiable {
         opts.output = soulOutputCallback
         opts.message_box = soulMessageBoxCallback
         opts.gui_enabled = 1
+        opts.open_url = soulOpenURLCallback
 
         var err = [CChar](repeating: 0, count: 1024)
         var proc: OpaquePointer?
