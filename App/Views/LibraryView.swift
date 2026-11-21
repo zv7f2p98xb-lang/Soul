@@ -187,7 +187,7 @@ struct EmptyLibraryCard: View {
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "shippingbox.and.arrow.backward.fill").font(.system(size: 44)).foregroundStyle(.tint)
-            Text("Windows programlarını buraya ekleyin").font(.title3.weight(.semibold))
+            Text("Bilgisayar programlarını buraya ekleyin").font(.title3.weight(.semibold))
             Text("Bir .exe dosyasını veya program klasörünü seçin ya da Dosyalar uygulamasından sürükleyip bırakın. Programlar C:\\Program Files altına kurulur.")
                 .multilineTextAlignment(.center).foregroundStyle(.secondary)
             Button(action: action) { Label("Program Ekle", systemImage: "plus") }.buttonStyle(.borderedProminent)

@@ -169,7 +169,7 @@ final class ProgramLibrary: ObservableObject {
             String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
         }
         if p.summary.isEmpty {
-            p.summary = p.compatibilityNote ?? (info.valid != 0 ? "64-bit Windows konsol programı" : "Windows programı")
+            p.summary = p.compatibilityNote ?? (info.valid == 0 ? "Bilgisayar programı" : info.is_gui != 0 ? "Pencereli bilgisayar programı (x64)" : "Konsol programı (x64)")
         }
         extractIcon(for: p)
         return p

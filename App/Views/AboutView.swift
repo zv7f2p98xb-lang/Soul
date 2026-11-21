@@ -5,7 +5,7 @@ struct AboutView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 Text("Soul nasıl çalışır?").font(.largeTitle.weight(.bold))
-                Text("Soul, Windows için derlenmiş 64-bit (x64) programları iPad'in Apple Silicon (ARM64) işlemcisinde çalıştırır. Bunun için üç katman birlikte çalışır:")
+                Text("Soul, bilgisayarlar (PC) için yazılmış 64-bit (x64) programları — pencereli uygulamaları, oyunları ve konsol araçlarını — iPad'in Apple Silicon (ARM64) işlemcisinde çalıştırır. Bunun için dört katman birlikte çalışır:")
                     .foregroundStyle(.secondary)
 
                 LayerCard(icon: "doc.zipper", color: .blue, title: "1 · PE yükleyici",

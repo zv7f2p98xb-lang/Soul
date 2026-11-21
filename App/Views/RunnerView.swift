@@ -154,6 +154,8 @@ struct StatsBar: View {
             Label("Çalışıyor", systemImage: "circle.fill").foregroundStyle(.green)
         case .finished(let code):
             Label("Bitti (\(code))", systemImage: "checkmark.circle.fill").foregroundStyle(code == 0 ? .blue : .orange)
+        case .stopped:
+            Label("Durduruldu", systemImage: "stop.circle.fill").foregroundStyle(.secondary)
         case .failed:
             Label("Hata", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
         }

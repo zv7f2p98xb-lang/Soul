@@ -45,6 +45,7 @@ final class EngineSession: ObservableObject, Identifiable {
         case starting
         case running
         case finished(code: Int32)
+        case stopped
         case failed(message: String)
     }
 
@@ -72,6 +73,7 @@ final class EngineSession: ObservableObject, Identifiable {
     private var statsTimer: Timer?
     private var boxSemaphore: DispatchSemaphore?
     private var boxResult: Int32 = 1
+    private var userStopped = false
 
     init(program: WinProgram) {
         self.program = program
@@ -158,7 +160,10 @@ final class EngineSession: ObservableObject, Identifiable {
         statsTimer?.invalidate()
         statsTimer = nil
         stats = final
-        if !error.isEmpty {
+        if userStopped {
+            phase = .stopped
+            appendLocal("\n■ Program durduruldu.\n", kind: 3)
+        } else if !error.isEmpty {
             phase = .failed(message: error)
         } else {
             phase = .finished(code: code)
@@ -177,6 +182,7 @@ final class EngineSession: ObservableObject, Identifiable {
     }
 
     func stop() {
+        userStopped = true
         lock.lock()
         if let p = process { soul_process_terminate(p) }
         lock.unlock()
