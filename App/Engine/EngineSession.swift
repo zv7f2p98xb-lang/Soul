@@ -136,7 +136,8 @@ final class EngineSession: ObservableObject, Identifiable {
         let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.size ?? CGSize(width: 1180, height: 820)
         soul_gui_set_screen(proc, Int32(max(1024, screen.width - 24)), Int32(max(700, screen.height - 150)))
         gui.start()
-        let mode = useJIT ? "JIT (x86-64 → ARM64)" : "yorumlayıcı"
+        let arch = program.is64Bit ? "x86-64" : "x86, 32-bit"
+        let mode = useJIT ? "JIT (\(arch) → ARM64)" : "yorumlayıcı (\(arch))"
         appendLocal("▶︎ \(program.windowsPath) — \(mode)\n", kind: 3)
 
         let thread = Thread { [self] in
