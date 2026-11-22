@@ -1563,6 +1563,7 @@ static void process_input(X86State *st, GuiInput *ev) {
         Win *t = win_get(g->capture);
         if (!t || win_top(t) != top) t = hit_child(top, ev->x, ev->y);
         if (!t) return;
+        if (getenv("SOUL_DEBUG_INPUT") && ev->type != 3) soul_log("[input] %d @%d,%d -> %llx cls=%s id=%d en=%d cap=%llx\n", ev->type, ev->x, ev->y, (unsigned long long)t->hwnd, t->cls ? t->cls->name : "?", (int)t->id, win_enabled_chain(t), (unsigned long long)g->capture);
         if (!win_enabled_chain(t)) {
             if (ev->type == 1 && top->hwnd != g->active) set_active(st, top->hwnd);
             return;

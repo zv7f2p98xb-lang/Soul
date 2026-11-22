@@ -329,6 +329,8 @@ PEModule *pe_load(SoulProcess *p, const char *host_path, const char *win_path, c
     return m;
 }
 
+const char *env_get_value(const char *name);
+
 static int find_case_insensitive(const char *dir, const char *name, char *out, size_t outlen) {
     char path[1200];
     snprintf(path, sizeof path, "%s/%s", dir, name);
@@ -346,28 +348,63 @@ static int find_case_insensitive(const char *dir, const char *name, char *out, s
     return found;
 }
 
+// Directory added with SetDllDirectory (Windows path, empty = none).
+char g_dll_dir[600];
+
+static int find_in_win_dir(SoulProcess *p, const char *windir, const char *name, char *found, size_t cap, char *winp, size_t wcap) {
+    char host[1200];
+    if (path_w2h(windir, host, sizeof host) != 0 && host[0] == 0) return 0;
+    if (!find_case_insensitive(host, name, found, cap)) return 0;
+    snprintf(winp, wcap, "%s\\%s", windir, name);
+    (void)p;
+    return 1;
+}
+
+// Finds a DLL like Windows does: a path is used as given; a bare name is searched in the
+// program's folder, the SetDllDirectory folder, system32, the Windows folder, the current
+// folder and PATH.
 PEModule *pe_load_dependency(SoulProcess *p, const char *dll, char *err, size_t errlen) {
-    PEModule *m = pe_find_loaded(p, dll);
-    if (m) return m;
     char name[160];
     snprintf(name, sizeof name, "%s", base_name(dll));
+    for (char *c = name; *c; c++) if (*c == '\\') { memmove(name, c + 1, strlen(c)); c = name - 1; }
     if (!strchr(name, '.')) strncat(name, ".dll", sizeof name - strlen(name) - 1);
+    char found[1200], winp[600];
+    if (strchr(dll, '\\') || strchr(dll, '/') || strchr(dll, ':')) {
+        char norm[600], host[1200];
+        path_normalize_win(dll, norm, sizeof norm);
+        if (!strrchr(base_name(norm), '.')) strncat(norm, ".dll", sizeof norm - strlen(norm) - 1);
+        for (PEModule *m = p->modules; m; m = m->next) if (strcasecmp(m->win_path, norm) == 0) return m;
+        path_w2h(norm, host, sizeof host);
+        struct stat sb;
+        if (stat(host, &sb) != 0 || S_ISDIR(sb.st_mode)) { snprintf(err, errlen, "%s bulunamadı", norm); return NULL; }
+        PEModule *m = pe_find_loaded(p, name);
+        if (m && strcmp(m->host_path, host) == 0) return m;
+        return pe_load(p, host, norm, err, errlen);
+    }
+    PEModule *m = pe_find_loaded(p, name);
+    if (m) return m;
     char dir[1024];
     snprintf(dir, sizeof dir, "%s", p->exe_host);
     char *slash = strrchr(dir, '/');
     if (slash) *slash = 0;
-    char found[1200];
-    char sysdir[1100];
-    snprintf(sysdir, sizeof sysdir, "%s/windows/system32", p->drive_c);
-    if (!find_case_insensitive(dir, name, found, sizeof found) &&
-        !find_case_insensitive(sysdir, name, found, sizeof found)) {
-        snprintf(err, errlen, "%s bulunamadı", name);
-        return NULL;
+    int ok = 0;
+    if (find_case_insensitive(dir, name, found, sizeof found)) {
+        snprintf(winp, sizeof winp, "%s", p->exe_win);
+        char *bs = strrchr(winp, '\\');
+        if (bs) snprintf(bs + 1, sizeof winp - (size_t)(bs + 1 - winp), "%s", name);
+        ok = 1;
     }
-    char winp[600];
-    snprintf(winp, sizeof winp, "%s", p->exe_win);
-    char *bs = strrchr(winp, '\\');
-    if (bs) snprintf(bs + 1, sizeof winp - (size_t)(bs + 1 - winp), "%s", name);
+    if (!ok && g_dll_dir[0]) ok = find_in_win_dir(p, g_dll_dir, name, found, sizeof found, winp, sizeof winp);
+    if (!ok) ok = find_in_win_dir(p, "C:\\windows\\system32", name, found, sizeof found, winp, sizeof winp);
+    if (!ok) ok = find_in_win_dir(p, "C:\\windows", name, found, sizeof found, winp, sizeof winp);
+    if (!ok) ok = find_in_win_dir(p, p->cwd_win, name, found, sizeof found, winp, sizeof winp);
+    if (!ok) {
+        const char *path = env_get_value("PATH");
+        char buf[4096];
+        snprintf(buf, sizeof buf, "%s", path ? path : "");
+        for (char *d = strtok(buf, ";"); d && !ok; d = strtok(NULL, ";")) if (*d) ok = find_in_win_dir(p, d, name, found, sizeof found, winp, sizeof winp);
+    }
+    if (!ok) { snprintf(err, errlen, "%s bulunamadı", name); return NULL; }
     return pe_load(p, found, winp, err, errlen);
 }
 

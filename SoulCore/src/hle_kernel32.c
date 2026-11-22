@@ -569,10 +569,6 @@ HLE(k32_GetTempFileNameW) { temp_file_name(st, 1); }
 HLE(k32_GetDriveTypeA) { RET(3); }
 HLE(k32_GetLogicalDrives) { RET(1u << 2); }
 HLE(k32_GetLogicalDriveStringsA) { RET(put_str(ARG(1), (uint32_t)ARG(0), "C:\\", 0) + 1); }
-HLE(k32_GetDiskFreeSpaceExA) {
-    for (int i = 1; i <= 3; i++) if (ARG(i)) mem_wr(ARG(i), 8, 64ull << 30);
-    RET(1);
-}
 HLE(k32_GetVolumeInformationW) {
     if (ARG(1)) put_str(ARG(1), (uint32_t)ARG(2), "SOUL", 1);
     if (ARG(3)) mem_wr(ARG(3), 4, 0x50554C53);
@@ -629,11 +625,11 @@ static uint64_t load_library(X86State *st, const char *name) {
     if (!name || !*name) { set_last_error(st, ERROR_INVALID_PARAMETER); return 0; }
     const char *base = name;
     for (const char *q = name; *q; q++) if (*q == '\\' || *q == '/') base = q + 1;
-    PEModule *m = pe_find_loaded(g_proc, base);
+    PEModule *m = base == name ? pe_find_loaded(g_proc, base) : NULL;
     if (m) return m->base;
     if (hle_is_system_dll(base)) return fake_module(base);
     char err[256];
-    m = pe_load_dependency(g_proc, base, err, sizeof err);
+    m = pe_load_dependency(g_proc, name, err, sizeof err);
     if (!m) {
         if (g_proc->verbose) soul_log("[yükleyici] LoadLibrary(%s) başarısız: %s\n", name, err);
         set_last_error(st, ERROR_MOD_NOT_FOUND);
@@ -647,12 +643,18 @@ HLE(k32_LoadLibraryW) { char *s = w2u_dup(WSTR(0)); RET(load_library(st, s)); fr
 HLE(k32_LoadLibraryExA) { RET(load_library(st, CSTR(0))); }
 HLE(k32_LoadLibraryExW) { char *s = w2u_dup(WSTR(0)); RET(load_library(st, s)); free(s); }
 HLE_STUB_RET(k32_FreeLibrary, 1)
+extern char g_dll_dir[600];
+HLE(k32_SetDllDirectoryA) { if (ARG(0)) snprintf(g_dll_dir, sizeof g_dll_dir, "%s", CSTR(0)); else g_dll_dir[0] = 0; RET(1); }
+HLE(k32_SetDllDirectoryW) { if (ARG(0)) { char *s = w2u_dup(WSTR(0)); snprintf(g_dll_dir, sizeof g_dll_dir, "%s", s); free(s); } else g_dll_dir[0] = 0; RET(1); }
+HLE(k32_AddDllDirectory) { if (ARG(0)) { char *s = w2u_dup(WSTR(0)); snprintf(g_dll_dir, sizeof g_dll_dir, "%s", s); free(s); } RET(0x5000); }
+HLE_STUB_RET(k32_SetDefaultDllDirectories, 1)
+HLE_STUB_RET(k32_RemoveDllDirectory, 1)
 
 static uint64_t get_module_handle(X86State *st, const char *name) {
     if (!name) return g_proc->main_module->base;
     const char *base = name;
     for (const char *q = name; *q; q++) if (*q == '\\' || *q == '/') base = q + 1;
-    PEModule *m = pe_find_loaded(g_proc, base);
+    PEModule *m = base == name ? pe_find_loaded(g_proc, base) : NULL;
     if (m) return m->base;
     if (hle_is_system_dll(base)) return fake_module(base);
     set_last_error(st, ERROR_MOD_NOT_FOUND);
@@ -715,10 +717,14 @@ HLE(k32_GetProcAddress) {
     if (m) r = pe_find_export(m, name, ordinal);
     else {
         const char *dll = fake_module_name(h);
+        if (dll && !name) name = hle_ordinal_name(dll, ordinal); // system DLL export known only by number
         if (dll && name) r = hle_get_proc(g_proc, dll, name);
     }
     if (!r) {
-        if (g_proc->verbose && name) soul_log("[api] GetProcAddress: %s bulunamadı\n", name);
+        if (g_proc->verbose) {
+            if (name) soul_log("[api] GetProcAddress: %s bulunamadı\n", name);
+            else soul_log("[api] GetProcAddress: #%d bulunamadı\n", ordinal);
+        }
         set_last_error(st, ERROR_PROC_NOT_FOUND);
     }
     RET(r);
@@ -1910,10 +1916,11 @@ const HleEntry hle_kernel32_table[] = {
     { "GetTempPathA", k32_GetTempPathA, NULL }, { "GetTempPathW", k32_GetTempPathW, NULL }, { "GetTempPath2W", k32_GetTempPathW, NULL },
     { "GetTempFileNameA", k32_GetTempFileNameA, NULL }, { "GetTempFileNameW", k32_GetTempFileNameW, NULL }, { "GetDriveTypeA", k32_GetDriveTypeA, NULL },
     { "GetDriveTypeW", k32_GetDriveTypeA, NULL }, { "GetLogicalDrives", k32_GetLogicalDrives, NULL }, { "GetLogicalDriveStringsA", k32_GetLogicalDriveStringsA, NULL },
-    { "GetDiskFreeSpaceExA", k32_GetDiskFreeSpaceExA, NULL }, { "GetDiskFreeSpaceExW", k32_GetDiskFreeSpaceExA, NULL },
+   
     { "GetVolumeInformationW", k32_GetVolumeInformationW, NULL },
     { "LoadLibraryA", k32_LoadLibraryA, NULL }, { "LoadLibraryW", k32_LoadLibraryW, NULL }, { "LoadLibraryExA", k32_LoadLibraryExA, NULL },
-    { "LoadLibraryExW", k32_LoadLibraryExW, NULL }, { "FreeLibrary", k32_FreeLibrary, NULL }, { "GetModuleHandleA", k32_GetModuleHandleA, NULL },
+    { "LoadLibraryExW", k32_LoadLibraryExW, NULL }, { "FreeLibrary", k32_FreeLibrary, NULL }, { "SetDllDirectoryA", k32_SetDllDirectoryA, NULL }, { "SetDllDirectoryW", k32_SetDllDirectoryW, NULL },
+    { "AddDllDirectory", k32_AddDllDirectory, NULL }, { "SetDefaultDllDirectories", k32_SetDefaultDllDirectories, NULL }, { "RemoveDllDirectory", k32_RemoveDllDirectory, NULL }, { "GetModuleHandleA", k32_GetModuleHandleA, NULL },
     { "GetModuleHandleW", k32_GetModuleHandleW, NULL }, { "GetModuleHandleExA", k32_GetModuleHandleExA, NULL }, { "GetModuleHandleExW", k32_GetModuleHandleExW, NULL },
     { "GetModuleFileNameA", k32_GetModuleFileNameA, NULL }, { "GetModuleFileNameW", k32_GetModuleFileNameW, NULL }, { "GetProcAddress", k32_GetProcAddress, NULL },
     { "DisableThreadLibraryCalls", k32_DisableThreadLibraryCalls, NULL },

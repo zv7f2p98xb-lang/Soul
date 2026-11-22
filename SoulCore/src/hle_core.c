@@ -23,7 +23,11 @@ static const char *const k_system_dlls[] = {
     "comctl32", "comdlg32", "version", "imm32", "uxtheme", "dwmapi", "setupapi", "bcrypt", "bcryptprimitives",
     "crypt32", "psapi", "dbghelp", "winhttp", "wininet", "iphlpapi", "secur32", "userenv", "rpcrt4",
     "d3d9", "d3d11", "d3d12", "dxgi", "opengl32", "glu32", "xinput1_3", "xinput1_4", "xinput9_1_0", "dsound",
-    "dinput8", "hid", "powrprof", "mpr", "netapi32", "wtsapi32", "normaliz", "sechost", "cfgmgr32", NULL
+    "dinput8", "hid", "powrprof", "mpr", "netapi32", "wtsapi32", "normaliz", "sechost", "cfgmgr32",
+    "shfolder", "apphelp", "propsys", "cryptbase", "oleacc", "clbcatq", "ntmarta", "riched20", "riched32", "msftedit",
+    "msimg32", "winspool", "urlmon", "wintrust", "imagehlp", "shcore", "oledlg", "olepro32", "msacm32", "msvfw32",
+    "avifil32", "credui", "dnsapi", "ncrypt", "sspicli", "profapi", "kernel.appcore", "msasn1", "mswsock", "wldap32",
+    "dwrite", "d2d1", "windowscodecs", "gdiplus", "ddraw", "dinput", "cabinet", "msi", "mscoree", "uiautomationcore", NULL
 };
 
 static void dll_key(const char *dll, char *out, size_t n) {
@@ -44,8 +48,8 @@ int hle_is_system_dll(const char *dll) {
 }
 
 static const HleEntry *find_entry(const char *name) {
-    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table, hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table };
-    for (int t = 0; t < 9; t++)
+    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table, hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table, hle_shell_table };
+    for (int t = 0; t < 10; t++)
         for (const HleEntry *e = tables[t]; e->name; e++)
             if (strcmp(e->name, name) == 0) return e;
     return NULL;
@@ -117,6 +121,7 @@ uint64_t hle_resolve_import(SoulProcess *p, const char *dll, const char *name, i
             if (a) return a;
         }
     }
+    if (!name) name = hle_ordinal_name(dll, ordinal); // system DLL functions imported by number
     if (name) {
         uint64_t a = hle_get_proc(p, dll, name);
         if (a) return a;

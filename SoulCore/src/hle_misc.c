@@ -23,7 +23,7 @@ HLE_STUB_RET(crt_ismbblead, 0)
 
 // ---- user32 ------------------------------------------------------------------------------
 
-static int message_box(const char *title, const char *text, unsigned type) {
+int soul_message_box(const char *title, const char *text, unsigned type) {
     SoulProcess *p = g_proc;
     con_flush();
     if (p->opts.message_box) {
@@ -38,11 +38,11 @@ static int message_box(const char *title, const char *text, unsigned type) {
     con_write(1, buf, (size_t)n);
     return 1;
 }
-HLE(u32_MessageBoxA) { RET(message_box(ARG(2) ? CSTR(2) : "Error", ARG(1) ? CSTR(1) : "", (unsigned)ARG(3))); }
+HLE(u32_MessageBoxA) { RET(soul_message_box(ARG(2) ? CSTR(2) : "Error", ARG(1) ? CSTR(1) : "", (unsigned)ARG(3))); }
 HLE(u32_MessageBoxW) {
     char *t = ARG(2) ? w2u_dup(WSTR(2)) : strdup("Error");
     char *m = ARG(1) ? w2u_dup(WSTR(1)) : strdup("");
-    RET(message_box(t, m, (unsigned)ARG(3)));
+    RET(soul_message_box(t, m, (unsigned)ARG(3)));
     free(t); free(m);
 }
 HLE(u32_wsprintfA) {
@@ -126,24 +126,49 @@ HLE(bcr_ProcessPrng) { random_bytes(PTR(0), ARG(1)); RET(1); }
 
 // ---- shell32 --------------------------------------------------------------------------------
 
-static const char *csidl_path(int csidl) {
+const char *soul_csidl_path(int csidl) {
+#define SM "C:\\users\\soul\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu"
+#define CSM "C:\\ProgramData\\Microsoft\\Windows\\Start Menu"
     switch (csidl & 0xFF) {
     case 0x00: case 0x10: return "C:\\users\\soul\\Desktop";
+    case 0x02: return SM "\\Programs";
     case 0x05: return "C:\\users\\soul\\Documents";
+    case 0x06: return "C:\\users\\soul\\Favorites";
+    case 0x07: return SM "\\Programs\\Startup";
+    case 0x08: return "C:\\users\\soul\\AppData\\Roaming\\Microsoft\\Windows\\Recent";
+    case 0x09: return "C:\\users\\soul\\AppData\\Roaming\\Microsoft\\Windows\\SendTo";
+    case 0x0B: return SM;
+    case 0x0D: return "C:\\users\\soul\\Music";
+    case 0x0E: return "C:\\users\\soul\\Videos";
+    case 0x14: return "C:\\windows\\Fonts";
+    case 0x15: return "C:\\users\\soul\\AppData\\Roaming\\Microsoft\\Windows\\Templates";
+    case 0x16: return CSM;
+    case 0x17: return CSM "\\Programs";
+    case 0x18: return CSM "\\Programs\\Startup";
+    case 0x19: return "C:\\users\\Public\\Desktop";
     case 0x1A: return "C:\\users\\soul\\AppData\\Roaming";
     case 0x1C: return "C:\\users\\soul\\AppData\\Local";
+    case 0x20: return "C:\\users\\soul\\AppData\\Local\\Microsoft\\Windows\\INetCache";
     case 0x23: return "C:\\ProgramData";
     case 0x24: return "C:\\windows";
     case 0x25: case 0x29: return "C:\\windows\\system32";
-    case 0x26: case 0x2A: return "C:\\Program Files";
+    case 0x26: return g_mode32 ? "C:\\Program Files (x86)" : "C:\\Program Files";
+    case 0x2A: return "C:\\Program Files (x86)";
+    case 0x2B: return g_mode32 ? "C:\\Program Files (x86)\\Common Files" : "C:\\Program Files\\Common Files";
+    case 0x2C: return "C:\\Program Files (x86)\\Common Files";
+    case 0x2D: return "C:\\ProgramData\\Microsoft\\Windows\\Templates";
+    case 0x2E: return "C:\\users\\Public\\Documents";
+    case 0x27: return "C:\\users\\soul\\Pictures";
     case 0x28: return "C:\\users\\soul";
     default: return "C:\\users\\soul";
     }
+#undef SM
+#undef CSM
 }
-HLE(sh_SHGetFolderPathA) { snprintf(PTR(4), 260, "%s", csidl_path((int)ARG(1))); RET(0); }
-HLE(sh_SHGetFolderPathW) { u2w(csidl_path((int)ARG(1)), -1, PTR(4), 260); RET(0); }
-HLE(sh_SHGetSpecialFolderPathA) { snprintf(PTR(1), 260, "%s", csidl_path((int)ARG(2))); RET(1); }
-HLE(sh_SHGetSpecialFolderPathW) { u2w(csidl_path((int)ARG(2)), -1, PTR(1), 260); RET(1); }
+HLE(sh_SHGetFolderPathA) { snprintf(PTR(4), 260, "%s", soul_csidl_path((int)ARG(1))); RET(0); }
+HLE(sh_SHGetFolderPathW) { u2w(soul_csidl_path((int)ARG(1)), -1, PTR(4), 260); RET(0); }
+HLE(sh_SHGetSpecialFolderPathA) { snprintf(PTR(1), 260, "%s", soul_csidl_path((int)ARG(2))); RET(1); }
+HLE(sh_SHGetSpecialFolderPathW) { u2w(soul_csidl_path((int)ARG(2)), -1, PTR(1), 260); RET(1); }
 HLE(sh_SHGetKnownFolderPath) {
     // FOLDERID_RoamingAppData {3EB685DB-...}, LocalAppData {F1B32785-...}, Documents {FDD39AD0-...}
     uint32_t d1 = (uint32_t)mem_rd(ARG(0), 4);

@@ -152,6 +152,42 @@ static void iml_generic_icon(ImgList *l, int idx) {
             d[(size_t)y * (size_t)cx + (size_t)x] = !in ? 0 : edge ? 0xFF5A7FAAu : (y < cy / 3 ? 0xFF6FA8DCu : 0xFFF4F7FBu);
         }
 }
+// The "system image list" (SHGetFileInfo with SHGFI_SYSICONINDEX): 0 document, 1 folder, 2 program.
+static uint64_t g_sys_iml[2];
+static void iml_folder_icon(ImgList *l, int idx) {
+    uint32_t *d = iml_slot(l, idx);
+    int cx = l->cx, cy = l->cy;
+    for (int y = 0; y < cy; y++)
+        for (int x = 0; x < cx; x++) {
+            int tab = y >= cy / 6 && y < cy / 3 && x >= cx / 12 && x < cx / 2;
+            int body = y >= cy / 3 - 1 && y < cy - cy / 8 && x >= cx / 12 && x < cx - cx / 12;
+            int edge = body && (y == cy / 3 - 1 || y == cy - cy / 8 - 1 || x == cx / 12 || x == cx - cx / 12 - 1);
+            d[(size_t)y * (size_t)cx + (size_t)x] = edge ? 0xFFC9952Cu : body ? 0xFFF6CD5Bu : tab ? 0xFFE8B443u : 0;
+        }
+}
+static void iml_program_icon(ImgList *l, int idx) {
+    uint32_t *d = iml_slot(l, idx);
+    int cx = l->cx, cy = l->cy;
+    for (int y = 0; y < cy; y++)
+        for (int x = 0; x < cx; x++) {
+            int in = x >= cx / 10 && x < cx - cx / 10 && y >= cy / 6 && y < cy - cy / 6;
+            int bar = in && y < cy / 6 + cy / 6;
+            int edge = in && (x == cx / 10 || x == cx - cx / 10 - 1 || y == cy / 6 || y == cy - cy / 6 - 1);
+            d[(size_t)y * (size_t)cx + (size_t)x] = !in ? 0 : edge ? 0xFF2F5D8Au : bar ? 0xFF3C7FC4u : 0xFFF4F7FBu;
+        }
+}
+uint64_t iml_system(int large) {
+    int k = large ? 1 : 0;
+    if (iml_get(g_sys_iml[k])) return g_sys_iml[k];
+    int sz = large ? 32 : 16;
+    g_sys_iml[k] = iml_create(sz, sz, 0x21);
+    ImgList *l = iml_get(g_sys_iml[k]);
+    if (!l) return 0;
+    iml_generic_icon(l, iml_append(l));
+    iml_folder_icon(l, iml_append(l));
+    iml_program_icon(l, iml_append(l));
+    return g_sys_iml[k];
+}
 void iml_draw(uint64_t himl, int index, uint64_t hdc, int x, int y) {
     ImgList *l = iml_get(himl);
     if (!l || index < 0 || index >= l->count) return;
@@ -2341,6 +2377,7 @@ void comctl_reset(void) {
     for (int i = 0; i < IML_MAX; i++) free(g_iml[i].px);
     memset(g_iml, 0, sizeof g_iml);
     memset(g_sub, 0, sizeof g_sub);
+    g_sys_iml[0] = g_sys_iml[1] = 0;
 }
 
 #define C(n, f) { n, f, NULL }
