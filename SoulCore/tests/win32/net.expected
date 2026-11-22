@@ -1,0 +1,21 @@
+WSAStartup=0 version=202
+bind=0 listen=0
+port assigned=1 family=2 len=16
+connect=0
+echo: MERHABA DüNYA
+recv after close=0
+nb connect=-1 err=10035
+select writable=1 isset=1
+nb recv=-1 err=10035
+select readable=1
+nb echo: ABC
+select timeout=0
+udp: udp! from=127.0.0.1
+event wait=0 read=1 data=OLAY
+async: event=1 error=0
+async read: mesaj
+gethostbyname: 127.0.0.1 len=4
+getaddrinfo=0 127.0.0.1:8080 family=2 socktype=1
+inet_pton6=1 ntop6=2001:db8::1
+bad host=1 err=1
+done

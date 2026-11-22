@@ -1,0 +1,10 @@
+wininet: send=1 status=200 length=12 x-soul=42 body=Merhaba HTTP
+wininet post: 1 ad=soul&deger=1
+openurl redirect: status=200 body=Merhaba HTTP
+chunked: parca parca gelen govde
+missing page: status=404
+crack: host=ornek.com port=8443 path=/a/b.txt scheme=4
+winhttp: ok=1 status=200 x-soul=42 avail=12 body=Merhaba HTTP
+URLDownloadToFile=00000000 file=Merhaba HTTP
+connected=1
+done

@@ -26,6 +26,26 @@ typedef void (*SoulOutputFn)(void *ctx, int stream, const char *data, size_t len
 typedef int (*SoulMessageBoxFn)(void *ctx, const char *title, const char *text, unsigned type);
 typedef void (*SoulOpenURLFn)(void *ctx, const char *url); // ShellExecute of a web/mail link
 
+// HTTP(S) requests a program makes (WinINet, WinHTTP, URLDownloadToFile). The host performs the
+// request (the iPad app uses URLSession; it follows redirects) and writes the response body to
+// body_path. Called on a guest thread; may block.
+typedef struct SoulHttpRequest {
+    const char *method;       // "GET", "POST", "HEAD"...
+    const char *url;          // absolute http:// or https:// URL
+    const char *headers;      // extra request headers, "Name: value\r\n" lines (may be empty)
+    const void *body;         // request body (may be NULL)
+    size_t body_len;
+    const char *body_path;    // host file the response body goes to
+    int timeout_ms;
+} SoulHttpRequest;
+typedef struct SoulHttpResponse {
+    int status;               // HTTP status code, 0 = no response (see error)
+    char headers[16384];      // response headers, "Name: value\r\n" lines
+    char final_url[2048];     // after redirects
+    char error[256];
+} SoulHttpResponse;
+typedef int (*SoulHttpFn)(void *ctx, const SoulHttpRequest *req, SoulHttpResponse *resp); // 0 = done
+
 typedef struct SoulLaunchOptions {
     const char *exe_path;     // host path of the .exe
     const char *drive_c;      // host directory mapped to C:
@@ -38,6 +58,7 @@ typedef struct SoulLaunchOptions {
     SoulMessageBoxFn message_box;
     int gui_enabled;          // 1 = a UI shows windows and answers popup menus (soul_gui_*)
     SoulOpenURLFn open_url;   // optional: open links the program hands to ShellExecute
+    SoulHttpFn http;          // optional: perform HTTP(S) requests (without it only plain http:// works)
 } SoulLaunchOptions;
 
 typedef struct SoulStats {

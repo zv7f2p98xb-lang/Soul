@@ -31,7 +31,7 @@ static const char *const k_system_dlls[] = {
     "msimg32", "winspool", "urlmon", "wintrust", "imagehlp", "shcore", "oledlg", "olepro32", "msacm32", "msvfw32",
     "avifil32", "credui", "dnsapi", "ncrypt", "sspicli", "profapi", "kernel.appcore", "msasn1", "mswsock", "wldap32",
     "dwrite", "d2d1", "windowscodecs", "gdiplus", "ddraw", "dinput", "cabinet", "msi", "mscoree", "uiautomationcore",
-    "rstrtmgr", "msctf", "sxs", "wer", "faultrep", "dbgcore", NULL
+    "rstrtmgr", "msctf", "sxs", "wer", "faultrep", "dbgcore", "netapi32", "urlmon", "winhttp", "wininet", NULL
 };
 
 static void dll_key(const char *dll, char *out, size_t n) {
@@ -55,8 +55,8 @@ static const HleEntry *find_entry(const char *name) {
     // processes and COM first: they replace older stand-ins in the other tables
     const HleEntry *tables[] = { hle_process_table, hle_com_table, hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table,
                                  hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table, hle_shell_table,
-                                 hle_oleaut_table, hle_shlwapi_table };
-    for (int t = 0; t < 14; t++)
+                                 hle_oleaut_table, hle_shlwapi_table, hle_winsock_table, hle_inet_table };
+    for (int t = 0; t < 16; t++)
         for (const HleEntry *e = tables[t]; e->name; e++)
             if (strcmp(e->name, name) == 0) return e;
     return NULL;

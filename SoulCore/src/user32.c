@@ -615,6 +615,7 @@ uint64_t win_create(X86State *st, uint32_t exstyle, uint64_t cls_arg, uint64_t n
         set_last_error(st, 1407);
         return 0;
     }
+    if (g_mode32 && parent >= 0xFFFFFFF0u && parent <= 0xFFFFFFFFu) parent = (uint64_t)(int64_t)(int32_t)parent; // HWND_MESSAGE in a 32-bit program
     int message_only = parent == HWND_MESSAGE;
     if (message_only) parent = 0;
     Win *pw = parent ? win_get(parent) : NULL;
@@ -897,6 +898,7 @@ HLE(u_SetWindowPos) {
     if (!w) { RET(0); return; }
     uint32_t flags = (uint32_t)hle_arg(st, 6);
     uint64_t after = ARG(1);
+    if (g_mode32 && after >= 0xFFFFFFF0u && after <= 0xFFFFFFFFu) after = (uint64_t)(int64_t)(int32_t)after; // HWND_TOPMOST / NOTOPMOST
     int x = flags & 2 ? w->x : ARGI(2), y = flags & 2 ? w->y : ARGI(3);
     int cw = flags & 1 ? w->w : (int)(int32_t)hle_arg(st, 4), ch = flags & 1 ? w->h : (int)(int32_t)hle_arg(st, 5);
     if (!(flags & 4) && !w->parent && (after == 0 || after == (uint64_t)-1)) { w->zstamp = ++g_gui.zstamp; bump(); }

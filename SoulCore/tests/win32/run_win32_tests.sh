@@ -23,6 +23,10 @@ i686-w64-mingw32-g++ -O2 -static -o "$OUT/exceptions32.exe" exceptions.cpp || ex
 # several processes (each build starts the other one too)
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/multiproc.exe" multiproc.c -lole32 -luuid || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/multiproc32.exe" multiproc.c -lole32 -luuid || exit 1
+x86_64-w64-mingw32-gcc -O2 -o "$OUT/net.exe" net.c -lws2_32 || exit 1
+i686-w64-mingw32-gcc -O2 -o "$OUT/net32.exe" net.c -lws2_32 || exit 1
+x86_64-w64-mingw32-gcc -O2 -o "$OUT/http.exe" http.c http_winhttp.c -lws2_32 -lwininet -lwinhttp -lurlmon || exit 1
+i686-w64-mingw32-gcc -O2 -o "$OUT/http32.exe" http.c http_winhttp.c -lws2_32 -lwininet -lwinhttp -lurlmon || exit 1
 pass=0; fail=0
 check() {
   local name=$1; shift
@@ -46,5 +50,9 @@ check x87ops x87ops32.exe
 check exceptions exceptions32.exe
 check multiproc --drive . multiproc.exe
 check multiproc32 --drive . multiproc32.exe
+check net net.exe
+check net net32.exe
+check http --drive . http.exe
+check http --drive . http32.exe
 echo "passed=$pass failed=$fail"
 [ $fail -eq 0 ]

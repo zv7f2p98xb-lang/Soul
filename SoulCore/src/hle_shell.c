@@ -1217,6 +1217,25 @@ static const OrdName k_ordinals[] = {
     { "oleaut32", 10, "VariantCopy" }, { "oleaut32", 12, "VariantChangeType" }, { "oleaut32", 149, "SysStringByteLen" },
     { "oleaut32", 150, "SysAllocStringByteLen" }, { "oleaut32", 3, "SysReAllocString" }, { "oleaut32", 5, "SysReAllocStringLen" },
     { "shlwapi", 437, "IsOS" },
+    // Winsock (ws2_32 and wsock32 share these numbers)
+    { "ws2_32", 1, "accept" }, { "ws2_32", 2, "bind" }, { "ws2_32", 3, "closesocket" }, { "ws2_32", 4, "connect" },
+    { "ws2_32", 5, "getpeername" }, { "ws2_32", 6, "getsockname" }, { "ws2_32", 7, "getsockopt" }, { "ws2_32", 8, "htonl" },
+    { "ws2_32", 9, "htons" }, { "ws2_32", 10, "ioctlsocket" }, { "ws2_32", 11, "inet_addr" }, { "ws2_32", 12, "inet_ntoa" },
+    { "ws2_32", 13, "listen" }, { "ws2_32", 14, "ntohl" }, { "ws2_32", 15, "ntohs" }, { "ws2_32", 16, "recv" },
+    { "ws2_32", 17, "recvfrom" }, { "ws2_32", 18, "select" }, { "ws2_32", 19, "send" }, { "ws2_32", 20, "sendto" },
+    { "ws2_32", 21, "setsockopt" }, { "ws2_32", 22, "shutdown" }, { "ws2_32", 23, "socket" }, { "ws2_32", 51, "gethostbyaddr" },
+    { "ws2_32", 52, "gethostbyname" }, { "ws2_32", 55, "getservbyname" }, { "ws2_32", 57, "gethostname" },
+    { "ws2_32", 101, "WSAAsyncSelect" }, { "ws2_32", 111, "WSAGetLastError" }, { "ws2_32", 112, "WSASetLastError" },
+    { "ws2_32", 115, "WSAStartup" }, { "ws2_32", 116, "WSACleanup" }, { "ws2_32", 151, "__WSAFDIsSet" },
+    { "wsock32", 1, "accept" }, { "wsock32", 2, "bind" }, { "wsock32", 3, "closesocket" }, { "wsock32", 4, "connect" },
+    { "wsock32", 5, "getpeername" }, { "wsock32", 6, "getsockname" }, { "wsock32", 7, "getsockopt" }, { "wsock32", 8, "htonl" },
+    { "wsock32", 9, "htons" }, { "wsock32", 10, "ioctlsocket" }, { "wsock32", 11, "inet_addr" }, { "wsock32", 12, "inet_ntoa" },
+    { "wsock32", 13, "listen" }, { "wsock32", 14, "ntohl" }, { "wsock32", 15, "ntohs" }, { "wsock32", 16, "recv" },
+    { "wsock32", 17, "recvfrom" }, { "wsock32", 18, "select" }, { "wsock32", 19, "send" }, { "wsock32", 20, "sendto" },
+    { "wsock32", 21, "setsockopt" }, { "wsock32", 22, "shutdown" }, { "wsock32", 23, "socket" }, { "wsock32", 51, "gethostbyaddr" },
+    { "wsock32", 52, "gethostbyname" }, { "wsock32", 55, "getservbyname" }, { "wsock32", 57, "gethostname" },
+    { "wsock32", 101, "WSAAsyncSelect" }, { "wsock32", 111, "WSAGetLastError" }, { "wsock32", 112, "WSASetLastError" },
+    { "wsock32", 115, "WSAStartup" }, { "wsock32", 116, "WSACleanup" }, { "wsock32", 151, "__WSAFDIsSet" },
     { NULL, 0, NULL }
 };
 const char *hle_ordinal_name(const char *dll, int ord) {

@@ -72,7 +72,8 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86)
 | Dosya/klasör API'leri, ortam değişkenleri, zaman; Delphi (VCL) ve MFC programları | |
 | printf/scanf ailesi, C++ STL (statik libstdc++) | |
 | setjmp/longjmp, TLS, programla gelen x64/x86 DLL'ler; 32-bit programlarda C++ istisnaları ve SEH (fs:[0] zinciri, RaiseException, RtlUnwind, sıfıra bölme yakalama — Delphi/MSVC tarzı) | 64-bit programlarda C++ istisnaları (SEH unwind tabloları), AVX |
-| MessageBox, renkli konsol (SetConsoleTextAttribute) | Ağ (Winsock), ses |
+| MessageBox, renkli konsol (SetConsoleTextAttribute) | Ses (waveOut, DirectSound, XAudio2) |
+| Ağ: Winsock (TCP/UDP, select, WSAAsyncSelect/WSAEventSelect, getaddrinfo), WinINet, WinHTTP, URLDownloadToFile (HTTPS iPad'in URLSession'ı ile) | FTP, IPv6'ya özgü API'ler |
 | Kalıcı kayıt defteri (programların ayarları korunur), web bağlantıları Safari'de açılır | |
 | CreateThread, kritik bölge, SRW, koşul değişkeni, olay/mutex/semafor | Gerçek paralel çalışma (iş parçacıkları sırayla çalışır) |
 
@@ -96,7 +97,7 @@ Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 �
 
 OpenGL ön yüzü (`opengl.c`) matris yığınlarını, `glBegin/glEnd` ve köşe dizilerini, köşe başına ışıklandırmayı, sisi, çoklu dokuyu, görüntüleme listelerini, `glPushAttrib`'i ve GLU (perspektif, `gluLookAt`, küre/silindir/disk, mipmap) işlevlerini uygular; `SwapBuffers` kareyi pencereye aktarır ve ekran yenileme hızına (60 FPS) göre bekler. Çizim hattı, ön yüzlerden bağımsız bir arayüz (`sg_triangles/sg_lines/sg_points`) sunar; bu sayede Direct3D ön yüzü ve Metal (GPU) arka ucu aynı yapıya eklenebilir. Madeira'nın kullandığı DXMT ölçeğine (Direct3D 11 + gölgelendirici derleyicisi → Metal) ulaşmak çok aşamalı bir yol: sıradaki adımlar Direct3D 9 sabit işlevli ön yüz, Metal arka ucu ve gölgelendirici (DXBC/GLSL) çevirisi.
 
-Yol haritası: ağ (Winsock, WinINet/WinHTTP), ses (waveOut/XAudio2), GDI+, `.msi` kurulumları, Direct3D 9 → Metal arka ucu → gölgelendirici çevirisi (Direct3D 11), .NET.
+Yol haritası: ses (waveOut/XAudio2), GDI+, `.msi` kurulumları, Direct3D 9 → Metal arka ucu → gölgelendirici çevirisi (Direct3D 11), .NET.
 
 ### Birden çok süreç
 

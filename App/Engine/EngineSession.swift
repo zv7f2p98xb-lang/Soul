@@ -53,6 +53,58 @@ private let soulOpenURLCallback: SoulOpenURLFn = { ctx, url in
     DispatchQueue.main.async { UIApplication.shared.open(link) }
 }
 
+/// HTTP(S) requests of Windows programs (WinINet, WinHTTP, URLDownloadToFile) go through
+/// URLSession; the body is written to the file SoulCore asks for. Runs on a guest thread.
+private let soulHttpCallback: SoulHttpFn = { _, reqPtr, respPtr in
+    guard let reqPtr, let respPtr else { return -1 }
+    let req = reqPtr.pointee
+    let urlText = req.url.map { String(cString: $0) } ?? ""
+    func fill(_ text: String, _ field: UnsafeMutablePointer<CChar>, _ capacity: Int) {
+        let bytes = Array(text.utf8.prefix(capacity - 1))
+        for (i, b) in bytes.enumerated() { field[i] = CChar(bitPattern: b) }
+        field[bytes.count] = 0
+    }
+    func setError(_ text: String) {
+        withUnsafeMutablePointer(to: &respPtr.pointee.error) { $0.withMemoryRebound(to: CChar.self, capacity: 256) { fill(text, $0, 256) } }
+    }
+    guard let url = URL(string: urlText) else { setError("geçersiz adres"); return -1 }
+    var request = URLRequest(url: url)
+    request.httpMethod = req.method.map { String(cString: $0) } ?? "GET"
+    request.timeoutInterval = max(10, Double(req.timeout_ms) / 1000)
+    if let h = req.headers {
+        for line in String(cString: h).components(separatedBy: "\r\n") {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty { request.addValue(value, forHTTPHeaderField: name) }
+        }
+    }
+    if let body = req.body, req.body_len > 0 { request.httpBody = Data(bytes: body, count: req.body_len) }
+    let destination = URL(fileURLWithPath: String(cString: req.body_path))
+    let done = DispatchSemaphore(value: 0)
+    var status = 0, headers = "", finalURL = urlText, failure = ""
+    let task = URLSession.shared.downloadTask(with: request) { file, response, error in
+        if let http = response as? HTTPURLResponse {
+            status = http.statusCode
+            headers = http.allHeaderFields.map { "\($0.key): \($0.value)\r\n" }.joined()
+            finalURL = http.url?.absoluteString ?? urlText
+        }
+        if let file {
+            try? FileManager.default.removeItem(at: destination)
+            try? FileManager.default.moveItem(at: file, to: destination)
+        }
+        if let error { failure = error.localizedDescription }
+        done.signal()
+    }
+    task.resume()
+    done.wait()
+    respPtr.pointee.status = Int32(status)
+    withUnsafeMutablePointer(to: &respPtr.pointee.headers) { $0.withMemoryRebound(to: CChar.self, capacity: 16384) { fill(headers, $0, 16384) } }
+    withUnsafeMutablePointer(to: &respPtr.pointee.final_url) { $0.withMemoryRebound(to: CChar.self, capacity: 2048) { fill(finalURL, $0, 2048) } }
+    setError(failure)
+    return status > 0 ? 0 : -1
+}
+
 /// Runs one Windows program on a dedicated thread and exposes its console to SwiftUI.
 final class EngineSession: ObservableObject, Identifiable {
     enum Phase: Equatable {
@@ -131,6 +183,7 @@ final class EngineSession: ObservableObject, Identifiable {
         opts.message_box = soulMessageBoxCallback
         opts.gui_enabled = 1
         opts.open_url = soulOpenURLCallback
+        opts.http = soulHttpCallback
 
         var err = [CChar](repeating: 0, count: 1024)
         var proc: OpaquePointer?
