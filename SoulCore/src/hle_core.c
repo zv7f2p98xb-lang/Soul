@@ -69,7 +69,8 @@ static const StdcallArgs k_extra_stdcall[] = {
     { "EventSetInformation", 20 }, { "InterlockedIncrement", 4 }, { "InterlockedDecrement", 4 }, { "InterlockedExchange", 8 },
     { "InterlockedExchangeAdd", 8 }, { "InterlockedCompareExchange", 12 }, { "InterlockedCompareExchange64", 20 }, { "GetDpiForMonitor", 16 }, { "GetDpiForShellUIComponent", 4 }, { "GetProcessDpiAwareness", 8 },
     { "GetScaleFactorForMonitor", 8 }, { "GetTempPath2W", 8 }, { "OpenThemeDataForDpi", 12 }, { "ProcessPrng", 8 },
-    { "SetProcessDpiAwareness", 4 }, { "WaitOnAddress", 16 }, { "WakeByAddressAll", 4 }, { "WakeByAddressSingle", 4 }, { "XAudio2Create", 12 },
+    { "SetProcessDpiAwareness", 4 }, { "WaitOnAddress", 16 }, { "WakeByAddressAll", 4 }, { "WakeByAddressSingle", 4 }, { "XAudio2Create", 12 }, { "XAudio2CreateWithVersionInfo", 16 }, { "CreateFX", 16 },
+    { "CreateAudioReverb", 4 }, { "CreateAudioVolumeMeter", 4 },
     { NULL, 0 }
 };
 static uint16_t stdcall_bytes(const char *name) {
