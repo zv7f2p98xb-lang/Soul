@@ -1472,6 +1472,48 @@ void gdi_line_px(uint64_t hdc, int x0, int y0, int x1, int y1, uint32_t colorref
     target_done(&t);
 }
 
+// Draws straight-alpha ARGB pixels at (x, y) of a DC (image lists, toolbar glyphs).
+void gdi_draw_argb(uint64_t hdc, int x, int y, const uint32_t *px, int w, int h) {
+    Dc *dc = dc_get(hdc);
+    Target t;
+    if (!dc || !px || !dc_target(dc, &t)) return;
+    for (int j = 0; j < h; j++) {
+        int ty = y + j + t.oy;
+        if (ty < t.y0 || ty >= t.y1) continue;
+        for (int i = 0; i < w; i++) {
+            int tx = x + i + t.ox;
+            if (tx < t.x0 || tx >= t.x1) continue;
+            uint32_t s = px[(size_t)j * (size_t)w + (size_t)i], a = s >> 24;
+            if (!a) continue;
+            if (a == 255) { surf_put(&t.s, tx, ty, s | 0xFF000000u); continue; }
+            uint32_t d = surf_get(&t.s, tx, ty), o = 0xFF000000u;
+            for (int k = 0; k < 24; k += 8) {
+                uint32_t sc = (s >> k) & 255, dcol = (d >> k) & 255;
+                o |= ((sc * a + dcol * (255 - a) + 127) / 255) << k;
+            }
+            surf_put(&t.s, tx, ty, o);
+        }
+    }
+    target_done(&t);
+}
+// Pixels of a bitmap as ARGB (malloc'ed); 32 bpp DIBs keep their alpha when any pixel uses it.
+int gdi_bitmap_argb(uint64_t hbm, uint32_t **out, int *w, int *h) {
+    GdiObj *o = gdi_get(hbm, GO_BITMAP);
+    if (!o || !o->surf.bits || o->surf.w <= 0 || o->surf.h <= 0) return 0;
+    const Surface *s = &o->surf;
+    uint32_t *p = malloc(sizeof(uint32_t) * (size_t)s->w * (size_t)s->h);
+    int has_alpha = 0;
+    for (int y = 0; y < s->h; y++)
+        for (int x = 0; x < s->w; x++) {
+            uint32_t v = surf_get(s, x, y);
+            if (s->bpp == 32) { uint32_t raw; memcpy(&raw, surf_row(s, y) + x * 4, 4); if (raw >> 24) has_alpha = 1; v = (v & 0xFFFFFFu) | (raw & 0xFF000000u); }
+            p[(size_t)y * (size_t)s->w + (size_t)x] = v;
+        }
+    if (!has_alpha) for (size_t i = 0; i < (size_t)s->w * (size_t)s->h; i++) p[i] |= 0xFF000000u;
+    *out = p; *w = s->w; *h = s->h;
+    return 1;
+}
+
 uint64_t gdi_bitmap_from_dib(const uint8_t *bmi, const uint8_t *bits) {
     Surface s;
     uint32_t hsize; memcpy(&hsize, bmi, 4);

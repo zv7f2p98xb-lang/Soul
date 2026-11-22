@@ -1,0 +1,20 @@
+toolbar buttons=4 height=1
+lv items=3 columns ok=1
+tv count=4
+toolbar 501 checked=0
+toolbar 503 checked=1
+lv select 0
+lv select 1
+lv check 2 1
+lv select 0
+lv dblclk 0
+lv column 1
+lv order Müzik.mp3,Resim.png,Belge.txt
+updown pos=6 edit=6
+link https://example.com/soul
+tab 1
+tv select Bilgisayar action=1
+tv expanded=1 visible=1
+tv select C: sürücüsü action=2
+tv expanded=1 visible=1
+destroy lv=3 selected=1

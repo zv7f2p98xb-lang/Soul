@@ -690,6 +690,180 @@ static void clip_set_text(const char *s) {
     g->clip_text = strdup(s);
 }
 
+// ---- RichEdit extras: RTF and stream I/O (installer licence pages load their text this way) -------------
+
+static uint32_t cp125x(uint8_t b, int cp) {
+    static const uint16_t w1252[32] = { 0x20AC, 0x81, 0x201A, 0x192, 0x201E, 0x2026, 0x2020, 0x2021, 0x2C6, 0x2030, 0x160, 0x2039, 0x152, 0x8D, 0x17D, 0x8F,
+                                        0x90, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x2DC, 0x2122, 0x161, 0x203A, 0x153, 0x9D, 0x17E, 0x178 };
+    if (b >= 0x80 && b < 0xA0) return w1252[b - 0x80];
+    if (cp == 1254) { // Turkish
+        switch (b) { case 0xD0: return 0x11E; case 0xDD: return 0x130; case 0xDE: return 0x15E; case 0xF0: return 0x11F; case 0xFD: return 0x131; case 0xFE: return 0x15F; default: break; }
+    }
+    return b;
+}
+typedef struct SBuf { char *p; size_t n, cap; } SBuf;
+static void sb_add(SBuf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) { b->cap = (b->n + n + 1) * 2 + 64; b->p = realloc(b->p, b->cap); }
+    memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+static void sb_cp(SBuf *b, uint32_t c) {
+    char u[8]; uint16_t w[2]; int n;
+    if (c < 0x10000) { w[0] = (uint16_t)c; n = 1; } else { c -= 0x10000; w[0] = (uint16_t)(0xD800 + (c >> 10)); w[1] = (uint16_t)(0xDC00 + (c & 0x3FF)); n = 2; }
+    size_t k = w2u(w, n, u, sizeof u);
+    sb_add(b, u, k);
+}
+// Converts RTF to plain UTF-8 text (paragraphs become CR LF).
+static char *rtf_to_text(const char *r, size_t len) {
+    SBuf b = { 0 };
+    sb_add(&b, "", 0);
+    int skip[256] = { 0 }, depth = 0, uc[256] = { 0 }, cp = 1252, pending_skip = 0;
+    uc[0] = 1;
+    static const char *const dests[] = { "fonttbl", "colortbl", "stylesheet", "info", "pict", "object", "header", "footer", "headerl", "headerr",
+                                         "footerl", "footerr", "listtable", "listoverridetable", "rsidtbl", "generator", "xmlnstbl", "themedata",
+                                         "colorschememapping", "latentstyles", "datastore", "mmathPr", "fldinst", "pgdsctbl", "filetbl", "revtbl", NULL };
+    for (size_t i = 0; i < len; i++) {
+        char c = r[i];
+        if (c == '{') { if (depth < 255) { depth++; skip[depth] = skip[depth - 1]; uc[depth] = uc[depth - 1]; } continue; }
+        if (c == '}') { if (depth > 0) depth--; continue; }
+        if (c == '\r' || c == '\n') continue;
+        if (c != '\\') {
+            if (pending_skip > 0) { pending_skip--; continue; }
+            if (!skip[depth]) { if ((unsigned char)c < 0x80) sb_add(&b, &c, 1); else sb_cp(&b, (unsigned char)c); }
+            continue;
+        }
+        if (i + 1 >= len) break;
+        char n = r[++i];
+        if (n == '\\' || n == '{' || n == '}') { if (pending_skip > 0) { pending_skip--; continue; } if (!skip[depth]) sb_add(&b, &n, 1); continue; }
+        if (n == '\'') {
+            if (i + 2 < len) {
+                char hx[3] = { r[i + 1], r[i + 2], 0 };
+                i += 2;
+                if (pending_skip > 0) { pending_skip--; continue; }
+                if (!skip[depth]) sb_cp(&b, cp125x((uint8_t)strtoul(hx, NULL, 16), cp));
+            }
+            continue;
+        }
+        if (n == '*') { skip[depth] = 1; continue; }
+        if (n == '~') { if (!skip[depth]) sb_cp(&b, 0xA0); continue; }
+        if (n == '_') { if (!skip[depth]) sb_add(&b, "-", 1); continue; }
+        if (n == '-' || n == ':' || n == '|') continue;
+        if (!isalpha((unsigned char)n)) continue;
+        char word[32]; int wl = 0;
+        while (i < len && isalpha((unsigned char)r[i]) && wl < 31) word[wl++] = r[i++];
+        word[wl] = 0;
+        int has = 0; long val = 0, sign = 1;
+        if (i < len && r[i] == '-') { sign = -1; i++; }
+        while (i < len && isdigit((unsigned char)r[i])) { val = val * 10 + (r[i++] - '0'); has = 1; }
+        val *= sign;
+        if (i < len && r[i] != ' ') i--; // the delimiter belongs to the text
+        for (int k = 0; dests[k]; k++) if (!strcmp(word, dests[k])) skip[depth] = 1;
+        if (skip[depth]) continue;
+        if (!strcmp(word, "par") || !strcmp(word, "line") || !strcmp(word, "sect") || !strcmp(word, "page")) sb_add(&b, "\r\n", 2);
+        else if (!strcmp(word, "tab")) sb_add(&b, "\t", 1);
+        else if (!strcmp(word, "ansicpg") && has) cp = (int)val;
+        else if (!strcmp(word, "uc") && has) uc[depth] = (int)val;
+        else if (!strcmp(word, "u") && has) { sb_cp(&b, (uint32_t)(val < 0 ? val + 65536 : val)); pending_skip = uc[depth]; }
+        else if (!strcmp(word, "bullet")) sb_cp(&b, 0x2022);
+        else if (!strcmp(word, "emdash")) sb_cp(&b, 0x2014);
+        else if (!strcmp(word, "endash")) sb_cp(&b, 0x2013);
+        else if (!strcmp(word, "lquote")) sb_cp(&b, 0x2018);
+        else if (!strcmp(word, "rquote")) sb_cp(&b, 0x2019);
+        else if (!strcmp(word, "ldblquote")) sb_cp(&b, 0x201C);
+        else if (!strcmp(word, "rdblquote")) sb_cp(&b, 0x201D);
+    }
+    // trim one trailing paragraph mark
+    if (b.n >= 2 && b.p[b.n - 2] == '\r' && b.p[b.n - 1] == '\n') b.p[b.n -= 2] = 0;
+    return b.p;
+}
+static int utf8_valid(const uint8_t *s, size_t n) {
+    for (size_t i = 0; i < n;) {
+        uint8_t c = s[i];
+        int k = c < 0x80 ? 0 : (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : -1;
+        if (k < 0 || i + (size_t)k >= n + (k ? 0 : 1)) return 0;
+        for (int j = 1; j <= k; j++) if ((s[i + (size_t)j] & 0xC0) != 0x80) return 0;
+        i += (size_t)k + 1;
+    }
+    return 1;
+}
+// Bytes of a stream / EM_SETTEXTEX in the given format to UTF-8.
+static char *rich_decode(const uint8_t *d, size_t n, int unicode_stream, int rtf) {
+    if ((n >= 5 && !memcmp(d, "{\\rtf", 5)) || rtf) {
+        if (unicode_stream) { char *u = malloc(n * 2 + 4); size_t k = w2u((const uint16_t *)(const void *)d, (long)(n / 2), u, n * 2 + 4); u[k] = 0; char *t = rtf_to_text(u, k); free(u); return t; }
+        return rtf_to_text((const char *)d, n);
+    }
+    if (unicode_stream) { char *u = malloc(n * 2 + 4); size_t k = w2u((const uint16_t *)(const void *)d, (long)(n / 2), u, n * 2 + 4); u[k] = 0; return u; }
+    if (n >= 3 && d[0] == 0xEF && d[1] == 0xBB && d[2] == 0xBF) { d += 3; n -= 3; }
+    if (utf8_valid(d, n)) { char *u = malloc(n + 1); memcpy(u, d, n); u[n] = 0; return u; }
+    SBuf b = { 0 };
+    sb_add(&b, "", 0);
+    for (size_t i = 0; i < n; i++) { if (d[i] < 0x80) sb_add(&b, (const char *)&d[i], 1); else sb_cp(&b, cp125x(d[i], 1252)); }
+    return b.p;
+}
+static void rich_set(X86State *st, Win *w, const char *utf8, int selection) {
+    uint64_t h = w->hwnd;
+    if (selection) edit_replace_utf8(w, utf8, 0);
+    else { win_set_text(w, utf8); w->sel_start = w->sel_end = 0; w->scroll_x = w->scroll_y = 0; w->modified = 0; }
+    win_invalidate_rect(w, NULL, 1);
+    win_notify_parent(st, w, 0x400);
+    if ((w = win_get(h))) win_notify_parent(st, w, 0x300);
+}
+// EM_STREAMIN: pulls the text through the program's EDITSTREAM callback.
+// EDITSTREAM { DWORD_PTR dwCookie; DWORD dwError; EDITSTREAMCALLBACK pfnCallback; } is packed to 4 bytes
+// (richedit.h), so in 64-bit programs the callback sits at offset 12, not 16.
+#define ES_ERR ((uint64_t)PSZ)
+#define ES_CB ((uint64_t)PSZ + 4)
+static uint64_t rich_stream_in(X86State *st, Win *w, uint64_t fmt, uint64_t es) {
+    uint64_t cookie = rd_ptr(es), cb = rd_ptr(es + ES_CB), h = w->hwnd;
+    if (!cb) return 0;
+    uint8_t *buf = g_malloc(4096 + 8);
+    uint64_t gbuf = H2G(buf), pcb = gbuf + 4096;
+    uint8_t *data = NULL;
+    size_t n = 0;
+    for (int guard = 0; guard < 65536; guard++) {
+        mem_wr(pcb, 4, 0);
+        uint64_t a[4] = { cookie, gbuf, 4096, pcb };
+        uint32_t err = (uint32_t)soul_guest_call(st, cb, 4, a);
+        int32_t got = (int32_t)mem_rd(pcb, 4);
+        if (err || got <= 0) { mem_wr(es + ES_ERR, 4, err); break; }
+        data = realloc(data, n + (size_t)got);
+        memcpy(data + n, buf, (size_t)got);
+        n += (size_t)got;
+    }
+    g_free(buf);
+    if (!(w = win_get(h))) { free(data); return 0; }
+    char *t = rich_decode(data ? data : (const uint8_t *)"", n, (fmt & 0x10) != 0, (fmt & 2) != 0);
+    free(data);
+    rich_set(st, w, t, (fmt & 0x8000) != 0);
+    Cps c = to_cps(t);
+    free(t);
+    free(c.c);
+    return (uint64_t)c.n;
+}
+// EM_STREAMOUT: hands the plain text to the program's callback.
+static uint64_t rich_stream_out(X86State *st, Win *w, uint64_t fmt, uint64_t es) {
+    uint64_t cookie = rd_ptr(es), cb = rd_ptr(es + ES_CB);
+    if (!cb) return 0;
+    size_t n;
+    uint8_t *src;
+    if (fmt & 0x10) { uint16_t *u = u2w_dup(w->text); n = wstrlen(u) * 2; src = (uint8_t *)u; }
+    else { src = (uint8_t *)strdup(w->text); n = strlen((char *)src); }
+    uint8_t *buf = g_malloc(4096 + 8);
+    uint64_t gbuf = H2G(buf), pcb = gbuf + 4096;
+    for (size_t off = 0; off < n;) {
+        size_t k = n - off > 4096 ? 4096 : n - off;
+        memcpy(buf, src + off, k);
+        mem_wr(pcb, 4, 0);
+        uint64_t a[4] = { cookie, gbuf, k, pcb };
+        if ((uint32_t)soul_guest_call(st, cb, 4, a)) break;
+        int32_t took = (int32_t)mem_rd(pcb, 4);
+        if (took <= 0) break;
+        off += (size_t)took;
+    }
+    g_free(buf);
+    free(src);
+    return n;
+}
+
 static uint64_t edit_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint64_t lp, int unicode) {
     GuiState *g = gui();
     uint64_t h = w->hwnd;
@@ -884,6 +1058,59 @@ static uint64_t edit_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint6
     case 0xCF: w->readonly = wp != 0; if (wp) w->style |= ES_READONLY; else w->style &= ~(uint32_t)ES_READONLY; win_invalidate_rect(w, NULL, 1); return 1; // EM_SETREADONLY
     case 0xC6: case 0xC7: case 0x304: return 0;                     // undo
     case 0xCD: case 0xD3: case 0xD4: case 0x1501: return 0;
+    // RichEdit
+    case 0x449: return lp ? rich_stream_in(st, w, wp, lp) : 0;      // EM_STREAMIN
+    case 0x44A: return lp ? rich_stream_out(st, w, wp, lp) : 0;     // EM_STREAMOUT
+    case 0x461: {                                                    // EM_SETTEXTEX (SETTEXTEX: flags, codepage)
+        uint32_t flags = wp ? (uint32_t)mem_rd(wp, 4) : 0, cpg = wp ? (uint32_t)mem_rd(wp + 4, 4) : 0;
+        int wide = cpg == 1200;
+        char *t = NULL;
+        if (lp) {
+            if (wide) { char *u = w2u_dup((const uint16_t *)G2H(lp)); t = rich_decode((const uint8_t *)u, strlen(u), 0, 0); free(u); }
+            else { const char *a = (const char *)G2H(lp); t = rich_decode((const uint8_t *)a, strlen(a), 0, 0); }
+        }
+        rich_set(st, w, t ? t : "", (flags & 2) != 0);
+        free(t);
+        return 1;
+    }
+    case 0x435: w->limit = lp ? (int)(int32_t)lp : 0x7FFFFFFE; return 0; // EM_EXLIMITTEXT
+    case 0x434: {                                                    // EM_EXGETSEL (CHARRANGE*)
+        int s0 = w->sel_start < w->sel_end ? w->sel_start : w->sel_end, s1 = w->sel_start < w->sel_end ? w->sel_end : w->sel_start;
+        if (lp) { mem_wr(lp, 4, (uint32_t)s0); mem_wr(lp + 4, 4, (uint32_t)s1); }
+        return 0;
+    }
+    case 0x437: {                                                    // EM_EXSETSEL
+        if (!lp) return 0;
+        int n = text_len_cps(w), a = (int32_t)mem_rd(lp, 4), b = (int32_t)mem_rd(lp + 4, 4);
+        if (a < 0) a = b = n;
+        if (b < 0 || b > n) b = n;
+        if (a > n) a = n;
+        w->sel_start = a; w->sel_end = b;
+        edit_scroll_to_caret(w);
+        win_invalidate_rect(w, NULL, 1);
+        return (uint64_t)b;
+    }
+    case 0x44B: {                                                    // EM_GETTEXTRANGE (TEXTRANGE: cpMin cpMax lpstrText)
+        if (!lp) return 0;
+        int a = (int32_t)gs_get(lp, "44P", 0), b = (int32_t)gs_get(lp, "44P", 1);
+        Cps t = to_cps(w->text);
+        if (b < 0 || b > t.n) b = t.n;
+        if (a < 0) a = 0;
+        if (a > b) a = b;
+        char *sub = from_cps(t.c + a, b - a);
+        uint64_t dst = gs_get(lp, "44P", 2);
+        size_t r = put_str(dst, (size_t)(b - a) + 1, sub, unicode);
+        free(sub); free(t.c);
+        return r;
+    }
+    case 0x45F: return (uint64_t)text_len_cps(w);                  // EM_GETTEXTLENGTHEX
+    case 0x445: case 0x43B: return 0;                               // EM_SETEVENTMASK / GETEVENTMASK
+    case 0x443: return 0xFFFFFF;                                     // EM_SETBKGNDCOLOR
+    case 0x444: case 0x447: case 0x448: case 0x4CA: case 0x4E1: return 1; // EM_SETCHARFORMAT / SETPARAFORMAT / SETTARGETDEVICE / SETTYPOGRAPHYOPTIONS / SETZOOM
+    case 0x43A: case 0x43D: case 0x45B: case 0x44D: case 0x4CC: case 0x478: case 0x43F: case 0x45C: return 0;
+    case 0x43C: if (lp) wr_ptr(lp, 0); return 0;                    // EM_GETOLEINTERFACE
+    case 0x4DD: if (lp) { mem_wr(lp, 4, 0); mem_wr(lp + 4, 4, (uint32_t)w->scroll_y); } return 1; // EM_GETSCROLLPOS
+    case 0x4DE: if (lp) { w->scroll_y = (int32_t)mem_rd(lp + 4, 4) / (line_height(w) ? line_height(w) : 1); win_invalidate_rect(w, NULL, 1); } return 1;
     default: return win_def_proc(st, w, msg, wp, lp, unicode);
     }
 }
@@ -1404,6 +1631,8 @@ uint64_t ctl_proc(X86State *st, Win *w, int ctl, uint32_t msg, uint64_t wp, uint
     case CTL_LISTBOX: return listbox_proc(st, w, msg, wp, lp, unicode);
     case CTL_COMBOBOX: return combo_proc(st, w, msg, wp, lp, unicode);
     case CTL_PROGRESS: return progress_proc(st, w, msg, wp, lp, unicode);
+    case CTL_LISTVIEW: case CTL_TREEVIEW: case CTL_TAB: case CTL_TOOLBAR: case CTL_UPDOWN: case CTL_HEADER: case CTL_SYSLINK:
+        return comctl_proc(st, w, ctl, msg, wp, lp, unicode);
     default: return win_def_proc(st, w, msg, wp, lp, unicode);
     }
 }

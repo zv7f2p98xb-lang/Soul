@@ -342,17 +342,18 @@ static void builtin_thunk(X86State *st) { // CallWindowProc / guest call into a 
     else RET(ctl_proc(st, w, ctl, (uint32_t)ARG(1), ARG(2), ARG(3), g_gui.cur_unicode));
 }
 uint64_t builtin_proc_addr(int ctl) {
-    if (ctl <= 0 || ctl >= 16) return 0;
+    if (ctl <= 0 || ctl >= 32) return 0;
     if (!g_gui.builtin_procs[ctl]) {
         char name[32];
         snprintf(name, sizeof name, "SoulCtlProc%d", ctl);
         uint32_t id = hle_thunk_for(g_proc, builtin_thunk, "user32", name);
+        g_proc->thunks[id].argbytes = g_mode32 ? 16 : 0; // a WNDPROC: stdcall (hwnd, msg, wParam, lParam)
         g_gui.builtin_procs[ctl] = g_proc->thunk_base + (uint64_t)id * SOUL_THUNK_STRIDE;
     }
     return g_gui.builtin_procs[ctl];
 }
 static int builtin_of(uint64_t proc) {
-    for (int i = 1; i < 16; i++) if (g_gui.builtin_procs[i] && g_gui.builtin_procs[i] == proc) return i;
+    for (int i = 1; i < 32; i++) if (g_gui.builtin_procs[i] && g_gui.builtin_procs[i] == proc) return i;
     return 0;
 }
 
@@ -412,6 +413,9 @@ static uint64_t call_proc(X86State *st, Win *w, uint64_t proc, uint32_t msg, uin
     r = soul_guest_call(st, proc, 4, args);
     g_free(tmp);
     return r;
+}
+uint64_t win_call_proc(X86State *st, Win *w, uint64_t proc, uint32_t msg, uint64_t wp, uint64_t lp, int unicode) {
+    return call_proc(st, w, proc, msg, wp, lp, unicode);
 }
 
 uint64_t win_send_ex(X86State *st, uint64_t hwnd, uint32_t msg, uint64_t wp, uint64_t lp, int unicode) {
@@ -636,6 +640,8 @@ static void destroy_rec(X86State *st, Win *w) {
     for (int i = 0; i < w->item_count; i++) free(w->items[i]);
     free(w->items);
     free(w->item_data);
+    if (w->cdata && w->cdata_free) w->cdata_free(w->cdata);
+    w->cdata = NULL;
     bump();
 }
 
@@ -1086,6 +1092,7 @@ static Win *hit_child(Win *w, int x, int y) { // x, y: client coordinates of w
         if (!c->visible || x < c->x || y < c->y || x >= c->x + c->w || y >= c->y + c->h) continue;
         if (c->ctl == CTL_STATIC && !(c->style & 0x100)) continue;                 // SS_NOTIFY
         if (c->ctl == CTL_BUTTON && (c->style & 0xF) == 7) continue;              // BS_GROUPBOX
+        if (comctl_transparent_at(c, x - c->x, y - c->y)) continue;               // tab control pages
         r = hit_child(c, x - c->x, y - c->y);
         break;
     }
@@ -2664,9 +2671,15 @@ void gui_reset(void) {
     builtin_class("RichEdit20A", CTL_EDIT, 0x4008 | 3, 0, 0);
     builtin_class("RICHEDIT50W", CTL_EDIT, 0x4008 | 3, 0, 0);
     builtin_class("RichEdit", CTL_EDIT, 0x4008 | 3, 0, 0);
-    static const char *generic[] = { "SysListView32", "SysTreeView32", "SysTabControl32", "ToolbarWindow32", "ReBarWindow32",
-                                     "msctls_updown32", "SysLink", "SysDateTimePick32", "SysMonthCal32", "msctls_hotkey32",
-                                     "SysIPAddress32", "SysHeader32", "SysAnimate32", "ScrollBar", "SysPager", "NativeFontCtl", NULL };
+    builtin_class("SysListView32", CTL_LISTVIEW, 0x4008 | 3, 0, 0);
+    builtin_class("SysTreeView32", CTL_TREEVIEW, 0x4008 | 3, 0, 0);
+    builtin_class("SysTabControl32", CTL_TAB, 0x4008 | 3, 0, 0);
+    builtin_class("ToolbarWindow32", CTL_TOOLBAR, 0x4008 | 3, 0, 0);
+    builtin_class("msctls_updown32", CTL_UPDOWN, 0x4008 | 3, 0, 0);
+    builtin_class("SysHeader32", CTL_HEADER, 0x4008 | 3, 0, 0);
+    builtin_class("SysLink", CTL_SYSLINK, 0x4008 | 3, 0, 0);
+    static const char *generic[] = { "ReBarWindow32", "SysDateTimePick32", "SysMonthCal32", "msctls_hotkey32",
+                                     "SysIPAddress32", "SysAnimate32", "ScrollBar", "SysPager", "NativeFontCtl", NULL };
     for (int i = 0; generic[i]; i++) builtin_class(generic[i], CTL_GENERIC, 0x4008 | 3, 0, 0);
     builtin_class("#32770", CTL_DIALOG, 0x0008, COLOR_BTNFACE + 1, 48);
     g_wm_count = 0;
@@ -2684,6 +2697,7 @@ void gui_shutdown(void) {
         free(w->pixels); free(w->text); free(w->extra);
         for (int k = 0; k < w->item_count; k++) free(w->items[k]);
         free(w->items); free(w->item_data);
+        if (w->cdata && w->cdata_free) w->cdata_free(w->cdata);
     }
     for (int i = 0; i < MENU_MAX; i++) free(g->menus[i].items);
     for (int i = 0; i < g->input_len; i++) free(g->input[i].text);

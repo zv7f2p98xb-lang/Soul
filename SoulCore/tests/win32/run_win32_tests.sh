@@ -12,6 +12,7 @@ x86_64-w64-mingw32-gcc -O2 -o "$OUT/winapi.exe" winapi.c || exit 1
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/threads.exe" threads.c || exit 1
 x86_64-w64-mingw32-g++ -O2 -static -o "$OUT/cpp.exe" cpp.cpp || exit 1
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/registry.exe" registry.c || exit 1
+x86_64-w64-mingw32-gcc -O2 -o "$OUT/richedit.exe" richedit.c || exit 1
 # the same programs as 32-bit (x86) executables
 i686-w64-mingw32-gcc -O2 -o "$OUT/winapi32.exe" winapi.c || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/threads32.exe" threads.c || exit 1
@@ -32,6 +33,7 @@ check threads threads.exe
 check cpp cpp.exe
 check registry-write registry.exe yaz
 check registry-read registry.exe
+check richedit richedit.exe
 check winapi32 winapi32.exe hello
 check threads threads32.exe
 check cpp cpp32.exe

@@ -88,6 +88,8 @@ void gdi_release_guest_bits(void); // frees DIB section pixels (guest memory) at
 uint64_t gdi_make_brush(uint32_t colorref);
 uint64_t gdi_make_font(int height, int weight, const char *face);
 uint64_t gdi_bitmap_from_dib(const uint8_t *bmi, const uint8_t *bits); // 32 bpp copy of a packed DIB
+void gdi_draw_argb(uint64_t hdc, int x, int y, const uint32_t *px, int w, int h);
+int gdi_bitmap_argb(uint64_t hbm, uint32_t **out, int *w, int *h);    // malloc'ed ARGB pixels
 
 // ---- windows ----------------------------------------------------------------------------------
 typedef struct WinClass {
@@ -170,10 +172,22 @@ typedef struct Win {
     // properties
     struct WinProp { char name[64]; uint64_t value; } props[8];
     int prop_count;
+    // per-control state of the common controls (comctl.c), released with the window
+    void *cdata;
+    void (*cdata_free)(void *);
 } Win;
 
 enum { CTL_NONE = 0, CTL_BUTTON, CTL_STATIC, CTL_EDIT, CTL_LISTBOX, CTL_COMBOBOX, CTL_PROGRESS, CTL_DIALOG,
-       CTL_STATUS, CTL_TRACKBAR, CTL_TOOLTIP, CTL_GENERIC };
+       CTL_STATUS, CTL_TRACKBAR, CTL_TOOLTIP, CTL_GENERIC,
+       CTL_LISTVIEW, CTL_TREEVIEW, CTL_TAB, CTL_TOOLBAR, CTL_UPDOWN, CTL_HEADER, CTL_SYSLINK };
+// common controls (comctl.c)
+uint64_t comctl_proc(X86State *st, Win *w, int ctl, uint32_t msg, uint64_t wp, uint64_t lp, int unicode);
+uint64_t win_call_proc(X86State *st, Win *w, uint64_t proc, uint32_t msg, uint64_t wp, uint64_t lp, int unicode);
+extern const HleEntry hle_comctl_table[];
+void comctl_reset(void);
+void iml_draw(uint64_t himl, int index, uint64_t hdc, int x, int y);
+int comctl_transparent_at(Win *w, int x, int y); // HTTRANSPARENT areas (tab control body)
+int iml_size(uint64_t himl, int *cx, int *cy);
 
 #define WIN_MAX 1024
 #define WIN_HANDLE_BASE 0x10000
@@ -293,7 +307,7 @@ typedef struct GuiState {
     double last_click_time;
     int last_click_x, last_click_y, last_click_button;
     uint64_t last_click_hwnd;
-    uint64_t builtin_procs[16];
+    uint64_t builtin_procs[32];
     uint64_t sys_brush[32];
     char *clip_text;
     int clip_open;
@@ -357,6 +371,7 @@ extern const HleEntry hle_gdi32_table[];
 #define WM_NCPAINT 0x0085
 #define WM_NCACTIVATE 0x0086
 #define WM_GETDLGCODE 0x0087
+#define WM_STYLECHANGED 0x007D
 #define WM_KEYDOWN 0x0100
 #define WM_KEYUP 0x0101
 #define WM_CHAR 0x0102

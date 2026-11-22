@@ -1,0 +1,20 @@
+# Drives comctl.exe: toolbar, list view, up-down, SysLink, tab control and tree view.
+waitwin 1
+wait 500
+pixel 17 106 333333
+click 32 12
+click 167 12
+click 92 106
+click 92 128
+click 23 150
+dblclick 92 106
+click 192 83
+click 421 66
+click 422 119
+click 87 54
+click 67 81
+click 25 81
+key 0x28
+key 0x27
+dump comctl.ppm
+close

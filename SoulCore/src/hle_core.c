@@ -44,8 +44,8 @@ int hle_is_system_dll(const char *dll) {
 }
 
 static const HleEntry *find_entry(const char *name) {
-    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table };
-    for (int t = 0; t < 8; t++)
+    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table, hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table };
+    for (int t = 0; t < 9; t++)
         for (const HleEntry *e = tables[t]; e->name; e++)
             if (strcmp(e->name, name) == 0) return e;
     return NULL;
@@ -152,29 +152,37 @@ void hle_invoke(X86State *st, uint32_t id) {
 
 // ---- guest structure layouts -----------------------------------------------------
 
+// '|' inside a layout aligns the next field to the pointer size without being a field itself:
+// it marks the end of an embedded structure such as NMHDR (24 bytes in 64-bit programs).
 static int gs_field_size(char c) { return c == 'P' ? PSZ : c - '0'; }
+static const char *gs_field(const char *spec, int field) {
+    for (int i = 0; *spec; spec++) { if (*spec == '|') continue; if (i++ == field) return spec; }
+    return spec;
+}
 size_t gs_off(const char *spec, int field) {
     size_t o = 0;
-    for (int i = 0; spec[i]; i++) {
-        int sz = gs_field_size(spec[i]);
+    for (int i = 0; spec[0]; spec++) {
+        if (spec[0] == '|') { o = (o + (size_t)PSZ - 1) & ~((size_t)PSZ - 1); continue; }
+        int sz = gs_field_size(spec[0]);
         o = (o + (size_t)sz - 1) & ~((size_t)sz - 1);
-        if (i == field) return o;
+        if (i++ == field) return o;
         o += (size_t)sz;
     }
     return o;
 }
 size_t gs_size(const char *spec) {
     size_t o = 0, al = 1;
-    for (int i = 0; spec[i]; i++) {
-        size_t sz = (size_t)gs_field_size(spec[i]);
+    for (; spec[0]; spec++) {
+        if (spec[0] == '|') { o = (o + (size_t)PSZ - 1) & ~((size_t)PSZ - 1); if ((size_t)PSZ > al) al = (size_t)PSZ; continue; }
+        size_t sz = (size_t)gs_field_size(spec[0]);
         o = (o + sz - 1) & ~(sz - 1);
         o += sz;
         if (sz > al) al = sz;
     }
     return (o + al - 1) & ~(al - 1);
 }
-uint64_t gs_get(uint64_t base, const char *spec, int field) { return mem_rd(base + gs_off(spec, field), gs_field_size(spec[field])); }
-void gs_set(uint64_t base, const char *spec, int field, uint64_t v) { mem_wr(base + gs_off(spec, field), gs_field_size(spec[field]), v); }
+uint64_t gs_get(uint64_t base, const char *spec, int field) { return mem_rd(base + gs_off(spec, field), gs_field_size(*gs_field(spec, field))); }
+void gs_set(uint64_t base, const char *spec, int field, uint64_t v) { mem_wr(base + gs_off(spec, field), gs_field_size(*gs_field(spec, field)), v); }
 
 // ---- handles -----------------------------------------------------------------
 
@@ -679,6 +687,7 @@ void hle_init(SoulProcess *p) {
         mkdir(d, 0755);
     }
     gui_reset();
+    comctl_reset();
     gl_reset();
     reg_init(p);
 }
