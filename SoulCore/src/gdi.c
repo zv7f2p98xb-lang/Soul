@@ -1623,6 +1623,57 @@ uint64_t gdi_bitmap_from_dib(const uint8_t *bmi, const uint8_t *bits) {
     return hb;
 }
 
+// One glyph of the embedded bitmap fonts at em size `em` (pixels): metrics and, when cov is given and large enough,
+// its 8-bit coverage (g->w * g->h bytes). x0 / y0 are relative to the pen position / the top of the line.
+// kind: 0 regular, 1 bold, 2 monospace. cp = 0 only fills ascent / descent. Used by GDI+ (gdiplus.c).
+int gdi_glyph_raster(float em, int kind, uint32_t cp, GdiGlyph *out, uint8_t *cov, size_t cov_cap) {
+    if (em < 4) em = 4;
+    const SoulFontFace *best = NULL;
+    float bd = 1e9f;
+    for (int i = 0; i < SOUL_FONT_FACE_COUNT; i++) {
+        const SoulFontFace *ff = &soul_font_faces[i];
+        if (ff->bold != kind) continue;
+        float d = fabsf(logf(em / (float)ff->size));
+        if (d < bd) { bd = d; best = ff; }
+    }
+    if (!best) return 0;
+    float sc = em / (float)best->size;
+    if (fabsf(sc - 1.0f) < 0.08f) sc = 1.0f;
+    memset(out, 0, sizeof *out);
+    out->ascent = best->ascent * sc; out->descent = best->descent * sc;
+    if (!cp) return 1;
+    const SoulGlyph *g = glyph_for(best, cp);
+    if (!g) return 0;
+    out->adv = g->adv * sc;
+    out->x0 = (int)lroundf(g->x0 * sc); out->y0 = (int)lroundf(g->y0 * sc);
+    out->w = (int)ceilf(g->w * sc); out->h = (int)ceilf(g->h * sc);
+    if (!cov || (size_t)out->w * (size_t)out->h > cov_cap) return 1;
+    const uint8_t *bits = soul_font_bits + g->off;
+    for (int yy = 0; yy < out->h; yy++)
+        for (int xx = 0; xx < out->w; xx++) {
+            uint32_t a;
+            if (sc == 1.0f) {
+                int idx = yy * g->w + xx;
+                a = ((idx & 1) ? (bits[idx >> 1] >> 4) : (bits[idx >> 1] & 15)) * 17u;
+            } else {
+                float fx = (xx + 0.5f) / sc - 0.5f, fy = (yy + 0.5f) / sc - 0.5f;
+                int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+                float ax = fx - (float)x0, ay = fy - (float)y0, acc = 0;
+                for (int k = 0; k < 4; k++) {
+                    int sx = x0 + (k & 1), sy = y0 + (k >> 1);
+                    if (sx < 0 || sy < 0 || sx >= g->w || sy >= g->h) continue;
+                    int idx = sy * g->w + sx;
+                    float v = (float)((idx & 1) ? (bits[idx >> 1] >> 4) : (bits[idx >> 1] & 15));
+                    acc += v * ((k & 1) ? ax : 1 - ax) * ((k >> 1) ? ay : 1 - ay);
+                }
+                a = (uint32_t)(acc * 17.0f + 0.5f);
+                if (a > 255) a = 255;
+            }
+            cov[(size_t)yy * (size_t)out->w + (size_t)xx] = (uint8_t)a;
+        }
+    return 1;
+}
+
 const HleEntry hle_gdi32_table[] = {
     { "GetStockObject", g_GetStockObject, NULL }, { "SelectObject", g_SelectObject, NULL }, { "DeleteObject", g_DeleteObject, NULL },
     { "GetObjectType", g_GetObjectType, NULL }, { "GetObjectA", g_GetObjectA, NULL }, { "GetObjectW", g_GetObjectW, NULL },

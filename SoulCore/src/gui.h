@@ -90,6 +90,8 @@ uint64_t gdi_make_brush(uint32_t colorref);
 uint64_t gdi_make_font(int height, int weight, const char *face);
 uint64_t gdi_bitmap_from_dib(const uint8_t *bmi, const uint8_t *bits); // 32 bpp copy of a packed DIB
 void gdi_draw_argb(uint64_t hdc, int x, int y, const uint32_t *px, int w, int h);
+typedef struct GdiGlyph { float adv, ascent, descent; int x0, y0, w, h; } GdiGlyph;
+int gdi_glyph_raster(float em, int kind, uint32_t cp, GdiGlyph *out, uint8_t *cov, size_t cov_cap); // GDI+ text (gdiplus.c)
 int gdi_bitmap_argb(uint64_t hbm, uint32_t **out, int *w, int *h);    // malloc'ed ARGB pixels
 
 // ---- windows ----------------------------------------------------------------------------------

@@ -1,0 +1,80 @@
+png_rgba 8x6
+png_rgba format 26200A
+png_rgba 0,0 FF00FF00
+png_rgba 7,0 50D2FF00
+png_rgba 3,2 AA5AAF36
+png_rgba 7,5 37D2373B
+png_rgba 5,3 73968787
+png_pal 10x4
+png_pal 0,0 FF000000
+png_pal 1,0 80FF0000
+png_pal 2,0 00000000
+png_pal 3,0 FF0000FF
+png_pal 4,0 4DC8C832
+png_pal 9,3 00000000
+png_gray16 9x7
+png_gray16 0,0 FF000000
+png_gray16 8,0 FF888888
+png_gray16 4,3 FF565656
+png_gray16 8,6 FFACACAC
+png_interlaced 13x9
+png_interlaced format 21808
+png_interlaced 0,0 FF000000
+png_interlaced 12,0 FFE40000
+png_interlaced 5,4 FF5F6C3C
+png_interlaced 12,8 FFE4D820
+png_interlaced 7,3 FF85513F
+png_interlaced 1,7 FF13BD15
+gif_anim 12x8
+gif_anim format 30803
+gif_anim 0,0 00000000
+gif_anim 3,2 FF00FF00
+gif_anim 9,5 FF0000FF
+gif_anim 11,7 FFFF0000
+gif_anim 6,6 FFFF0000
+gif_anim frames 2 delay 10
+gif_anim frame1 0,0 00000000
+gif_anim frame1 3,2 FF00FF00
+gif_anim frame1 9,5 FFFFFF00
+gif_anim frame1 11,7 FFFF0000
+gif_anim frame1 6,6 FFFF0000
+jpeg_420 40x36
+jpeg_420 format 21808
+jpeg_420 samples ok
+jpeg_prog 37x29
+jpeg_prog format 21808
+jpeg_prog samples ok
+jpeg_422 33x24
+jpeg_422 format 21808
+jpeg_422 samples ok
+jpeg_444p 24x21
+jpeg_444p format 21808
+jpeg_444p samples ok
+jpeg_gray 30x22
+jpeg_gray samples ok
+bmp24 11x5
+bmp24 format 21808
+bmp24 0,0 FF000000
+bmp24 10,0 FFDC0046
+bmp24 5,2 FF6E6439
+bmp24 10,4 FFDCC872
+bmp24 3,3 FF429636
+bmp8 9x6
+bmp8 format 30803
+bmp8 0,0 FF00FF00
+bmp8 8,0 FF00FF00
+bmp8 4,3 FFB04F97
+bmp8 8,5 FF50AFB9
+bmp8 1,1 FF30CF6F
+ico_png 16x16
+ico_png 0,0 00000000
+ico_png 2,2 FF1E90FF
+ico_png 7,7 FFFFFFFF
+ico_png 13,13 FF1E90FF
+ico_png 15,15 00000000
+ico_dib 8x8
+ico_dib 0,0 00000000
+ico_dib 1,1 00000000
+ico_dib 2,2 FF3C3CC8
+ico_dib 7,7 FFD2D2C8
+ico_dib 4,1 FF781EC8
