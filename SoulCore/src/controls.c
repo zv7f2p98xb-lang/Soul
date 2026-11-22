@@ -1125,13 +1125,16 @@ static int item_insert(Win *w, int pos, const char *s, int sorted) {
         w->item_cap = w->item_cap ? w->item_cap * 2 : 16;
         w->items = realloc(w->items, sizeof(char *) * (size_t)w->item_cap);
         w->item_data = realloc(w->item_data, sizeof(uint64_t) * (size_t)w->item_cap);
+        w->item_h = realloc(w->item_h, sizeof(int) * (size_t)w->item_cap);
     }
     if (sorted) { pos = 0; while (pos < w->item_count && strcasecmp(w->items[pos], s) <= 0) pos++; }
     if (pos < 0 || pos > w->item_count) pos = w->item_count;
     memmove(w->items + pos + 1, w->items + pos, sizeof(char *) * (size_t)(w->item_count - pos));
     memmove(w->item_data + pos + 1, w->item_data + pos, sizeof(uint64_t) * (size_t)(w->item_count - pos));
+    memmove(w->item_h + pos + 1, w->item_h + pos, sizeof(int) * (size_t)(w->item_count - pos));
     w->items[pos] = strdup(s ? s : "");
     w->item_data[pos] = 0;
+    w->item_h[pos] = 0;
     w->item_count++;
     if (w->cur_sel >= pos) w->cur_sel++;
     return pos;
@@ -1141,6 +1144,7 @@ static int item_delete(Win *w, int pos) {
     free(w->items[pos]);
     memmove(w->items + pos, w->items + pos + 1, sizeof(char *) * (size_t)(w->item_count - pos - 1));
     memmove(w->item_data + pos, w->item_data + pos + 1, sizeof(uint64_t) * (size_t)(w->item_count - pos - 1));
+    memmove(w->item_h + pos, w->item_h + pos + 1, sizeof(int) * (size_t)(w->item_count - pos - 1));
     w->item_count--;
     if (w->cur_sel == pos) w->cur_sel = -1;
     else if (w->cur_sel > pos) w->cur_sel--;
@@ -1160,6 +1164,27 @@ static int item_find(Win *w, int start, const char *s, int exact) {
     }
     return -1;
 }
+// Owner-drawn list boxes ask their parent for item heights (WM_MEASUREITEM).
+#define WM_MEASUREITEM 0x002C
+static int lb_default_height(Win *w);
+static int measure_item(X86State *st, Win *w, int item, uint64_t data) {
+    const char *L = "44444P"; // CtlType CtlID itemID itemWidth itemHeight itemData
+    uint8_t *m = g_calloc(1, gs_size(L));
+    uint64_t mg = H2G(m);
+    gs_set(mg, L, 0, 2 /* ODT_LISTBOX */); gs_set(mg, L, 1, (uint32_t)w->id); gs_set(mg, L, 2, (uint32_t)item);
+    gs_set(mg, L, 3, (uint32_t)w->w); gs_set(mg, L, 4, (uint32_t)lb_default_height(w)); gs_set(mg, L, 5, data);
+    if (w->parent) win_send(st, w->parent, WM_MEASUREITEM, w->id, mg);
+    int h = (int)(uint32_t)gs_get(mg, L, 4);
+    g_free(m);
+    return h > 0 && h < 1000 ? h : lb_default_height(w);
+}
+static void lb_measure(X86State *st, Win *w, int i) {
+    if (i < 0 || i >= w->item_count) return;
+    uint64_t h = w->hwnd;
+    int v = measure_item(st, w, i, w->item_data[i]);
+    if ((w = win_get(h)) && i < w->item_count) w->item_h[i] = v;
+}
+
 // handles the item messages common to list and combo boxes (msg already mapped to LB_* numbering)
 static int items_message(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint64_t lp, int unicode, uint64_t *res) {
     (void)st;
@@ -1172,6 +1197,7 @@ static int items_message(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint64
         if (!s) w->item_data[pos] = lp;
         free(s);
         *res = (uint64_t)pos;
+        if (w->ctl == CTL_LISTBOX && (w->style & 0x20)) lb_measure(st, w, pos); // LBS_OWNERDRAWVARIABLE
         break;
     }
     case 0x182: *res = (uint64_t)(int64_t)item_delete(w, (int)(int32_t)wp); break;
@@ -1199,8 +1225,35 @@ static int items_message(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint64
 
 // ---- ListBox -------------------------------------------------------------------------------------
 
-static int lb_item_height(Win *w) { return line_height(w) + 2; }
-static int lb_visible(Win *w) { int ih = lb_item_height(w); int n = (w->h - 2) / (ih ? ih : 1); return n < 1 ? 1 : n; }
+static int lb_default_height(Win *w) { return line_height(w) + 2; }
+// Height of item i: measured for owner-draw lists, the font's line otherwise.
+static int lb_h(Win *w, int i) {
+    if ((w->style & 0x20) && i >= 0 && i < w->item_count && w->item_h && w->item_h[i] > 0) return w->item_h[i];
+    if ((w->style & 0x10) && w->fixed_h > 0) return w->fixed_h;
+    return lb_default_height(w);
+}
+// first item at client y (may be >= item_count)
+static int lb_index_at(Win *w, int y) {
+    int b = (w->style & WS_BORDER) || (w->exstyle & WS_EX_CLIENTEDGE);
+    int i = w->top_index, yy = b;
+    if (y < b) return i;
+    while (i < w->item_count) { int h = lb_h(w, i); if (y < yy + h) return i; yy += h; i++; }
+    return i;
+}
+static int lb_item_top(Win *w, int i) { // client y of item i (relative to the top index)
+    int b = (w->style & WS_BORDER) || (w->exstyle & WS_EX_CLIENTEDGE);
+    int y = b;
+    if (i >= w->top_index) for (int k = w->top_index; k < i; k++) y += lb_h(w, k);
+    else for (int k = i; k < w->top_index; k++) y -= lb_h(w, k);
+    return y;
+}
+static int lb_visible(Win *w) {
+    int b = (w->style & WS_BORDER) || (w->exstyle & WS_EX_CLIENTEDGE);
+    int n = 0, y = b;
+    for (int i = w->top_index; i < w->item_count; i++) { y += lb_h(w, i); if (y > w->h - b) break; n++; }
+    if (w->item_count <= w->top_index) { int ih = lb_default_height(w); n = (w->h - 2) / (ih ? ih : 1); }
+    return n < 1 ? 1 : n;
+}
 static void lb_ensure_visible(Win *w) {
     int vis = lb_visible(w);
     if (w->cur_sel >= 0) {
@@ -1215,10 +1268,11 @@ static void listbox_paint(X86State *st, Win *w) {
     uint32_t bg = p.has_bg ? p.bg : 0xFFFFFF;
     gdi_fill_rect_px(p.hdc, 0, 0, w->w, w->h, bg);
     int b = (w->style & WS_BORDER) || (w->exstyle & WS_EX_CLIENTEDGE);
-    int ih = lb_item_height(w);
     int focused = gui()->focus == w->hwnd;
     int ownerdraw = (w->style & 0x30) != 0;
-    for (int i = w->top_index, y = b; i < w->item_count && y < w->h; i++, y += ih) {
+    if ((w->style & 0x10) && !w->fixed_h && w->item_count) { uint64_t h = w->hwnd; int v = measure_item(st, w, 0, w->item_data[0]); if (!(w = win_get(h))) { ctl_end(&p); return; } w->fixed_h = v; }
+    for (int i = w->top_index, y = b, ih; i < w->item_count && y < w->h; i++, y += ih) {
+        ih = lb_h(w, i);
         int sel = i == w->cur_sel;
         if (ownerdraw) {
             owner_draw(st, w, p.hdc, 2 /* ODT_LISTBOX */, (uint32_t)i, (sel ? 1 : 0) | (focused ? 0x10 : 0), b, y, w->w - b, y + ih, w->item_data[i]);
@@ -1258,8 +1312,7 @@ static uint64_t listbox_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, ui
     case WM_ERASEBKGND: return 1;
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
         if (g->focus != w->hwnd) win_set_focus(st, w->hwnd);
-        int b = (w->style & WS_BORDER) || (w->exstyle & WS_EX_CLIENTEDGE);
-        int i = w->top_index + ((int16_t)HIWORD(lp) - b) / lb_item_height(w);
+        int i = lb_index_at(w, (int16_t)HIWORD(lp));
         if (i >= 0 && i < w->item_count) {
             lb_select(st, w, i, 1);
             if (msg == WM_LBUTTONDBLCLK && (w->style & 1)) win_notify_parent(st, w, 2); // LBN_DBLCLK
@@ -1297,10 +1350,24 @@ static uint64_t listbox_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, ui
     case 0x191: if (w->cur_sel >= 0 && wp > 0 && lp) { mem_wr(lp, 4, (uint32_t)w->cur_sel); return 1; } return 0; // LB_GETSELITEMS
     case 0x18E: return (uint64_t)w->top_index;                                         // LB_GETTOPINDEX
     case 0x197: w->top_index = (int)(int32_t)wp; lb_ensure_visible(w); win_invalidate_rect(w, NULL, 1); return 0;
-    case 0x1A1: return (uint64_t)lb_item_height(w);                                    // LB_GETITEMHEIGHT
-    case 0x1A0: return 0;
-    case 0x198: { int i = (int)(int32_t)wp, ih = lb_item_height(w); int32_t rc[4] = { 0, (i - w->top_index) * ih, w->w, (i - w->top_index + 1) * ih }; if (lp) memcpy(G2H(lp), rc, 16); return 1; }
-    case 0x1A9: { int i = w->top_index + (int16_t)HIWORD(lp) / lb_item_height(w); return i < w->item_count ? (uint64_t)i : 0x10000u; }
+    case 0x1A1: return (uint64_t)lb_h(w, (int)(int32_t)wp);                            // LB_GETITEMHEIGHT
+    case 0x1A0: { // LB_SETITEMHEIGHT
+        int i = (int)(int32_t)wp, v = (int)(lp & 0xFFFF);
+        if (v <= 0 || v > 255) return (uint64_t)-1;
+        if ((w->style & 0x20) && i >= 0 && i < w->item_count) w->item_h[i] = v; else w->fixed_h = v;
+        if (!(w->style & 0x30)) w->fixed_h = 0;
+        win_invalidate_rect(w, NULL, 1);
+        return 0;
+    }
+    case 0x198: { // LB_GETITEMRECT
+        int i = (int)(int32_t)wp;
+        if (i < 0 || i >= w->item_count) return (uint64_t)-1;
+        int y = lb_item_top(w, i);
+        int32_t rc[4] = { 0, y, w->w, y + lb_h(w, i) };
+        if (lp) memcpy(G2H(lp), rc, 16);
+        return 1;
+    }
+    case 0x1A9: { int i = lb_index_at(w, (int16_t)HIWORD(lp)); return i < w->item_count ? (uint64_t)i : 0x10000u | (uint64_t)(w->item_count ? w->item_count - 1 : 0); }
     case 0x194: case 0x195: return 0;
     case WM_ENABLE: win_invalidate_rect(w, NULL, 1); return 0;
     default: return win_def_proc(st, w, msg, wp, lp, unicode);

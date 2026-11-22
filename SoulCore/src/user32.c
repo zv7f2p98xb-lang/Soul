@@ -246,6 +246,7 @@ int ctl_class_for(const char *name) {
     return c ? c->builtin : 0;
 }
 
+static int builtin_of(uint64_t proc);
 static void register_class(X86State *st, int wide, int ex) {
     const uint64_t wc = ARG(0);
     const char *L = ex ? L_WNDCLASSEX : L_WNDCLASS;
@@ -254,13 +255,15 @@ static void register_class(X86State *st, int wide, int ex) {
     char *cname = name < 0x10000 ? NULL : gstr(name, wide);
     if (!cname) { RET(0); return; }
     WinClass *c = NULL;
-    for (int i = 0; i < 256 && !c; i++) if (g_gui.classes[i].used && !g_gui.classes[i].builtin && strcasecmp(g_gui.classes[i].name, cname) == 0) c = &g_gui.classes[i];
+    for (int i = 0; i < 256 && !c; i++)
+        if (g_gui.classes[i].used && !g_gui.classes[i].builtin && g_gui.classes[i].pid == (g_proc ? g_proc->pid : 0) && strcasecmp(g_gui.classes[i].name, cname) == 0) c = &g_gui.classes[i];
     if (c) { free(cname); set_last_error(st, 1410); RET(0); return; } // ERROR_CLASS_ALREADY_EXISTS
     c = class_add(cname);
     free(cname);
     if (!c) { RET(0); return; }
     c->style = (uint32_t)gs_get(wc, L, o);
     c->wndproc = gs_get(wc, L, 1 + o);
+    c->base_ctl = builtin_of(c->wndproc); // e.g. Delphi's TButton/TListBox: GetClassInfo("BUTTON") + RegisterClass
     c->cls_extra = (int32_t)gs_get(wc, L, 2 + o); c->wnd_extra = (int32_t)gs_get(wc, L, 3 + o);
     c->hinst = gs_get(wc, L, 4 + o);
     c->icon = gs_get(wc, L, 5 + o);
@@ -372,6 +375,9 @@ static int builtin_of(uint64_t proc) {
 static uint64_t call_proc(X86State *st, Win *w, uint64_t proc, uint32_t msg, uint64_t wp, uint64_t lp, int unicode) {
     int b = builtin_of(proc);
     if (b) {
+        // a program's own class that forwards to a system control's procedure (Delphi's VCL does this
+        // through CallWindowProc) is that control
+        if (!w->ctl && b != CTL_DIALOG) w->ctl = b;
         int saved = g_gui.cur_unicode;
         g_gui.cur_unicode = unicode;
         uint64_t r = b == CTL_DIALOG ? dlg_proc(st, w, msg, wp, lp, unicode) : ctl_proc(st, w, b, msg, wp, lp, unicode);
@@ -633,7 +639,7 @@ uint64_t win_create(X86State *st, uint32_t exstyle, uint64_t cls_arg, uint64_t n
     w->enabled = !(style & WS_DISABLED);
     w->tid = cur_tid();
     w->pid = g_proc ? g_proc->pid : 0;
-    w->ctl = c->builtin;
+    w->ctl = c->builtin ? c->builtin : c->base_ctl;
     w->limit = 30000;
     w->cur_sel = -1;
     w->progress_max = 100;
@@ -755,6 +761,7 @@ static void destroy_rec(X86State *st, Win *w) {
     for (int i = 0; i < w->item_count; i++) free(w->items[i]);
     free(w->items);
     free(w->item_data);
+    free(w->item_h); w->item_h = NULL;
     if (w->cdata && w->cdata_free) w->cdata_free(w->cdata);
     w->cdata = NULL;
     bump();
@@ -1400,11 +1407,75 @@ HLE(u_DrawEdge) {
     if (flags & 0x2000) memcpy(rp, r, 16);                                          // BF_ADJUST
     RET(1);
 }
+// Classic frame controls: check boxes, radio buttons, push buttons, scroll arrows, caption buttons.
 HLE(u_DrawFrameControl) {
-    int32_t r[4]; memcpy(r, PTR(1), 16);
-    uint32_t state = (uint32_t)ARG(3);
-    gdi_fill_rect_px(ARG(0), r[0], r[1], r[2], r[3], (state & 0x200) ? 0xCCE4F7 : 0xE1E1E1);
-    gdi_frame_rect_px(ARG(0), r[0], r[1], r[2], r[3], 0xADADAD);
+    uint64_t hdc = ARG(0);
+    int32_t r[4];
+    memcpy(r, PTR(1), 16);
+    uint32_t type = (uint32_t)ARG(2), state = (uint32_t)ARG(3);
+    int x0 = r[0], y0 = r[1], x1 = r[2], y1 = r[3];
+    int inactive = (state & 0x100) != 0, pushed = (state & 0x200) != 0, checked = (state & 0x400) != 0;
+    uint32_t ink = inactive ? 0xA0A0A0 : 0x333333;
+    switch (type) {
+    case 4: { // DFC_BUTTON
+        uint32_t kind = state & 0x1F;
+        if (kind == 0x10) { // DFCS_BUTTONPUSH
+            gdi_fill_rect_px(hdc, x0, y0, x1, y1, pushed ? 0xF7E4CC : 0xE1E1E1);
+            gdi_frame_rect_px(hdc, x0, y0, x1, y1, pushed ? 0x995400 : 0xADADAD);
+            break;
+        }
+        int sz = (x1 - x0) < (y1 - y0) ? (x1 - x0) : (y1 - y0);
+        int bx = x0 + ((x1 - x0) - sz) / 2, by = y0 + ((y1 - y0) - sz) / 2;
+        uint32_t fill = inactive ? 0xF0F0F0 : pushed ? 0xF7E4CC : 0xFFFFFF;
+        if (kind == 4 || kind == 1 || kind == 2) { // radio
+            gdi_fill_ellipse_px(hdc, bx, by, bx + sz, by + sz, fill, ink);
+            if (checked) { int d = sz / 4 + 1; gdi_fill_ellipse_px(hdc, bx + d, by + d, bx + sz - d, by + sz - d, ink, ink); }
+            break;
+        }
+        gdi_fill_rect_px(hdc, bx, by, bx + sz, by + sz, fill);
+        gdi_frame_rect_px(hdc, bx, by, bx + sz, by + sz, ink);
+        if (checked && kind == 8) gdi_fill_rect_px(hdc, bx + 3, by + 3, bx + sz - 3, by + sz - 3, 0xA0A0A0); // 3-state: grey
+        else if (checked) {
+            int s = sz;
+            gdi_line_px(hdc, bx + s * 3 / 13, by + s * 6 / 13, bx + s * 5 / 13, by + s * 9 / 13, ink, s >= 12 ? 2 : 1);
+            gdi_line_px(hdc, bx + s * 5 / 13, by + s * 9 / 13, bx + s * 10 / 13, by + s * 3 / 13, ink, s >= 12 ? 2 : 1);
+        }
+        break;
+    }
+    case 3: { // DFC_SCROLL: arrows
+        gdi_fill_rect_px(hdc, x0, y0, x1, y1, pushed ? 0xDADADA : 0xF0F0F0);
+        gdi_frame_rect_px(hdc, x0, y0, x1, y1, 0xC8C8C8);
+        int cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, k = ((x1 - x0) < (y1 - y0) ? (x1 - x0) : (y1 - y0)) / 4;
+        uint32_t dir = state & 0x1F;
+        for (int i = 0; i <= k; i++) {
+            if (dir == 0) gdi_fill_rect_px(hdc, cx - i, cy - k / 2 + i, cx + i + 1, cy - k / 2 + i + 1, ink);           // up
+            else if (dir == 1 || dir == 5) gdi_fill_rect_px(hdc, cx - (k - i), cy - k / 2 + i, cx + (k - i) + 1, cy - k / 2 + i + 1, ink); // down / combo
+            else if (dir == 2) gdi_fill_rect_px(hdc, cx - k / 2 + i, cy - i, cx - k / 2 + i + 1, cy + i + 1, ink);      // left
+            else if (dir == 3) gdi_fill_rect_px(hdc, cx - k / 2 + i, cy - (k - i), cx - k / 2 + i + 1, cy + (k - i) + 1, ink); // right
+        }
+        break;
+    }
+    case 1: { // DFC_CAPTION: close / minimize / maximize / restore / help
+        gdi_fill_rect_px(hdc, x0, y0, x1, y1, pushed ? 0xDADADA : 0xF0F0F0);
+        int m = (x1 - x0) / 4;
+        uint32_t g = state & 0x1F;
+        if (g == 0) { gdi_line_px(hdc, x0 + m, y0 + m, x1 - m, y1 - m, ink, 1); gdi_line_px(hdc, x1 - m, y0 + m, x0 + m, y1 - m, ink, 1); }
+        else if (g == 1) gdi_fill_rect_px(hdc, x0 + m, y1 - m - 1, x1 - m, y1 - m, ink);
+        else gdi_frame_rect_px(hdc, x0 + m, y0 + m, x1 - m, y1 - m, ink);
+        break;
+    }
+    case 2: { // DFC_MENU: check mark / bullet / submenu arrow
+        uint32_t g = state & 0x1F;
+        int cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+        if (g == 1 || g == 3) { gdi_line_px(hdc, x0 + 3, cy, cx - 1, y1 - 4, ink, 2); gdi_line_px(hdc, cx - 1, y1 - 4, x1 - 3, y0 + 3, ink, 2); }
+        else if (g == 2) gdi_fill_ellipse_px(hdc, cx - 3, cy - 3, cx + 3, cy + 3, ink, ink);
+        else for (int i = 0; i < 4; i++) gdi_fill_rect_px(hdc, cx - 2 + i, cy - 3 + i, cx - 1 + i, cy + 4 - i, ink);
+        break;
+    }
+    default:
+        gdi_fill_rect_px(hdc, x0, y0, x1, y1, 0xE1E1E1);
+        gdi_frame_rect_px(hdc, x0, y0, x1, y1, 0xADADAD);
+    }
     RET(1);
 }
 static void draw_text(X86State *st, int wide, int ex) {
@@ -1898,7 +1969,11 @@ static int peek(X86State *st, uint64_t out, uint64_t filter, uint32_t mn, uint32
     }
     if (!(mn || mx) || (WM_PAINT >= mn && WM_PAINT <= mx)) {
         Win *w = find_paint(tid, filter);
-        if (w) { write_msg(out, w->hwnd, WM_PAINT, 0, 0, tick_ms(), g->mouse_x, g->mouse_y, 0); return 1; }
+        if (w) {
+            if (getenv("SOUL_DEBUG_PAINT")) soul_log("[paint] %llx %s %dx%d@%d,%d inv=%d,%d-%d,%d\n", (unsigned long long)w->hwnd, w->cls ? w->cls->name : "?", w->w, w->h, w->x, w->y, w->ix0, w->iy0, w->ix1, w->iy1);
+            write_msg(out, w->hwnd, WM_PAINT, 0, 0, tick_ms(), g->mouse_x, g->mouse_y, 0);
+            return 1;
+        }
     }
     if (!(mn || mx) || (WM_TIMER >= mn && WM_TIMER <= mx)) {
         double now = soul_now();
@@ -2578,7 +2653,61 @@ static void load_string(X86State *st, int wide) {
 }
 HLE(u_LoadStringA) { load_string(st, 0); }
 HLE(u_LoadStringW) { load_string(st, 1); }
+// Windows' own bitmaps (LoadBitmap(NULL, OBM_...)): check boxes, arrows, caption glyphs.
+static void put_px(uint32_t *px, int stride, int x, int y, uint32_t c) { px[(size_t)y * (size_t)stride + (size_t)x] = c; }
+static void draw_check_cell(uint32_t *px, int stride, int ox, int oy, int kind, int checked, int pushed) {
+    const uint32_t face = 0xFFF0F0F0u, white = pushed ? 0xFFDADADAu : 0xFFFFFFFFu, ink = 0xFF333333u, frame = 0xFF808080u;
+    for (int y = 0; y < 13; y++) for (int x = 0; x < 13; x++) {
+        uint32_t c = face;
+        if (kind == 1) { // radio
+            int dx = 2 * x - 12, dy = 2 * y - 12, d = dx * dx + dy * dy;
+            c = d <= 144 ? (d >= 100 ? frame : white) : face;
+            if (checked && d <= 25) c = ink;
+        } else {
+            c = (x == 0 || y == 0 || x == 12 || y == 12) ? frame : white;
+            if (checked && kind == 2 && x >= 3 && x <= 9 && y >= 3 && y <= 9) c = 0xFFA0A0A0u;
+        }
+        put_px(px, stride, ox + x, oy + y, c);
+    }
+    if (checked && kind == 0) {
+        static const int mark[][2] = { {3,6},{3,7},{4,7},{4,8},{5,8},{5,9},{6,8},{6,7},{7,7},{7,6},{8,6},{8,5},{9,5},{9,4},{10,4},{10,3} };
+        for (size_t i = 0; i < sizeof mark / sizeof mark[0]; i++) { put_px(px, stride, ox + mark[i][0], oy + mark[i][1], ink); put_px(px, stride, ox + mark[i][0], oy + mark[i][1] - 1, ink); }
+    }
+}
+static uint64_t system_bitmap(uint32_t id) {
+    if (id == 32759) { // OBM_CHECKBOXES: 4 x 3 cells of 13 x 13
+        uint32_t *px = calloc(52 * 39, 4);
+        for (int row = 0; row < 3; row++)
+            for (int col = 0; col < 4; col++) draw_check_cell(px, 52, col * 13, row * 13, row, col & 1, col >= 2);
+        uint64_t h = gdi_bitmap_from_argb(px, 52, 39);
+        free(px);
+        return h;
+    }
+    int w = id == 32760 ? 13 : 16, h = w; // OBM_CHECK 13 x 13, others 16 x 16
+    uint32_t *px = malloc((size_t)w * (size_t)h * 4);
+    for (int i = 0; i < w * h; i++) px[i] = 0xFFF0F0F0u;
+    const uint32_t ink = 0xFF333333u;
+    int cx = w / 2, cy = h / 2;
+    switch (id) {
+    case 32760: draw_check_cell(px, w, 0, 0, 0, 1, 0); for (int i = 0; i < w * h; i++) if (px[i] != ink) px[i] = 0xFFFFFFFFu; break; // OBM_CHECK
+    case 32753: case 32752: case 32739: case 32738: case 32751: case 32750: // arrows: up, down, menu, combo, right, left
+        for (int i = 0; i <= 3; i++)
+            for (int k = -i; k <= i; k++) {
+                if (id == 32753) put_px(px, w, cx + k, cy - 2 + i, ink);
+                else if (id == 32752 || id == 32738) put_px(px, w, cx + k, cy + 1 - i, ink);
+                else if (id == 32751 || id == 32739) put_px(px, w, cx + 1 - i, cy + k, ink);
+                else put_px(px, w, cx - 2 + i, cy + k, ink);
+            }
+        break;
+    case 32754: for (int i = 4; i < 12; i++) { put_px(px, w, i, i, ink); put_px(px, w, 15 - i, i, ink); } break; // OBM_CLOSE
+    default: for (int i = 4; i < 12; i++) { put_px(px, w, i, 4, ink); put_px(px, w, i, 11, ink); put_px(px, w, 4, i, ink); put_px(px, w, 11, i, ink); }
+    }
+    uint64_t hb = gdi_bitmap_from_argb(px, w, h);
+    free(px);
+    return hb;
+}
 static void load_bitmap(X86State *st, int wide) {
+    if (!ARG(0) && ARG(1) < 0x10000) { RET(system_bitmap((uint32_t)ARG(1))); return; }
     const uint8_t *r = pe_resource(ARG(0), 2, ARG(1), wide, NULL);
     RET(r ? gdi_bitmap_from_dib(r, NULL) : 0);
 }
@@ -2862,6 +2991,7 @@ void gui_process_exit(uint32_t pid) {
         for (int k = 0; k < w->item_count; k++) free(w->items[k]);
         free(w->items); w->items = NULL;
         free(w->item_data); w->item_data = NULL;
+        free(w->item_h); w->item_h = NULL;
         w->item_count = 0;
         if (w->cdata && w->cdata_free) w->cdata_free(w->cdata);
         w->cdata = NULL;
@@ -2899,7 +3029,7 @@ void gui_shutdown(void) {
         if (!w->used) continue;
         free(w->pixels); free(w->text); free(w->extra);
         for (int k = 0; k < w->item_count; k++) free(w->items[k]);
-        free(w->items); free(w->item_data);
+        free(w->items); free(w->item_data); free(w->item_h);
         if (w->cdata && w->cdata_free) w->cdata_free(w->cdata);
     }
     for (int i = 0; i < MENU_MAX; i++) free(g->menus[i].items);

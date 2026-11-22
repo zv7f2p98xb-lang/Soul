@@ -1256,6 +1256,31 @@ static char *tv_text(X86State *st, Win *w, int i) {
     nm_free(&n);
     return t ? t : xstrdup("");
 }
+// TVHT_* flags for a client point; *item gets the item index (or -1).
+static uint32_t tv_hit(Win *w, TvData *d, int px, int y, int *item) {
+    *item = -1;
+    if (y < 0) return 0x100;                       // TVHT_ABOVE
+    if (y >= w->h) return 0x200;                   // TVHT_BELOW
+    int ih = tv_item_h(w);
+    int *items = malloc(sizeof(int) * 4096), *depth = malloc(sizeof(int) * 4096);
+    int n = tv_visible(d, items, depth, 4096), r = d->top + y / ih;
+    int i = r < n ? items[r] : -1, dep = r < n ? depth[r] : 0;
+    free(items); free(depth);
+    if (i < 0) return 1;                           // TVHT_NOWHERE
+    *item = i;
+    int rootline = (w->style & 4) != 0 && (w->style & 3);
+    int x = 2 + (dep + (rootline ? 1 : 0)) * d->indent;
+    if (px < x - d->indent) return 8;              // TVHT_ONITEMINDENT
+    if (px < x) return tv_has_children(d, i) ? 0x10 : 8; // TVHT_ONITEMBUTTON
+    int scx = 0, scy = 0;
+    if (d->iml_state && iml_size(d->iml_state, &scx, &scy)) { if (px < x + scx) return 0x40; x += scx + 2; } // TVHT_ONITEMSTATEICON
+    else if (w->style & 0x100) { if (px < x + 15) return 0x40; x += 17; }
+    int icx = 0, icy = 0;
+    if (iml_size(d->iml, &icx, &icy)) { if (px < x + icx) return 2; x += icx + 3; } // TVHT_ONITEMICON
+    int tw = d->it[i].text ? cc_textw(w, d->it[i].text) : 0;
+    return px < x + tw + 4 ? 4 : 0x20;            // TVHT_ONITEMLABEL / TVHT_ONITEMRIGHT
+}
+
 static void tv_paint(X86State *st, Win *w) {
     TvData *d = tv_data(w);
     uint64_t h = w->hwnd;
@@ -1277,7 +1302,12 @@ static void tv_paint(X86State *st, Win *w) {
             gdi_line_px(p.hdc, bx + 2, by + 4, bx + 7, by + 4, 0x333333, 1);
             if (!(d->it[i].state & TVIS_EXPANDED)) gdi_line_px(p.hdc, bx + 4, by + 2, bx + 4, by + 7, 0x333333, 1);
         }
-        if (w->style & 0x100) { uint32_t c = (d->it[i].state >> 12) & 15; cc_check(p.hdc, x, y + (ih - 13) / 2, c == 2, w->enabled); x += 17; } // TVS_CHECKBOXES
+        uint32_t sidx = (d->it[i].state >> 12) & 15;
+        int scx = 0, scy = 0;
+        if (d->iml_state && iml_size(d->iml_state, &scx, &scy)) { // the program's state images (index 0 = none)
+            if (sidx) iml_draw(d->iml_state, (int)sidx, p.hdc, x, y + (ih - scy) / 2);
+            x += scx + 2;
+        } else if (w->style & 0x100) { cc_check(p.hdc, x, y + (ih - 13) / 2, sidx == 2, w->enabled); x += 17; } // TVS_CHECKBOXES
         if (has_img) {
             int im = (d->it[i].state & TVIS_SELECTED) || i == d->sel ? d->it[i].simage : d->it[i].image;
             if (im >= 0) iml_draw(d->iml, im, p.hdc, x, y + (ih - icy) / 2);
@@ -1429,8 +1459,11 @@ static uint64_t treeview_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, u
         if (i >= 0) {
             int rootline = (w->style & 4) != 0 && (w->style & 3);
             int x0 = 2 + (dep + (rootline ? 1 : 0)) * d->indent;
-            if (msg != WM_RBUTTONDOWN && x >= x0 - d->indent && x < x0 && tv_has_children(d, i)) { tv_expand(st, w, i, 3); return 0; }
-            if (msg == WM_LBUTTONDOWN && (w->style & 0x100) && x >= x0 && x < x0 + 15) {
+            int hi;
+            uint32_t part = tv_hit(w, d, x, y, &hi);
+            (void)x0;
+            if (msg != WM_RBUTTONDOWN && part == 0x10) { tv_expand(st, w, i, 3); return 0; }
+            if (msg == WM_LBUTTONDOWN && (w->style & 0x100) && part == 0x40) {
                 uint32_t c = (d->it[i].state >> 12) & 15;
                 d->it[i].state = (d->it[i].state & ~0xF000u) | ((c == 2 ? 1u : 2u) << 12);
                 invalidate(w);
@@ -1562,14 +1595,12 @@ static uint64_t treeview_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, u
         memcpy(G2H(lp), rc, 16);
         return 1;
     }
-    case 0x1111: {                                                                         // TVM_HITTEST (pt, flags, hItem)
+    case 0x1111: { // TVM_HITTEST (pt, flags, hItem): which part of which item is at the point
         if (!lp) return 0;
-        int y = (int32_t)mem_rd(lp + 4, 4), ih = tv_item_h(w);
-        int *items = malloc(sizeof(int) * 4096), *depth = malloc(sizeof(int) * 4096);
-        int n = tv_visible(d, items, depth, 4096), r = d->top + y / ih;
-        int i = y >= 0 && r < n ? items[r] : -1;
-        free(items); free(depth);
-        mem_wr(lp + 8, 4, i >= 0 ? 4 : 1);
+        int px = (int32_t)mem_rd(lp, 4), y = (int32_t)mem_rd(lp + 4, 4);
+        int i = -1;
+        uint32_t flags = tv_hit(w, d, px, y, &i);
+        mem_wr(lp + 8, 4, flags);
         wr_ptr(lp + gs_off("444P", 3), tv_handle(i));
         return tv_handle(i);
     }

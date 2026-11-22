@@ -84,6 +84,14 @@ static uint64_t make_bitmap(int w, int hgt, int bpp, int top_down, uint8_t *bits
 }
 
 uint64_t gdi_default_font(void) { return g_stock[17]; }
+// A 32-bit top-down bitmap with the given 0xAARRGGBB pixels.
+uint64_t gdi_bitmap_from_argb(const uint32_t *px, int w, int h) {
+    uint64_t hb = make_bitmap(w, h, 32, 1, NULL, 0);
+    GdiObj *o = gdi_get(hb, GO_BITMAP);
+    if (!o) return 0;
+    for (int y = 0; y < h; y++) memcpy(o->surf.bits + (size_t)y * o->surf.stride, px + (size_t)y * w, (size_t)w * 4);
+    return hb;
+}
 uint64_t gdi_make_brush(uint32_t colorref) { return make_brush(colorref & 0xFFFFFF, 0, 0); }
 uint64_t gdi_make_font(int height, int weight, const char *face) { return make_font(height, weight, 0, 0, face, 0); }
 

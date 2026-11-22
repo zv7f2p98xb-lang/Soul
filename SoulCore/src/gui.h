@@ -105,6 +105,7 @@ typedef struct WinClass {
     int builtin;                  // CTL_* for system classes
     uint16_t atom;
     uint32_t pid;                 // registering process (0 = system class, visible to all)
+    int base_ctl;                 // a program class built on a system control ("superclass"): its CTL_*
 } WinClass;
 
 typedef struct MenuItem {
@@ -158,7 +159,9 @@ typedef struct Win {
     int cur_sel, top_index;       // list / combo
     char **items;                 // listbox / combobox strings
     uint64_t *item_data;
+    int *item_h;                  // owner-draw variable list boxes: each item's height (WM_MEASUREITEM)
     int item_count, item_cap;
+    int fixed_h;                  // owner-draw fixed list boxes: the measured item height (0 = not yet)
     int progress_min, progress_max, progress_pos;
     uint64_t image;               // static / button image (HBITMAP)
     // dialogs
@@ -328,6 +331,7 @@ void gui_reset(void);
 void gui_shutdown(void);
 void gui_process_exit(uint32_t pid);   // destroys the windows and classes of an ended process
 void gdi_process_exit(uint32_t pid);   // frees the GDI objects of an ended process
+uint64_t gdi_bitmap_from_argb(const uint32_t *px, int w, int h);
 void gui_lock(void);
 void gui_unlock(void);
 uint64_t builtin_proc_addr(int ctl);
