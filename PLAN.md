@@ -1,78 +1,64 @@
-# Soul — sonraki tur planı: MSI kurulumları, GDI+, XAudio2
+# Soul — 2. tur planı: LZX'li .msi paketleri ve Direct3D 9
 
-Hedef: `.msi` kurulum paketlerini (Windows Installer) kurup kaldırabilmek, GDI+ kullanan programların
-(resim yükleme/çizim, .NET WinForms'un temeli) açılması ve XAudio2 kullanan oyunların ses vermesi.
-Kapsam dışı (sonraki tur): LZX/Quantum sıkıştırmalı CAB, MSI betik özel eylemleri (VBScript/JScript),
-MSI'nin kendi diyalog tabloları (Dialog/Control), WIC, Direct3D, .NET CLR.
+Hedef: (1) LZX ile sıkıştırılmış cab dosyalarını açarak gerçek .msi kurulumlarının çoğunu (Visual C++ runtime'ları,
+pek çok ticari program) kurabilmek; (2) Direct3D 9 kullanan programların ve oyunların çalışması — bu turda
+doğruluk için CPU'daki yazılım GPU'su (sgpu) üzerinde; hızlı Metal arka ucu 3. turda.
+Kapsam dışı (sonraki turlar): Metal arka ucu, D3DX9 (oyunların getirdiği d3dx9_xx.dll gerçek DLL olarak yüklenir;
+kendi uygulamamız yok), Direct3D 10/11, .NET, Quantum sıkıştırma.
 
-Tüm yollar `SoulCore/` altına göredir (uygulama dosyaları hariç). Derleme: `make` (yerel), `make arm64` (JIT,
-qemu-aarch64 ile). Test takımları: `tests/run_tests.sh`, `tests/win32/run_win32_tests.sh`, `tests/gui/run_gui_tests.sh`.
+Önceki tur (MSI, GDI+, XAudio2) tamamlandı: commit 8986bab, CI tümüyle yeşil.
 
 ## Gruplar ve sıra
 
 ```
-G0 (altyapı) ──┬──> G1a (MSI veritabanı + CAB) ──> G1b (MSI kurulum motoru + msiexec) ──┐
-               ├──> G2  (GDI+) ─────────────────────────────────────────────────────────┼──> G4 (entegrasyon)
-               └──> G3  (XAudio2) ──────────────────────────────────────────────────────┘
+G1 (LZX) ───────────────────────────────────────────────────────────────┐
+G0 (sgpu genişletme + gölgelendirici arayüzü) ──┬──> G2 (D3D9 API) ─────┼──> G4 (entegrasyon)
+                                                └──> G3 (D3D9 gölgelendiriciler) ┘
 ```
-G1a, G2, G3 paralel çalışır. Her grup yalnızca kendi dosyalarına dokunur.
+G0 ile G1 paralel; G0 bitince G2 ve G3 paralel. Her grup kendi worktree'sinde, yalnızca kendi dosyalarında.
 
 ---
 
-## G0 — Altyapı (önce, tek başına)
-Dosyalar: `src/inflate.c`, `src/inflate.h`, `src/registry.c`, `src/hle_com.c`, `src/hle.h`, `src/hle_core.c`,
-`src/hle_shell.c`, yeni boş iskeletler `src/msi_install.c`, `src/gdiplus.c`, `src/xaudio2.c`, `tests/unit/`.
+## G0 — sgpu genişletme ve gölgelendirici arayüzü (önce)
+Dosyalar: `src/sgpu.h`, `src/sgpu.c`, yeni `src/d3d9_shader.h` (yalnızca arayüz), `tests/unit/sgpu_test.c`.
 
 | # | Değişiklik | Kabul kriteri |
 |---|---|---|
-| 0.1 | `inflate.c/.h`: `long soul_inflate(in, in_len, out, out_cap, dict, dict_len)` (ham DEFLATE, isteğe bağlı ön sözlük — MSZIP blokları için) ve `long soul_zlib_inflate(in, in_len, out, out_cap)` (PNG için zlib sarmalayıcı). Hata/taşma = -1. | `tests/unit/inflate_test.c` (yerel gcc) Python `zlib` ile üretilen vektörleri (saklı, sabit, dinamik Huffman, sözlüklü) birebir açar. |
-| 0.2 | `registry.c`: ana taraf erişimi — `reg_host_set/get/delete_value/delete_tree/key_exists(root, subkey, name, …)` (UTF-8 dizgeler, REG_SZ/EXPAND_SZ/MULTI_SZ/DWORD/BINARY). `hle.h`'ye bildirimler. | Birim testi ya da küçük bir guest programı: `reg_host_set` ile yazılan değer `RegQueryValueExW` ile okunur; mevcut registry testleri geçer. |
-| 0.3 | `hle_com.c`: `int soul_lnk_write(host_path, target_win, args, workdir, desc, icon, icon_index, show)` dışa açılır (mevcut statik `lnk_write` kullanılır). `CoCreateInstance(Ex)` ve `CoGetClassObject` önce `xaudio2_com_create(st, clsid, riid, ppv)`'yi dener. | `soul_lnk_read` ile geri okunan alanlar aynı; multiproc testi geçer. |
-| 0.4 | `hle.h`/`hle_core.c`: `hle_msi_table`, `hle_gdiplus_table`, `hle_xaudio2_table` `find_entry`'ye eklenir; `xaudio2_7/8/9`, `xaudio2_9redist`, `x3daudio1_7`, `x3daudio1_9` sistem DLL listesine; `k_extra_stdcall`'a `XAudio2Create`=12 (X3DAudio fonksiyonları cdecl, eklenmez). `hle_shell.c`'deki GDI+ saplamaları silinir. İskelet dosyalar boş tablo ve `xaudio2_com_create` saplaması (`REGDB_E_CLASSNOTREG`) içerir. | `make` ve `make arm64` uyarısız; 52 + 23 + 10 test geçer. |
+| 0.1 | sgpu'ya Direct3D 9'un ihtiyaçları: 8 doku aşaması, genel "varying" öznitelikleri (≥ 10 × vec4, perspektif doğru), piksel başına programlanabilir aşama için geri çağrı (girdi: varying'ler + türevleri, çıktı: renk/derinlik/discard), şablon (stencil) tamponu ve işlemleri, ayrı alfa karışımı ve karışım işlemleri (add/sub/revsub/min/max), renk yazma maskesi, eğimli derinlik sapması, kullanıcı kırpma düzlemleri, nokta sprite'ları, sarma/ayna/sınır adresleme, örnekleme fonksiyonu `sg_sample()` (mip seçimi türevlerle). OpenGL ön yüzü değişmeden çalışır. | `sgpu_test` (yerel birim testi): stencil, karışım işlemleri, varying enterpolasyonu ve piksel geri çağrısı beklenen pikselleri verir; OpenGL GUI testleri (Küp 3B dahil) aynı. |
+| 0.2 | `d3d9_shader.h`: G2 ile G3 arasındaki sözleşme — `d3dsh_parse()` (SM 1.1–3.0 bayt kodu → derlenmiş yapı), `d3dsh_run_vs()` (köşe başına), `d3dsh_ps_callback` (sgpu piksel geri çağrısı), sabit/örnekleyici bağlama yapıları, girdi/çıktı semantikleri (POSITION, COLOR, TEXCOORDn, …). Boş uygulama iskeleti `src/d3d9_shader.c`. | `make` uyarısız; tüm takımlar geçer. |
 
-## G1a — MSI veritabanı ve CAB (G0'dan sonra)
-Dosyalar: `src/msi.h`, `src/msi_db.c`, `src/cab.c`, `tests/msi/` (wxs + derleme betiği + hazır `sample.msi`), `tests/unit/msidb_test.c`.
+## G1 — LZX sıkıştırma (G0 ile paralel)
+Dosyalar: `src/cab.c`, `tests/msi/lzx/` (kodlayıcı aracı, örnek cab ve msi), `tests/unit/msidb_test.c`, `tests/unit/run_unit_tests.sh`.
 
 | # | Değişiklik | Kabul kriteri |
 |---|---|---|
-| 1a.1 | `msi_db.c`: OLE bileşik dosya (CFB v3/v4, FAT/MiniFAT/dizin) okuyucu; MSI akış adı kodlaması (0x3800 tabanlı ad sıkıştırma); `_StringPool`/`_StringData` (kod sayfası, referans sayıları, 3 baytlık indeks bayrağı), `_Tables`/`_Columns` ile tablo şeması; sütun-ana (column-major) satır okuma; `\005SummaryInformation`. | `msidb_test sample.msi` tüm tabloları, satır sayılarını ve özet bilgisini doğru yazdırır (wixl'in girdisiyle karşılaştırılır). |
-| 1a.2 | `msi.h` arayüzü: `msidb_open/close`, `msidb_table_exists`, `msidb_rows`, `msidb_columns`, `msidb_str`, `msidb_int` (`MSI_NULL_INT`), `msidb_find`, `msidb_stream`, `msidb_summary`; basit SQL görünümü `msidb_query(db, sql, …)` (`SELECT kolonlar|* FROM t [WHERE a = 'x' AND b = ?]`). | `msidb_test` birkaç SQL sorgusunu doğru satırlarla döndürür. |
-| 1a.3 | `cab.c`: `cab_extract(buf, len, cb, ctx, err, errlen)` — CFHEADER/CFFOLDER/CFFILE/CFDATA, sıkıştırmasız ve MSZIP (blok arası 32 KB sözlükle `soul_inflate`); LZX/Quantum anlaşılır hata döndürür. | `sample.msi` içindeki gömülü cab'den çıkan dosyalar kaynak dosyalarla bayt bayt aynı. |
+| 1.1 | `cab.c`: LZX çözücü (pencere 2^15–2^21; verbatim, aligned, uncompressed bloklar; E8 dönüşümü; bloklar arası durum; tekrar mesafeleri). Bozuk veride çökme yok. | ASan/UBSan altında bozulma denemeleri temiz. |
+| 1.2 | Test verisi: Python ile basit bir LZX kodlayıcı (`tests/msi/lzx/lzxenc.py`; literal + eşleşme, verbatim ve aligned bloklar, E8 içeren x86 kodu) + `cabextract` (libmspack) ile çapraz doğrulama; pencere boyutları 15/16/21. Bu cab'ler gömülü bir `lzx.msi` paketine konur (msibuild). | Çözülen dosyalar kaynakla ve `cabextract` çıktısıyla bayt bayt aynı; `lzx.msi` sessiz kurulup kaldırılır (win32 msi testine bir bölüm). |
 
-## G1b — MSI kurulum motoru, msi.dll API'si ve msiexec (G1a'dan sonra)
-Dosyalar: `src/msi_install.c`, `tools/msiexec/msiexec.c`, `tools/gen_stub.py`, `src/msiexec_stub.h`, `tests/win32/msi.c`, `tests/win32/msi.expected`.
-
-| # | Değişiklik | Kabul kriteri |
-|---|---|---|
-| 1b.1 | Kurulum motoru: özellikler (ProgramFilesFolder, SystemFolder, AppDataFolder, ProgramMenuFolder, DesktopFolder, TARGETDIR=C:\\, VersionNT, Installed, ALLUSERS, UserLanguageID=1055 …), koşul ifadesi değerlendirici, Directory çözümleme, Feature/Component seçimi, `InstallExecuteSequence` standart eylemleri (CostInitialize…InstallFinalize: CreateFolders, InstallFiles, RemoveFiles, WriteRegistryValues, RemoveRegistryValues, CreateShortcuts, RemoveShortcuts, WriteIniValues, RegisterProduct/PublishProduct → Uninstall anahtarı), özel eylemler 51/35/19 ve 1/17 (DLL, guest'te `soul_guest_call`), 2/18/34/50 (EXE). Paket `C:\Windows\Installer\{ProductCode}.msi` olarak saklanır. | `tests/win32/msi.c` sessiz kurulumda dosyaları, kayıt değerini, kısayolu ve `MsiQueryProductStateW`=5'i doğrular; kaldırmada hepsi silinir. 64/32-bit ve JIT'te aynı çıktı. |
-| 1b.2 | msi.dll HLE tablosu: `MsiInstallProductA/W`, `MsiConfigureProduct(Ex)A/W`, `MsiSetInternalUI`, `MsiSetExternalUIA/W`, `MsiOpenPackage(Ex)A/W`, `MsiOpenDatabaseA/W`, `MsiDatabaseOpenViewA/W`, `MsiViewExecute/Fetch/Close`, `MsiRecord*`, `MsiGetProperty/SetPropertyA/W`, `MsiCloseHandle`, `MsiQueryProductStateA/W`, `MsiGetProductInfoA/W`, `MsiEnumProductsA/W`, `MsiGetSummaryInformation*`. Dış UI geri çağrısına ilerleme/eylem mesajları gider. | Test programı özel eylem DLL'inden `MsiGetPropertyW` ile özellik okur; ilerleme mesajları gelir. |
-| 1b.3 | `tools/msiexec/msiexec.c`: küçük bir 32-bit Win32 programı (Türkçe arayüz): `/i /x /a /qn /qb /passive PROP=değer` ayrıştırır; hoş geldin (ürün adı, kurulum klasörü), ilerleme çubuğu (dış UI geri çağrısı), bitiş/hata sayfaları. `gen_stub.py` bunu `src/msiexec_stub.h` bayt dizisine çevirir. | `soulrun msiexec.exe /i sample.msi /qn` kurar ve 0 döndürür; GUI betiğiyle *Kur* tıklanınca kurulum biter. |
-
-## G2 — GDI+ (G0'dan sonra, G1a/G3 ile paralel)
-Dosyalar: `src/gdiplus.c`, `src/imgcodec.c`, `src/imgcodec.h`, `tests/win32/gdiplus.c`, `tests/win32/gdiplus.expected`, `tests/win32/gdiplus_img/`.
+## G2 — Direct3D 9 API (G0'dan sonra, G3 ile paralel)
+Dosyalar: yeni `src/d3d9.c` (+ gerekirse `src/d3d9_res.c`, `src/d3d9_priv.h`), `tests/win32/d3d9.c`, `tests/win32/d3d9.expected`.
 
 | # | Değişiklik | Kabul kriteri |
 |---|---|---|
-| 2.1 | `imgcodec.c`: BMP, PNG (tüm renk türleri, interlace, `soul_zlib_inflate`), GIF (ilk kare, saydamlık), JPEG baseline + progressive → ARGB; BMP ve PNG kodlayıcı. | Python/PIL ile üretilen test görüntüleri belirlenen piksellerde doğru renkte çözülür (JPEG için ±8 tolerans). |
-| 2.2 | `gdiplus.c` düz API (~120 fonksiyon): Startup/Shutdown, Graphics (FromHDC/FromHWND/FromImage, Clear, dönüşümler, kırpma, smoothing), Pen/SolidBrush/LinearGradientBrush, çizgi/dikdörtgen/elips/yay/çokgen/yol (GraphicsPath) çizme-doldurma (kenar yumuşatma), Image/Bitmap (dosyadan, IStream'den, Scan0, HBITMAP/HICON dönüşümleri, LockBits, Get/SetPixel, Save), DrawImage ailesi (ölçekleme), Font/FontFamily/StringFormat, DrawString/MeasureString (mevcut GDI metin çizici). HDC hedefi: geçici ARGB katmanı + `gdi_draw_argb`. | `tests/win32/gdiplus.c` DIB bölümüne çizer, piksel değerleri beklenen çıktıyla aynı; 64/32-bit ve JIT'te aynı. |
+| 2.1 | `Direct3DCreate9(Ex)`, IDirect3D9(Ex): bağdaştırıcı bilgisi, yetenekler (D3DCAPS9, SM 3.0), ekran kipleri, biçim denetimi. IDirect3DDevice9(Ex) (tüm vtable): takas zinciri ve `Present` → pencerenin çerçeve tamponu, pencereli/tam ekran (pencereye ölçekli), `Reset`, cihaz kaybı yok. | Test programı cihaz oluşturur, `Clear` + `Present` sonrası pencere pikselleri doğru. |
+| 2.2 | Kaynaklar: yüzeyler, dokular (2D/küp/hacim, mip'ler), köşe/indis tamponları, `Lock/Unlock`, biçimler (A8R8G8B8, X8R8G8B8, R5G6B5, A1R5G5B5, A4R4G4B4, L8, A8L8, P8, DXT1–5, D16/D24S8…), `StretchRect`, `UpdateSurface/Texture`, `GetRenderTargetData`, `ColorFill`, render hedefi/derinlik değiştirme. | Kilitle/yaz/oku gidiş-dönüşleri ve DXT çözme referans değerlerle aynı. |
+| 2.3 | Durumlar ve çizim: render/örnekleyici/doku aşaması durumları, dönüşümler, ışıklandırma + malzeme (sabit işlev T&L), FVF ve köşe bildirimleri, `DrawPrimitive(UP)`, `DrawIndexedPrimitive(UP)`, state block'lar, sorgular (basit), `SetShader*`/sabitler → G3 arayüzü. | Test: sabit işlevli dokulu + ışıklı küp, alfa karışımı, stencil, sis — belirli piksellerde beklenen renkler (64/32-bit, JIT). |
 
-## G3 — XAudio2 (G0'dan sonra, paralel)
-Dosyalar: `src/audio.c`, `src/audio.h`, `src/xaudio2.c`, `tests/win32/xaudio2.cpp`, `tests/win32/xaudio2.expected`, `tests/win32/audio_check.py`.
-
-| # | Değişiklik | Kabul kriteri |
-|---|---|---|
-| 3.1 | `audio.c`'ye iç ses API'si (`audio.h`): kaynak ses oluştur/kuyruğa tampon ekle/başlat/durdur/temizle/frekans oranı/ses düzeyi, tampon bitti bildirimi için geri çağrı kancası. Mevcut waveOut/DirectSound davranışı değişmez. | Mevcut `audio` testleri ve kayıttaki tonlar aynı. |
-| 3.2 | `xaudio2.c`: `XAudio2Create` (2.8/2.9) ve `CoCreateInstance(CLSID_XAudio2)` (2.7, farklı vtable düzeni) — IXAudio2, mastering/submix/source voice, `SubmitSourceBuffer` (PCM 8/16/24/32, float; döngü bölgeleri), `GetState`, `IXAudio2VoiceCallback`/`IXAudio2EngineCallback` çağrıları süreç başına bir guest iş parçacığında; X3DAudio basit hesap. | `tests/win32/xaudio2.cpp`: iki tampon çalınır, OnBufferEnd ×2 ve OnStreamEnd gelir, `SamplesPlayed` doğru; `audio_check.py --tones 440,660` kayıtta tonları duyar. 64/32-bit, JIT. |
-
-## G4 — Entegrasyon (G1b, G2, G3'ten sonra)
-Dosyalar: `src/hle_core.c`, `include/SoulCore.h`, `src/hle_process.c`, `tests/win32/run_win32_tests.sh`,
-`App/Models/ProgramLibrary.swift`, `App/Models/WinProgram.swift`, `App/Models/SoulPaths.swift`, `README.md`.
+## G3 — Direct3D 9 gölgelendiricileri (G0'dan sonra, G2 ile paralel)
+Dosyalar: `src/d3d9_shader.c`, `tests/unit/d3dsh_test.c` (+ `tests/unit/shaders/` derlenmiş bayt kodları).
 
 | # | Değişiklik | Kabul kriteri |
 |---|---|---|
-| 4.1 | `soul_install_system_files(drive_c)` (SoulCore.h): msiexec stub'ını `C:\Windows\System32\msiexec.exe` olarak yazar; `hle_init_system` de çağırır. `hle_process.c` yerleşik araç listesinden `msiexec` çıkar (gerçek stub çalışır). | Bir guest programının `CreateProcess("msiexec /i x.msi /qn")` çağrısı kurulumu yapar. |
-| 4.2 | Uygulama: `.msi` dosyaları kurulum dosyası olarak tanınır; *Kur* `msiexec.exe /i "<msi>"` ile açılır; uygulama açılışında `soul_install_system_files` çağrılır; kurulum sonrası kısayol taraması mevcut akışla. | CI'de uygulama derlenir (Xcode); kod incelemesinde akış doğru. |
-| 4.3 | `run_win32_tests.sh`: msi, gdiplus, xaudio2 testleri (64/32-bit) eklenir; README uyumluluk tablosu ve yol haritası güncellenir. | Yerel + qemu JIT: tüm takımlar geçer. |
+| 3.1 | SM 1.1–3.0 bayt kodu ayrıştırıcı: tüm aritmetik komutlar, değiştiriciler (_sat, _x2, _bias, …), kaynak değiştiriciler/swizzle, yazma maskeleri, göreli adresleme, tanımlı sabitler (def/defi/defb), dcl'ler, akış denetimi (if/else, loop, rep, break, call/ret), `texld/texldl/texldd/texkill`, ps 1.x doku komutları (tex, texcoord, texbem…). | `d3dsh_test`: hazır derlenmiş gölgelendiricilerin (fxc ile üretilmiş, depoya eklenmiş bayt kodu) bilinen girdilerde çıktıları beklenen değerler. |
+| 3.2 | Yorumlayıcı: köşe gölgelendiricisi köşe başına, piksel gölgelendiricisi sgpu geri çağrısıyla piksel başına; türevler (dsx/dsy) varying türevlerinden. Hız için komutlar önceden çözülmüş bir diziye derlenir. | Birim testleri + G2 testinin gölgelendiricili bölümü (G4'te). |
+
+## G4 — Entegrasyon (G1, G2, G3'ten sonra)
+Dosyalar: `src/hle_core.c` (kayıt), `tests/win32/run_win32_tests.sh`, `tests/win32/d3d9.c` (gölgelendiricili sahne), `App/Samples` + örnek D3D9 programı, `App/Models/WinProgram.swift` (uyumluluk notu), `README.md`, CI.
+
+| # | Değişiklik | Kabul kriteri |
+|---|---|---|
+| 4.1 | D3D9 tablolarının kaydı, gölgelendiricili sahne testi (vs_2_0 + ps_2_0 dokulu/ışıklı, vs_3_0/ps_3_0 döngülü), örnek program "Küp 3B (Direct3D 9)". | Yerel + JIT: tüm takımlar geçer; örnek program simülatör testinde açılır. |
+| 4.2 | Uygulama: d3d9 kullanan programlarda "Direct3D desteklenmiyor" notu kaldırılır (d3d10/11/12 için kalır); README ve Hakkında güncellenir. | CI yeşil (Linux + IPA + simülatör). |
 
 ## Denetim (Opus)
-`git diff` incelemesi, tüm test takımları (yerel + JIT), her kabul kriteri için tablo halinde sonuç.
+Her grup sonrası `git diff` incelemesi ve testler; sonunda kabul kriterleri tablosu.
