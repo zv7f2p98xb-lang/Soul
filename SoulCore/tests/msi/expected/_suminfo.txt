@@ -1,0 +1,13 @@
+Title: Installation Database
+Subject: Soul örnek paketi
+Author: Soul Yazilim
+Keywords: Installer
+Comments: Test paketi
+Template: Intel;1033
+Revision number (UUID): {B0E46DC3-6014-4C67-9665-2CD7D85464CA}
+Created: Sun Nov 22 17:07:27 2026
+Last saved: Sun Nov 22 17:07:27 2026
+Version: 200 (c8)
+Source: 2 (2)
+Application: msitools 0.103
+Security: 2 (2)

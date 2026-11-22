@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Soul Örnek Uygulama" Language="1033" Codepage="1252" Version="1.2.3"
+           Manufacturer="Soul Yazilim" UpgradeCode="6B0E6F5A-3C1D-4D5B-9A7E-1F2E3D4C5B6A">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" Description="Soul örnek paketi" Comments="Test paketi" />
+    <Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" />
+    <Property Id="SOULPROP" Value="Merhaba" />
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLDIR" Name="Soul Örnek">
+          <Directory Id="DATADIR" Name="data">
+            <Component Id="CompData" Guid="11111111-2222-3333-4444-555555555501">
+              <File Id="ekTxt" Name="ek.txt" Source="files/data/ek.txt" KeyPath="yes" />
+            </Component>
+          </Directory>
+          <Component Id="CompMain" Guid="11111111-2222-3333-4444-555555555502">
+            <File Id="readmeTxt" Name="readme.txt" Source="files/readme.txt" KeyPath="yes" />
+            <File Id="blobBin" Name="blob.bin" Source="files/blob.bin" />
+          </Component>
+          <Component Id="CompReg" Guid="11111111-2222-3333-4444-555555555503">
+            <RegistryValue Root="HKLM" Key="Software\SoulOrnek" Name="Yol" Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
+            <RegistryValue Root="HKLM" Key="Software\SoulOrnek" Name="Sayi" Type="integer" Value="42" />
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="MenuDir" Name="Soul Örnek">
+          <Component Id="CompShortcut" Guid="11111111-2222-3333-4444-555555555504">
+            <Shortcut Id="readmeLnk" Name="Oku" Target="[INSTALLDIR]readme.txt" WorkingDirectory="INSTALLDIR" />
+            <RemoveFolder Id="RmMenu" On="uninstall" />
+            <RegistryValue Root="HKCU" Key="Software\SoulOrnek" Name="Kisayol" Type="integer" Value="1" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="Main" Title="Ana özellik" Level="1">
+      <ComponentRef Id="CompData" /><ComponentRef Id="CompMain" />
+      <ComponentRef Id="CompReg" /><ComponentRef Id="CompShortcut" />
+    </Feature>
+  </Product>
+</Wix>

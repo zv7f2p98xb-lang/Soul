@@ -1,0 +1,6 @@
+File	Component_	FileName	FileSize	Version	Language	Attributes	Sequence
+s72	s72	l255	i4	S72	S20	I2	i4
+File	File
+ekTxt	CompData	ek.txt	19			512	1
+readmeTxt	CompMain	readme.txt	46			512	2
+blobBin	CompMain	blob.bin	100000			512	3

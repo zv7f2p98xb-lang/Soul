@@ -1,0 +1,6 @@
+Registry	Root	Key	Name	Value	Component_
+s72	i2	l255	L255	L0	s72
+Registry	Registry
+reg65525F450FD6885DA4B2385423111057	2	Software\SoulOrnek	Yol	[INSTALLDIR]	CompReg
+reg913925CB640C46A8E6C30E02E7BD5FB8	2	Software\SoulOrnek	Sayi	#42	CompReg
+reg6B597D13E913C00734819F3C5DB4B3E0	1	Software\SoulOrnek	Kisayol	#1	CompShortcut
