@@ -150,6 +150,32 @@ void hle_invoke(X86State *st, uint32_t id) {
     th->skip_ret = 0;
 }
 
+// ---- guest structure layouts -----------------------------------------------------
+
+static int gs_field_size(char c) { return c == 'P' ? PSZ : c - '0'; }
+size_t gs_off(const char *spec, int field) {
+    size_t o = 0;
+    for (int i = 0; spec[i]; i++) {
+        int sz = gs_field_size(spec[i]);
+        o = (o + (size_t)sz - 1) & ~((size_t)sz - 1);
+        if (i == field) return o;
+        o += (size_t)sz;
+    }
+    return o;
+}
+size_t gs_size(const char *spec) {
+    size_t o = 0, al = 1;
+    for (int i = 0; spec[i]; i++) {
+        size_t sz = (size_t)gs_field_size(spec[i]);
+        o = (o + sz - 1) & ~(sz - 1);
+        o += sz;
+        if (sz > al) al = sz;
+    }
+    return (o + al - 1) & ~(al - 1);
+}
+uint64_t gs_get(uint64_t base, const char *spec, int field) { return mem_rd(base + gs_off(spec, field), gs_field_size(spec[field])); }
+void gs_set(uint64_t base, const char *spec, int field, uint64_t v) { mem_wr(base + gs_off(spec, field), gs_field_size(spec[field]), v); }
+
 // ---- handles -----------------------------------------------------------------
 
 uint64_t h_alloc(HType t, HObj **out) {

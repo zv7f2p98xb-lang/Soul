@@ -84,6 +84,7 @@ Dc *dc_get(uint64_t h);
 void gdi_release_dc(uint64_t h);
 uint64_t gdi_default_font(void);
 void gdi_reset_objects(void);
+void gdi_release_guest_bits(void); // frees DIB section pixels (guest memory) at process end
 uint64_t gdi_make_brush(uint32_t colorref);
 uint64_t gdi_make_font(int height, int weight, const char *face);
 uint64_t gdi_bitmap_from_dib(const uint8_t *bmi, const uint8_t *bits); // 32 bpp copy of a packed DIB

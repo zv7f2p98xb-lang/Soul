@@ -241,7 +241,8 @@ uint64_t soul_guest_call(X86State *st, uint64_t fn, int nargs, const uint64_t *a
         st->gpr[RSP] = sp32;
         st->rip = fn;
         soul_run_until_trap(st);
-        uint64_t r = (uint32_t)st->gpr[RAX] | ((uint64_t)(uint32_t)st->gpr[RDX] << 32);
+        // EAX, sign-extended like a 32-bit LRESULT / int so that callers see -1 as -1
+        uint64_t r = (uint64_t)(int64_t)(int32_t)st->gpr[RAX];
         st->gpr[RSP] = saved_rsp;
         st->rip = saved_rip;
         t->call_depth--;

@@ -155,6 +155,24 @@ void crt_flush_all(void);
 uint32_t k32_wait_objects(X86State *st, uint32_t n, const uint64_t *h, int all, uint32_t ms);
 void k32_shutdown(void); // releases per-process kernel32 state (fake modules, cached strings)
 
+// ---- guest structure layouts ------------------------------------------------------------------
+// Win32 structures with pointers, handles or WPARAM/LPARAM-sized fields are laid out differently
+// in 32-bit and 64-bit programs. A layout string lists the field types in order: '1' '2' '4' '8'
+// fixed-size fields and 'P' pointer-sized ones; offsets use natural alignment like MSVC.
+size_t gs_off(const char *spec, int field);
+size_t gs_size(const char *spec);
+uint64_t gs_get(uint64_t base, const char *spec, int field);
+void gs_set(uint64_t base, const char *spec, int field, uint64_t v);
+// Common layouts
+#define L_WNDCLASS "4P44PPPPPP"        // style proc clsExtra wndExtra hInst hIcon hCursor hbr menu class
+#define L_WNDCLASSEX "44P44PPPPPPP"    // cbSize style proc clsExtra wndExtra hInst hIcon hCursor hbr menu class hIconSm
+#define L_CREATESTRUCT "PPPP44444PP4"  // params hInst hMenu hwndParent cy cx y x style name class exStyle
+#define L_MSG "P4PP444"                // hwnd message wParam lParam time pt.x pt.y
+#define L_PAINTSTRUCT "P444444"        // hdc fErase rcPaint(4) fRestore
+#define L_WINDOWPOS "PP44444"          // hwnd hwndInsertAfter x y cx cy flags
+#define L_MENUITEMINFO "44444PPPPP4P"  // cbSize mask type state id hSubMenu hbmpChecked hbmpUnchecked data typeData cch hbmpItem
+#define L_NMHDR "PP4"                  // hwndFrom idFrom code
+
 // ---- printf / scanf engine ------------------------------------------------------
 typedef struct ArgSrc {
     X86State *st;

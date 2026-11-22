@@ -6,8 +6,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-#define CSTR(n) ((const char *)(uintptr_t)hle_arg(st, (n)))
-#define WSTR(n) ((const uint16_t *)(uintptr_t)hle_arg(st, (n)))
+#define CSTR(n) ((const char *)G2H(hle_arg(st, (n))))
+#define WSTR(n) ((const uint16_t *)G2H(hle_arg(st, (n))))
 #define ARGI(n) ((int32_t)hle_arg(st, (n)))
 #define CW_USEDEFAULT ((int32_t)0x80000000)
 #define HWND_MESSAGE ((uint64_t)-3)
@@ -36,16 +36,16 @@ uint32_t gui_sys_color(int i) { return i >= 0 && i < 31 ? k_sys_colors[i] : 0; }
 // Guest string argument as malloc'ed UTF-8 (NULL for NULL / integer atoms).
 static char *gstr(uint64_t p, int wide) {
     if (p < 0x10000) return NULL;
-    return wide ? w2u_dup((const uint16_t *)(uintptr_t)p) : strdup((const char *)(uintptr_t)p);
+    return wide ? w2u_dup((const uint16_t *)G2H(p)) : strdup((const char *)G2H(p));
 }
 // Writes UTF-8 text into a guest buffer of cap units; returns units written (without NUL).
 static size_t put_str(uint64_t dst, size_t cap, const char *s, int wide) {
     if (!dst || cap == 0) return 0;
-    if (wide) return u2w(s, -1, (uint16_t *)(uintptr_t)dst, cap);
+    if (wide) return u2w(s, -1, (uint16_t *)G2H(dst), cap);
     size_t n = strlen(s);
     if (n >= cap) n = cap - 1;
-    memcpy((void *)(uintptr_t)dst, s, n);
-    ((char *)(uintptr_t)dst)[n] = 0;
+    memcpy(G2H(dst), s, n);
+    ((char *)G2H(dst))[n] = 0;
     return n;
 }
 static size_t str_units(const char *s, int wide) {
@@ -240,10 +240,10 @@ int ctl_class_for(const char *name) {
 }
 
 static void register_class(X86State *st, int wide, int ex) {
-    const uint8_t *wc = PTR(0);
-    int o = ex ? 4 : 0; // WNDCLASSEX starts with cbSize
-    uint64_t name;
-    memcpy(&name, wc + (ex ? 64 : 64), 8);
+    const uint64_t wc = ARG(0);
+    const char *L = ex ? L_WNDCLASSEX : L_WNDCLASS;
+    int o = ex ? 1 : 0; // WNDCLASSEX starts with cbSize
+    uint64_t name = gs_get(wc, L, 9 + o);
     char *cname = name < 0x10000 ? NULL : gstr(name, wide);
     if (!cname) { RET(0); return; }
     WinClass *c = NULL;
@@ -252,17 +252,15 @@ static void register_class(X86State *st, int wide, int ex) {
     c = class_add(cname);
     free(cname);
     if (!c) { RET(0); return; }
-    uint32_t style; memcpy(&style, wc + o, 4);
-    c->style = style;
-    memcpy(&c->wndproc, wc + 8, 8);
-    int32_t ce, we; memcpy(&ce, wc + 16, 4); memcpy(&we, wc + 20, 4);
-    c->cls_extra = ce; c->wnd_extra = we;
-    memcpy(&c->hinst, wc + 24, 8);
-    memcpy(&c->icon, wc + 32, 8);
-    memcpy(&c->cursor, wc + 40, 8);
-    memcpy(&c->brush, wc + 48, 8);
-    memcpy(&c->menu_name, wc + 56, 8);
-    if (c->menu_name >= 0x10000) { char *m = gstr(c->menu_name, wide); uint16_t *wm = u2w_dup(m); free(m); c->menu_name = (uint64_t)(uintptr_t)wm; } // keep a private UTF-16 copy
+    c->style = (uint32_t)gs_get(wc, L, o);
+    c->wndproc = gs_get(wc, L, 1 + o);
+    c->cls_extra = (int32_t)gs_get(wc, L, 2 + o); c->wnd_extra = (int32_t)gs_get(wc, L, 3 + o);
+    c->hinst = gs_get(wc, L, 4 + o);
+    c->icon = gs_get(wc, L, 5 + o);
+    c->cursor = gs_get(wc, L, 6 + o);
+    c->brush = gs_get(wc, L, 7 + o);
+    c->menu_name = gs_get(wc, L, 8 + o);
+    if (c->menu_name >= 0x10000) { char *m = gstr(c->menu_name, wide); uint16_t *wm = u2w_gdup(m); free(m); c->menu_name = H2G(wm); } // keep a private UTF-16 copy (guest memory: pe_resource reads names there)
     c->unicode = wide;
     RET(c->atom);
 }
@@ -282,20 +280,17 @@ HLE(u_UnregisterClassW) { unregister_class(st, 1); }
 static void get_class_info(X86State *st, int wide, int ex) {
     WinClass *c = class_find(ARG(1), wide);
     if (!c) { set_last_error(st, 1411); RET(0); return; }
-    uint8_t *wc = PTR(2);
-    int o = ex ? 4 : 0;
-    memcpy(wc + o, &c->style, 4);
-    uint64_t proc = c->builtin ? builtin_proc_addr(c->builtin) : c->wndproc;
-    memcpy(wc + 8, &proc, 8);
-    int32_t ce = c->cls_extra, we = c->wnd_extra;
-    memcpy(wc + 16, &ce, 4); memcpy(wc + 20, &we, 4);
-    memcpy(wc + 24, &c->hinst, 8); memcpy(wc + 32, &c->icon, 8); memcpy(wc + 40, &c->cursor, 8);
-    memcpy(wc + 48, &c->brush, 8);
-    uint64_t zero = 0;
-    memcpy(wc + 56, &zero, 8);
-    uint64_t name = ARG(1);
-    memcpy(wc + 64, &name, 8);
-    if (ex) memcpy(wc + 72, &c->icon, 8);
+    const uint64_t wc = ARG(2);
+    const char *L = ex ? L_WNDCLASSEX : L_WNDCLASS;
+    int o = ex ? 1 : 0;
+    gs_set(wc, L, o, c->style);
+    gs_set(wc, L, 1 + o, c->builtin ? builtin_proc_addr(c->builtin) : c->wndproc);
+    gs_set(wc, L, 2 + o, (uint32_t)c->cls_extra); gs_set(wc, L, 3 + o, (uint32_t)c->wnd_extra);
+    gs_set(wc, L, 4 + o, c->hinst); gs_set(wc, L, 5 + o, c->icon); gs_set(wc, L, 6 + o, c->cursor);
+    gs_set(wc, L, 7 + o, c->brush);
+    gs_set(wc, L, 8 + o, 0);
+    gs_set(wc, L, 9 + o, ARG(1));
+    if (ex) gs_set(wc, L, 11, c->icon);
     RET(c->atom);
 }
 HLE(u_GetClassInfoA) { get_class_info(st, 0, 0); }
@@ -380,17 +375,17 @@ static uint64_t call_proc(X86State *st, Win *w, uint64_t proc, uint32_t msg, uin
     if (pu != unicode) { // translate string parameters between ANSI (UTF-8) and UTF-16
         if (msg == WM_SETTEXT && lp) {
             char *s = gstr(lp, unicode);
-            if (pu) tmp = u2w_dup(s); else tmp = strdup(s);
+            if (pu) tmp = u2w_gdup(s); else tmp = g_strdup(s);
             free(s);
-            lp = (uint64_t)(uintptr_t)tmp;
+            lp = H2G(tmp);
         } else if (msg == WM_GETTEXT && lp && wp) {
             size_t cap = (size_t)wp * 4 + 8;
-            tmp = calloc(1, cap);
-            uint64_t args[4] = { hwnd, msg, pu ? cap / 2 : cap, (uint64_t)(uintptr_t)tmp };
+            tmp = g_calloc(1, cap);
+            uint64_t args[4] = { hwnd, msg, pu ? cap / 2 : cap, H2G(tmp) };
             soul_guest_call(st, proc, 4, args);
             char *s = pu ? w2u_dup(tmp) : strdup(tmp);
             r = put_str(lp, (size_t)wp, s, unicode);
-            free(s); free(tmp);
+            free(s); g_free(tmp);
             return r;
         } else if (msg == WM_CHAR && !pu && wp >= 0x80) {
             char u8[8]; uint16_t c = (uint16_t)wp;
@@ -398,23 +393,24 @@ static uint64_t call_proc(X86State *st, Win *w, uint64_t proc, uint32_t msg, uin
             for (size_t i = 0; i < n; i++) { uint64_t a[4] = { hwnd, msg, (uint8_t)u8[i], lp }; soul_guest_call(st, proc, 4, a); }
             return 0;
         } else if ((msg == WM_CREATE || msg == WM_NCCREATE) && lp) {
-            uint8_t *cs = malloc(80);
-            memcpy(cs, (void *)(uintptr_t)lp, 80);
-            uint64_t name, cls;
-            memcpy(&name, cs + 56, 8); memcpy(&cls, cs + 64, 8);
+            size_t csz = gs_size(L_CREATESTRUCT);
+            uint8_t *cs = g_malloc(csz);
+            memcpy(cs, G2H(lp), csz);
+            uint64_t csg = H2G(cs);
+            uint64_t name = gs_get(csg, L_CREATESTRUCT, 9), cls = gs_get(csg, L_CREATESTRUCT, 10);
             void *n2 = NULL, *c2 = NULL;
-            if (name >= 0x10000) { char *s = gstr(name, unicode); n2 = pu ? (void *)u2w_dup(s) : (void *)strdup(s); free(s); name = (uint64_t)(uintptr_t)n2; }
-            if (cls >= 0x10000) { char *s = gstr(cls, unicode); c2 = pu ? (void *)u2w_dup(s) : (void *)strdup(s); free(s); cls = (uint64_t)(uintptr_t)c2; }
-            memcpy(cs + 56, &name, 8); memcpy(cs + 64, &cls, 8);
-            uint64_t a[4] = { hwnd, msg, wp, (uint64_t)(uintptr_t)cs };
+            if (name >= 0x10000) { char *s = gstr(name, unicode); n2 = pu ? (void *)u2w_gdup(s) : (void *)g_strdup(s); free(s); name = H2G(n2); }
+            if (cls >= 0x10000) { char *s = gstr(cls, unicode); c2 = pu ? (void *)u2w_gdup(s) : (void *)g_strdup(s); free(s); cls = H2G(c2); }
+            gs_set(csg, L_CREATESTRUCT, 9, name); gs_set(csg, L_CREATESTRUCT, 10, cls);
+            uint64_t a[4] = { hwnd, msg, wp, csg };
             r = soul_guest_call(st, proc, 4, a);
-            free(n2); free(c2); free(cs);
+            g_free(n2); g_free(c2); g_free(cs);
             return r;
         }
     }
     uint64_t args[4] = { hwnd, msg, wp, lp };
     r = soul_guest_call(st, proc, 4, args);
-    free(tmp);
+    g_free(tmp);
     return r;
 }
 
@@ -564,22 +560,23 @@ uint64_t win_create(X86State *st, uint32_t exstyle, uint64_t cls_arg, uint64_t n
     uint64_t hwnd = w->hwnd;
 
     // CREATESTRUCT
-    uint8_t *cs = calloc(1, 80);
-    memcpy(cs, &param, 8); memcpy(cs + 8, &hinst, 8); memcpy(cs + 16, &menu, 8); memcpy(cs + 24, &parent, 8);
-    int32_t geo[4] = { w->h, w->w, w->y, w->x };
-    memcpy(cs + 32, geo, 16);
-    memcpy(cs + 48, &style, 4);
-    memcpy(cs + 56, &name_arg, 8); memcpy(cs + 64, &cls_arg, 8);
-    memcpy(cs + 72, &exstyle, 4);
-    uint64_t csp = (uint64_t)(uintptr_t)cs;
+    uint8_t *cs = g_calloc(1, gs_size(L_CREATESTRUCT));
+    uint64_t csp = H2G(cs);
+    gs_set(csp, L_CREATESTRUCT, 0, param); gs_set(csp, L_CREATESTRUCT, 1, hinst);
+    gs_set(csp, L_CREATESTRUCT, 2, menu); gs_set(csp, L_CREATESTRUCT, 3, parent);
+    gs_set(csp, L_CREATESTRUCT, 4, (uint32_t)w->h); gs_set(csp, L_CREATESTRUCT, 5, (uint32_t)w->w);
+    gs_set(csp, L_CREATESTRUCT, 6, (uint32_t)w->y); gs_set(csp, L_CREATESTRUCT, 7, (uint32_t)w->x);
+    gs_set(csp, L_CREATESTRUCT, 8, style);
+    gs_set(csp, L_CREATESTRUCT, 9, name_arg); gs_set(csp, L_CREATESTRUCT, 10, cls_arg);
+    gs_set(csp, L_CREATESTRUCT, 11, exstyle);
     if (!win_send_ex(st, hwnd, WM_NCCREATE, 0, csp, wide) && win_get(hwnd)) {
-        free(cs);
+        g_free(cs);
         win_destroy(st, win_get(hwnd));
         return 0;
     }
-    if (!win_get(hwnd)) { free(cs); return 0; }
+    if (!win_get(hwnd)) { g_free(cs); return 0; }
     int64_t r = (int64_t)win_send_ex(st, hwnd, WM_CREATE, 0, csp, wide);
-    free(cs);
+    g_free(cs);
     w = win_get(hwnd);
     if (!w) return 0;
     if (r == -1) {
@@ -751,16 +748,14 @@ void win_move(X86State *st, Win *w, int x, int y, int cw, int ch, int flags) {
         if (p) win_invalidate_rect(p, r, 1);
     }
     if (w->visible || !w->parent) win_invalidate_rect(w, NULL, 1);
-    uint8_t wp[40] = { 0 };
-    memcpy(wp, &hwnd, 8);
-    int32_t geo[4] = { x, y, cw, ch };
-    memcpy(wp + 16, geo, 16);
-    uint32_t f = (uint32_t)flags | (moved ? 0 : 2) | (sized ? 0 : 1);
-    memcpy(wp + 32, &f, 4);
-    uint8_t *wpp = malloc(40);
-    memcpy(wpp, wp, 40);
-    win_send(st, hwnd, WM_WINDOWPOSCHANGED, 0, (uint64_t)(uintptr_t)wpp);
-    free(wpp);
+    uint8_t *wpp = g_calloc(1, gs_size(L_WINDOWPOS));
+    uint64_t wpg = H2G(wpp);
+    gs_set(wpg, L_WINDOWPOS, 0, hwnd);
+    gs_set(wpg, L_WINDOWPOS, 2, (uint32_t)x); gs_set(wpg, L_WINDOWPOS, 3, (uint32_t)y);
+    gs_set(wpg, L_WINDOWPOS, 4, (uint32_t)cw); gs_set(wpg, L_WINDOWPOS, 5, (uint32_t)ch);
+    gs_set(wpg, L_WINDOWPOS, 6, (uint32_t)flags | (moved ? 0 : 2) | (sized ? 0 : 1));
+    win_send(st, hwnd, WM_WINDOWPOSCHANGED, 0, wpg);
+    g_free(wpp);
     if (!w->parent) bump();
 }
 HLE(u_MoveWindow) {
@@ -977,7 +972,7 @@ static uint64_t window_long(X86State *st, int wide, int set, int size64) {
     case -21: old = w->userdata; if (set) w->userdata = v; return old;
     default: break;
     }
-    if (w->is_dialog && idx == 8) { old = w->dlgproc; if (set) w->dlgproc = v; return old; }
+    if (w->is_dialog && idx == PSZ) { old = w->dlgproc; if (set) w->dlgproc = v; return old; } // DWLP_DLGPROC
     int bytes = size64 ? 8 : 4;
     if (idx < 0 || idx + bytes > w->extra_size) { set_last_error(st, 1413); return 0; }
     memcpy(&old, w->extra + idx, (size_t)bytes);
@@ -1030,7 +1025,7 @@ HLE(u_RemovePropA) { get_prop(st, 0, 1); }
 HLE(u_RemovePropW) { get_prop(st, 1, 1); }
 
 // ---- geometry -----------------------------------------------------------------------------------
-static void wr_rect(uint64_t p, int a, int b, int c, int d) { int32_t r[4] = { a, b, c, d }; memcpy((void *)(uintptr_t)p, r, 16); }
+static void wr_rect(uint64_t p, int a, int b, int c, int d) { int32_t r[4] = { a, b, c, d }; memcpy(G2H(p), r, 16); }
 HLE(u_GetClientRect) { Win *w = win_get(ARG(0)); if (!w) { RET(0); return; } wr_rect(ARG(1), 0, 0, w->w, w->h); RET(1); }
 HLE(u_GetWindowRect) {
     Win *w = win_get(ARG(0));
@@ -1048,9 +1043,9 @@ static void map_points(uint64_t from, uint64_t to, uint64_t pts, int n, int *dxo
     if (t) desktop_origin(t, &tx, &ty);
     int dx = fx - tx, dy = fy - ty;
     for (int i = 0; i < n; i++) {
-        int32_t p[2]; memcpy(p, (void *)(uintptr_t)(pts + 8u * (uint64_t)i), 8);
+        int32_t p[2]; memcpy(p, G2H(pts + 8u * (uint64_t)i), 8);
         p[0] += dx; p[1] += dy;
-        memcpy((void *)(uintptr_t)(pts + 8u * (uint64_t)i), p, 8);
+        memcpy(G2H(pts + 8u * (uint64_t)i), p, 8);
     }
     *dxo = dx; *dyo = dy;
 }
@@ -1108,14 +1103,14 @@ static Win *top_at(int dx, int dy) {
     return best;
 }
 HLE(u_WindowFromPoint) {
-    int x = (int32_t)(ARG(0) & 0xFFFFFFFF), y = (int32_t)(ARG(0) >> 32);
+    int x = (int32_t)(ARG(0) & 0xFFFFFFFF), y = g_mode32 ? (int32_t)ARG(1) : (int32_t)(ARG(0) >> 32);
     Win *t = top_at(x, y);
     RET(t ? hit_child(t, x - t->x, y - t->y)->hwnd : 0);
 }
 HLE(u_ChildWindowFromPoint) {
     Win *w = win_get(ARG(0));
     if (!w) { RET(0); return; }
-    int x = (int32_t)(ARG(1) & 0xFFFFFFFF), y = (int32_t)(ARG(1) >> 32);
+    int x = (int32_t)(ARG(1) & 0xFFFFFFFF), y = g_mode32 ? (int32_t)ARG(2) : (int32_t)(ARG(1) >> 32);
     if (x < 0 || y < 0 || x >= w->w || y >= w->h) { RET(0); return; }
     Win **list;
     int n = children_of(w->hwnd, &list);
@@ -1134,8 +1129,9 @@ HLE(u_GetDC) {
 HLE(u_ReleaseDC) { gdi_release_dc(ARG(1)); RET(1); }
 HLE(u_BeginPaint) {
     Win *w = win_get(ARG(0));
-    uint8_t *ps = PTR(1);
-    memset(ps, 0, 72);
+    const uint64_t psg = ARG(1); // read before WM_ERASEBKGND: guest calls clobber argument registers
+    uint8_t *ps = G2H(psg);
+    memset(ps, 0, g_mode32 ? 64 : 72);
     if (!w) { RET(0); return; }
     uint64_t hdc = gdi_create_dc(DC_WINDOW, w->hwnd);
     Dc *dc = dc_get(hdc);
@@ -1147,13 +1143,13 @@ HLE(u_BeginPaint) {
     w->erase = 0;
     uint32_t ferase = 0;
     if (erase) ferase = win_send(st, w->hwnd, WM_ERASEBKGND, hdc, 0) ? 0 : 1;
-    memcpy(ps, &hdc, 8);
-    memcpy(ps + 8, &ferase, 4);
-    int32_t r[4] = { x0, y0, x1, y1 };
-    memcpy(ps + 12, r, 16);
+    gs_set(psg, L_PAINTSTRUCT, 0, hdc);
+    gs_set(psg, L_PAINTSTRUCT, 1, ferase);
+    gs_set(psg, L_PAINTSTRUCT, 2, (uint32_t)x0); gs_set(psg, L_PAINTSTRUCT, 3, (uint32_t)y0);
+    gs_set(psg, L_PAINTSTRUCT, 4, (uint32_t)x1); gs_set(psg, L_PAINTSTRUCT, 5, (uint32_t)y1);
     RET(hdc);
 }
-HLE(u_EndPaint) { uint64_t hdc; memcpy(&hdc, (uint8_t *)PTR(1), 8); gdi_release_dc(hdc); RET(1); }
+HLE(u_EndPaint) { gdi_release_dc(gs_get(ARG(1), L_PAINTSTRUCT, 0)); RET(1); }
 static void invalidate(X86State *st, uint64_t hwnd, const int32_t *rc, int erase) {
     (void)st;
     if (!hwnd || hwnd == DESKTOP_HWND) {
@@ -1297,8 +1293,8 @@ static void tabbed_text_out_impl(X86State *st, int wide) {
     int n = (int)(int32_t)hle_arg(st, 4);
     uint64_t sp = ARG(3);
     char *s;
-    if (wide) { size_t cap = (size_t)(n > 0 ? n : 0) * 3 + 4; s = malloc(cap); w2u((const uint16_t *)(uintptr_t)sp, n, s, cap); }
-    else { s = malloc((size_t)(n > 0 ? n : 0) + 1); if (n > 0) memcpy(s, (void *)(uintptr_t)sp, (size_t)n); s[n > 0 ? n : 0] = 0; }
+    if (wide) { size_t cap = (size_t)(n > 0 ? n : 0) * 3 + 4; s = malloc(cap); w2u((const uint16_t *)G2H(sp), n, s, cap); }
+    else { s = malloc((size_t)(n > 0 ? n : 0) + 1); if (n > 0) memcpy(s, G2H(sp), (size_t)n); s[n > 0 ? n : 0] = 0; }
     gdi_text_out_utf8(ARG(0), ARGI(1), ARGI(2), s, -1);
     Dc *dc = dc_get(ARG(0));
     int h = 0, w = gdi_text_width(dc ? dc->font : gdi_default_font(), s, (int)strlen(s), &h);
@@ -1398,9 +1394,7 @@ uint64_t win_def_proc(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint64_t 
         }
         return 0;
     case WM_WINDOWPOSCHANGED: {
-        const uint8_t *p = (const uint8_t *)(uintptr_t)lp;
-        uint32_t flags = 0;
-        if (p) memcpy(&flags, p + 32, 4);
+        uint32_t flags = lp ? (uint32_t)gs_get(lp, L_WINDOWPOS, 6) : 0;
         if (!(flags & 2)) win_send(st, w->hwnd, WM_MOVE, 0, ((uint64_t)(uint16_t)w->y << 16) | (uint16_t)w->x);
         if (!(flags & 1)) win_send(st, w->hwnd, WM_SIZE, w->maximized ? 2 : 0, ((uint64_t)(uint16_t)w->h << 16) | (uint16_t)w->w);
         return 0;
@@ -1440,8 +1434,8 @@ static void send_message(X86State *st, int wide) {
 }
 HLE(u_SendMessageA) { send_message(st, 0); }
 HLE(u_SendMessageW) { send_message(st, 1); }
-HLE(u_SendMessageTimeoutA) { uint64_t r = win_send_ex(st, ARG(0), (uint32_t)ARG(1), ARG(2), ARG(3), 0); if (hle_arg(st, 6)) mem_wr(hle_arg(st, 6), 8, r); RET(1); }
-HLE(u_SendMessageTimeoutW) { uint64_t r = win_send_ex(st, ARG(0), (uint32_t)ARG(1), ARG(2), ARG(3), 1); if (hle_arg(st, 6)) mem_wr(hle_arg(st, 6), 8, r); RET(1); }
+HLE(u_SendMessageTimeoutA) { uint64_t r = win_send_ex(st, ARG(0), (uint32_t)ARG(1), ARG(2), ARG(3), 0); if (hle_arg(st, 6)) wr_ptr(hle_arg(st, 6), r); RET(1); }
+HLE(u_SendMessageTimeoutW) { uint64_t r = win_send_ex(st, ARG(0), (uint32_t)ARG(1), ARG(2), ARG(3), 1); if (hle_arg(st, 6)) wr_ptr(hle_arg(st, 6), r); RET(1); }
 HLE(u_PostMessage) {
     uint64_t h = ARG(0);
     if (h == HWND_BROADCAST) {
@@ -1694,11 +1688,28 @@ static int msg_matches(uint64_t filter, uint32_t mn, uint32_t mx, uint64_t hwnd,
     if (mn || mx) { if (msg < mn || msg > mx) return 0; }
     return 1;
 }
+#define KEYCHAR_RING 16
+static struct { uint32_t time, vk, ch; } g_keychars[KEYCHAR_RING];
+static int g_keychar_pos;
 static void write_msg(uint64_t p, uint64_t hwnd, uint32_t msg, uint64_t wp, uint64_t lp, uint32_t time, int x, int y, uint32_t priv) {
-    uint8_t *m = (uint8_t *)(uintptr_t)p;
-    memset(m, 0, 48);
-    memcpy(m, &hwnd, 8); memcpy(m + 8, &msg, 4); memcpy(m + 16, &wp, 8); memcpy(m + 24, &lp, 8);
-    memcpy(m + 32, &time, 4); memcpy(m + 36, &x, 4); memcpy(m + 40, &y, 4); memcpy(m + 44, &priv, 4);
+    memset(G2H(p), 0, gs_size(L_MSG));
+    gs_set(p, L_MSG, 0, hwnd); gs_set(p, L_MSG, 1, msg); gs_set(p, L_MSG, 2, wp); gs_set(p, L_MSG, 3, lp);
+    gs_set(p, L_MSG, 4, time); gs_set(p, L_MSG, 5, (uint32_t)x); gs_set(p, L_MSG, 6, (uint32_t)y);
+    if (!g_mode32) mem_wr(p + 44, 4, priv);
+    else if (priv && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)) {
+        g_keychars[g_keychar_pos].time = time; g_keychars[g_keychar_pos].vk = (uint32_t)wp; g_keychars[g_keychar_pos].ch = priv;
+        g_keychar_pos = (g_keychar_pos + 1) % KEYCHAR_RING;
+    }
+}
+static uint32_t msg_private(uint64_t m, uint32_t vk) {
+    if (!g_mode32) return (uint32_t)mem_rd(m + 44, 4);
+    uint32_t time = (uint32_t)gs_get(m, L_MSG, 4);
+    // newest first: GetMessage records the key just before the program translates it
+    for (int k = 1; k <= KEYCHAR_RING; k++) {
+        int i = (g_keychar_pos - k + KEYCHAR_RING) % KEYCHAR_RING;
+        if (g_keychars[i].ch && g_keychars[i].time == time && g_keychars[i].vk == vk) { uint32_t c = g_keychars[i].ch; g_keychars[i].ch = 0; return c; }
+    }
+    return 0;
 }
 
 static Win *find_paint(uint32_t tid, uint64_t filter) {
@@ -1811,7 +1822,7 @@ HLE(u_MsgWaitForMultipleObjects) {
     uint32_t ms = (uint32_t)(ex ? ARG(2) : ARG(3));
     int all = ex ? (int)((hle_arg(st, 4) & 1)) : ARG(2) != 0;
     uint64_t hs_[64];
-    for (uint32_t i = 0; i < n && i < 64; i++) hs_[i] = mem_rd(ARG(1) + 8u * i, 8);
+    for (uint32_t i = 0; i < n && i < 64; i++) hs_[i] = rd_ptr(ARG(1) + (uint64_t)PSZ * i);
     double deadline = ms == 0xFFFFFFFF ? -1 : soul_now() + ms / 1000.0;
     for (;;) {
         pump_input(st);
@@ -1825,39 +1836,35 @@ HLE(u_MsgWaitForMultipleObjects) {
         if (wait_for_message(wait)) { RET(0xFFFFFFFF); return; }
     }
 }
-HLE(u_TranslateMessage) {
-    const uint8_t *m = PTR(0);
-    uint64_t hwnd; uint32_t msg, priv; uint64_t wp, lp;
-    memcpy(&hwnd, m, 8); memcpy(&msg, m + 8, 4); memcpy(&wp, m + 16, 8); memcpy(&lp, m + 24, 8); memcpy(&priv, m + 44, 4);
-    if (msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN) { RET(0); return; }
+static int translate_message(uint64_t m) {
+    uint64_t hwnd = gs_get(m, L_MSG, 0), wp = gs_get(m, L_MSG, 2), lp = gs_get(m, L_MSG, 3);
+    uint32_t msg = (uint32_t)gs_get(m, L_MSG, 1);
+    if (msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN) return 0;
+    uint32_t priv = msg_private(m, (uint32_t)wp);
     uint32_t ch = priv ? priv : key_char((int)wp); // keys from the UI carry their character
-    if (!ch) { RET(0); return; }
+    if (!ch) return 0;
     if (ch == '\n') ch = '\r';
     Win *w = win_get(hwnd);
     queue_add(hwnd, msg == WM_SYSKEYDOWN ? WM_SYSCHAR : WM_CHAR, ch, lp, w ? w->tid : cur_tid(), 1);
-    RET(1);
+    return 1;
 }
-static void dispatch_message(X86State *st, int wide) {
-    const uint8_t *m = PTR(0);
-    uint64_t hwnd; uint32_t msg; uint64_t wp, lp;
-    memcpy(&hwnd, m, 8); memcpy(&msg, m + 8, 4); memcpy(&wp, m + 16, 8); memcpy(&lp, m + 24, 8);
+HLE(u_TranslateMessage) { RET(translate_message(ARG(0))); }
+static uint64_t dispatch_message_at(X86State *st, uint64_t m, int wide) {
+    uint64_t hwnd = gs_get(m, L_MSG, 0), wp = gs_get(m, L_MSG, 2), lp = gs_get(m, L_MSG, 3);
+    uint32_t msg = (uint32_t)gs_get(m, L_MSG, 1);
     if (msg == WM_TIMER && lp) {
         uint64_t a[4] = { hwnd, WM_TIMER, wp, tick_ms() };
-        RET(soul_guest_call(st, lp, 4, a));
-        return;
+        return soul_guest_call(st, lp, 4, a);
     }
-    if (!hwnd) { RET(0); return; }
-    RET(win_send_ex(st, hwnd, msg, wp, lp, wide));
+    if (!hwnd) return 0;
+    return win_send_ex(st, hwnd, msg, wp, lp, wide);
 }
-// helpers for modal loops (dialogs)
-int gui_get_message(X86State *st, uint8_t *msg) { return get_message(st, (uint64_t)(uintptr_t)msg, 0, 0, 0); }
+static void dispatch_message(X86State *st, int wide) { RET(dispatch_message_at(st, ARG(0), wide)); }
+// helpers for modal loops (dialogs); msg is a guest-memory MSG buffer
+int gui_get_message(X86State *st, uint8_t *msg) { return get_message(st, H2G(msg), 0, 0, 0); }
 void gui_translate_dispatch(X86State *st, uint8_t *msg) {
-    uint64_t saved_rcx = st->gpr[RCX];
-    st->gpr[RCX] = (uint64_t)(uintptr_t)msg;
-    u_TranslateMessage(st);
-    st->gpr[RCX] = (uint64_t)(uintptr_t)msg;
-    dispatch_message(st, 1);
-    st->gpr[RCX] = saved_rcx;
+    translate_message(H2G(msg));
+    dispatch_message_at(st, H2G(msg), 1);
 }
 void gui_repost_quit(int code) { g_gui.quit_posted = 1; g_gui.quit_code = code; g_gui.quit_tid = cur_tid(); }
 HLE(u_DispatchMessageA) { dispatch_message(st, 0); }
@@ -1945,7 +1952,7 @@ HLE(u_CreateIconIndirect) { RET(ICON_HANDLE_BASE + 0x300); }
 HLE_STUB_RET(u_DestroyIcon, 1)
 HLE_STUB_RET(u_DestroyCursor, 1)
 HLE(u_CopyIcon) { RET(ARG(0)); }
-HLE(u_GetIconInfo) { memset(PTR(1), 0, 32); RET(1); }
+HLE(u_GetIconInfo) { memset(PTR(1), 0, g_mode32 ? 20 : 32); RET(1); }
 HLE_STUB_RET(u_TrackMouseEvent, 1)
 HLE(u_GetDoubleClickTime) { RET(500); }
 HLE_STUB_RET(u_SwapMouseButton, 0)
@@ -2187,11 +2194,11 @@ HLE(u_GetMenuStringA) { get_menu_string(st, 0); }
 HLE(u_GetMenuStringW) { get_menu_string(st, 1); }
 static void menu_item_info(X86State *st, int wide, int mode) { // mode 0 get, 1 set, 2 insert
     // (hmenu, item, byPosition, MENUITEMINFO*)
-    uint8_t *mi = PTR(3);
-    uint32_t mask, type, state, id;
-    memcpy(&mask, mi + 4, 4); memcpy(&type, mi + 8, 4); memcpy(&state, mi + 12, 4); memcpy(&id, mi + 16, 4);
-    uint64_t sub, data, tp; uint32_t cch;
-    memcpy(&sub, mi + 24, 8); memcpy(&data, mi + 48, 8); memcpy(&tp, mi + 56, 8); memcpy(&cch, mi + 64, 4);
+    const uint64_t mi = ARG(3);
+    const char *L = L_MENUITEMINFO;
+    uint32_t mask = (uint32_t)gs_get(mi, L, 1), type = (uint32_t)gs_get(mi, L, 2), state = (uint32_t)gs_get(mi, L, 3), id = (uint32_t)gs_get(mi, L, 4);
+    uint64_t sub = gs_get(mi, L, 5), data = gs_get(mi, L, 8), tp = gs_get(mi, L, 9);
+    uint32_t cch = (uint32_t)gs_get(mi, L, 10);
     int by_pos = ARG(2) != 0;
     if (mode == 2) {
         Menu *m = menu_get(ARG(0));
@@ -2224,15 +2231,15 @@ static void menu_item_info(X86State *st, int wide, int mode) { // mode 0 get, 1 
         RET(1);
         return;
     }
-    if (mask & 1) { uint32_t s = it->flags & (3 | 8 | 0x1000); memcpy(mi + 12, &s, 4); }
-    if (mask & 2) memcpy(mi + 16, &it->id, 4);
-    if (mask & 4) memcpy(mi + 24, &it->submenu, 8);
-    if ((mask & 0x100) || (mask & 0x10)) { uint32_t t = it->flags & (0x800 | 0x200); memcpy(mi + 8, &t, 4); }
-    if (mask & 0x20) memcpy(mi + 48, &it->data, 8);
+    if (mask & 1) gs_set(mi, L, 3, it->flags & (3 | 8 | 0x1000));
+    if (mask & 2) gs_set(mi, L, 4, it->id);
+    if (mask & 4) gs_set(mi, L, 5, it->submenu);
+    if ((mask & 0x100) || (mask & 0x10)) gs_set(mi, L, 2, it->flags & (0x800 | 0x200));
+    if (mask & 0x20) gs_set(mi, L, 8, it->data);
     if ((mask & 0x40) || (mask & 0x10)) {
         uint32_t n = (uint32_t)str_units(it->text, wide);
         if (tp && cch) put_str(tp, cch, it->text, wide);
-        memcpy(mi + 64, &n, 4);
+        gs_set(mi, L, 10, n);
     }
     RET(1);
 }
@@ -2376,9 +2383,8 @@ HLE(u_CreateAcceleratorTable) {
 HLE(u_DestroyAcceleratorTable) { GuiAccel *a = accel_get(ARG(0)); if (a) a->used = 0; RET(1); }
 HLE(u_TranslateAccelerator) {
     GuiAccel *a = accel_get(ARG(1));
-    const uint8_t *m = PTR(2);
-    uint32_t msg; uint64_t wp;
-    memcpy(&msg, m + 8, 4); memcpy(&wp, m + 16, 8);
+    uint32_t msg = (uint32_t)gs_get(ARG(2), L_MSG, 1);
+    uint64_t wp = gs_get(ARG(2), L_MSG, 2);
     if (!a || (msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN && msg != WM_CHAR)) { RET(0); return; }
     int shift = (g_gui.keys[VK_SHIFT] & 0x80) != 0, ctrl = (g_gui.keys[VK_CONTROL] & 0x80) != 0, alt = (g_gui.keys[VK_MENU] & 0x80) != 0;
     for (int i = 0; i < a->count; i++) {
@@ -2406,7 +2412,7 @@ static void load_string(X86State *st, int wide) {
     if (!blk) { if (ARG(2) && cap > 0) { if (wide) ((uint16_t *)PTR(2))[0] = 0; else ((char *)PTR(2))[0] = 0; } RET(0); return; }
     for (uint32_t i = 0; i < (id & 15); i++) blk += 1 + blk[0];
     uint16_t len = blk[0];
-    if (wide && cap == 0) { mem_wr(ARG(2), 8, (uint64_t)(uintptr_t)(blk + 1)); RET(len); return; }
+    if (wide && cap == 0) { wr_ptr(ARG(2), H2G(blk + 1)); RET(len); return; }
     if (!ARG(2) || cap <= 0) { RET(0); return; }
     if (wide) {
         int n = len < cap - 1 ? len : cap - 1;
@@ -2565,17 +2571,17 @@ static void monitor_info(X86State *st, int wide) {
     int32_t r[4] = { 0, 0, g_gui.screen_w, g_gui.screen_h };
     memcpy(mi + 4, r, 16); memcpy(mi + 20, r, 16);
     uint32_t f = 1; memcpy(mi + 36, &f, 4);
-    if (cb >= (wide ? 104u : 72u)) put_str((uint64_t)(uintptr_t)(mi + 40), 32, "\\\\.\\DISPLAY1", wide);
+    if (cb >= (wide ? 104u : 72u)) put_str(H2G(mi + 40), 32, "\\\\.\\DISPLAY1", wide);
     RET(1);
 }
 HLE(u_GetMonitorInfoA) { monitor_info(st, 0); }
 HLE(u_GetMonitorInfoW) { monitor_info(st, 1); }
 HLE(u_EnumDisplayMonitors) {
-    int32_t *r = malloc(16);
+    int32_t *r = g_malloc(16);
     r[0] = 0; r[1] = 0; r[2] = g_gui.screen_w; r[3] = g_gui.screen_h;
-    uint64_t a[4] = { 0x7000, ARG(0), (uint64_t)(uintptr_t)r, ARG(3) };
+    uint64_t a[4] = { 0x7000, ARG(0), H2G(r), ARG(3) };
     if (ARG(2)) soul_guest_call(st, ARG(2), 4, a);
-    free(r);
+    g_free(r);
     RET(1);
 }
 static void enum_display_settings(X86State *st, int wide) {
@@ -2670,6 +2676,7 @@ void gui_reset(void) {
 void gui_shutdown(void) {
     GuiState *g = &g_gui;
     if (!g->mu_init) return;
+    gdi_release_guest_bits();
     gui_lock();
     for (int i = 0; i < WIN_MAX; i++) {
         Win *w = &g->wins[i];
@@ -2680,7 +2687,7 @@ void gui_shutdown(void) {
     }
     for (int i = 0; i < MENU_MAX; i++) free(g->menus[i].items);
     for (int i = 0; i < g->input_len; i++) free(g->input[i].text);
-    for (int i = 0; i < 256; i++) if (g->classes[i].used && g->classes[i].menu_name >= 0x10000) free((void *)(uintptr_t)g->classes[i].menu_name);
+    for (int i = 0; i < 256; i++) if (g->classes[i].used && g->classes[i].menu_name >= 0x10000) g_free(G2H(g->classes[i].menu_name));
     free(g->input);
     free(g->queue);
     free(g->clip_text);

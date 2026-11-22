@@ -9,20 +9,41 @@
 #include "sgpu.h"
 #include <math.h>
 
-// ---- Win64 argument access (the first four arguments travel in XMM0-3 when they are float) ----
+// ---- argument access ----------------------------------------------------------------------------
+// Win64: the first four arguments travel in XMM0-3 when they are float/double. 32-bit stdcall: all
+// arguments are on the stack, a float in one 4-byte slot and a double in two. fa(i) assumes every
+// earlier argument is 4 bytes wide (ints, enums, floats, pointers) and da(i) that they are all
+// doubles; functions that mix doubles with other arguments use DAS / IAS with explicit slots.
+static inline double slot_double(X86State *st, int slot) { uint64_t u = hle_arg(st, slot) | (hle_arg(st, slot + 1) << 32); double d; memcpy(&d, &u, 8); return d; }
 static inline float fa(X86State *st, int i) {
-    if (i < 4) return st->xmm[i].f[0];
+    if (!g_mode32 && i < 4) return st->xmm[i].f[0];
     uint32_t u = (uint32_t)hle_arg(st, i);
     float f; memcpy(&f, &u, 4); return f;
 }
 static inline double da(X86State *st, int i) {
+    if (g_mode32) return slot_double(st, 2 * i);
     if (i < 4) return st->xmm[i].fd[0];
     uint64_t u = hle_arg(st, i);
     double d; memcpy(&d, &u, 8); return d;
 }
+#define DAS(i64, s32) (g_mode32 ? slot_double(st, (s32)) : da(st, (i64)))
+#define IAS(i64, s32) ((int32_t)hle_arg(st, g_mode32 ? (s32) : (i64)))
+#define PAS(i64, s32) G2H(hle_arg(st, g_mode32 ? (s32) : (i64)))
 #define IA(i) ((int32_t)hle_arg(st, (i)))
 #define UA(i) ((uint32_t)hle_arg(st, (i)))
-#define PA(i) ((void *)(uintptr_t)hle_arg(st, (i)))
+#define PA(i) G2H(hle_arg(st, (i)))
+// Constant strings returned to the program: guest-memory copies (made once per process).
+static uint64_t gl_str(const char *s) {
+    if (!g_mode32) return (uint64_t)(uintptr_t)s;
+    static const char *keys[16];
+    static uint64_t vals[16];
+    static SoulProcess *owner;
+    if (owner != g_proc) { memset(keys, 0, sizeof keys); owner = g_proc; }
+    for (int i = 0; i < 16; i++) if (keys[i] == s) return vals[i];
+    uint64_t g = H2G(g_strdup(s));
+    for (int i = 0; i < 16; i++) if (!keys[i]) { keys[i] = s; vals[i] = g; break; }
+    return g;
+}
 
 // ---- GL enums used here ------------------------------------------------------------------------
 enum {
@@ -745,7 +766,8 @@ static const char *k_extensions =
     "GL_ARB_multitexture GL_EXT_bgra GL_EXT_texture_edge_clamp GL_SGIS_texture_edge_clamp GL_ARB_texture_non_power_of_two "
     "GL_EXT_texture_env_add GL_ARB_texture_env_add GL_EXT_compiled_vertex_array GL_SGIS_generate_mipmap GL_EXT_packed_pixels "
     "GL_ARB_transpose_matrix WGL_EXT_swap_control WGL_ARB_extensions_string WGL_EXT_extensions_string";
-HLE(w_wglGetExtensionsString) { RET((uint64_t)(uintptr_t)"WGL_EXT_swap_control WGL_ARB_extensions_string WGL_EXT_extensions_string"); }
+static const char *k_wgl_extensions = "WGL_EXT_swap_control WGL_ARB_extensions_string WGL_EXT_extensions_string";
+HLE(w_wglGetExtensionsString) { RET(gl_str(k_wgl_extensions)); }
 HLE(w_wglGetProcAddress) {
     const char *name = (const char *)PA(0);
     if (!name) { RET(0); return; }
@@ -979,12 +1001,13 @@ HLE(gl_Clear) {
 HLE(gl_Flush) { CTX(); if (!c->double_buffer) present(c); }
 HLE(gl_Finish) { CTX(); if (!c->double_buffer) present(c); }
 HLE(gl_GetError) { GlCtx *c = current(); uint32_t e = c ? c->err : 0; if (c) c->err = 0; RET(e); }
+static const char *k_vendor = "Soul", *k_renderer = "Soul sgpu (Apple Silicon)", *k_version = "1.5.0 Soul";
 HLE(gl_GetString) {
     switch (UA(0)) {
-    case GL_VENDOR: RET((uint64_t)(uintptr_t)"Soul"); break;
-    case GL_RENDERER: RET((uint64_t)(uintptr_t)"Soul sgpu (Apple Silicon)"); break;
-    case GL_VERSION: RET((uint64_t)(uintptr_t)"1.5.0 Soul"); break;
-    case GL_EXTENSIONS: RET((uint64_t)(uintptr_t)k_extensions); break;
+    case GL_VENDOR: RET(gl_str(k_vendor)); break;
+    case GL_RENDERER: RET(gl_str(k_renderer)); break;
+    case GL_VERSION: RET(gl_str(k_version)); break;
+    case GL_EXTENSIONS: RET(gl_str(k_extensions)); break;
     default: RET(0); break;
     }
 }
@@ -1209,7 +1232,7 @@ HLE(gl_PopAttrib) {
 static float arr_comp(const GlArr *a, int i, int k) {
     size_t esz = a->type == GL_DOUBLE ? 8 : (a->type == GL_FLOAT || a->type == GL_INT || a->type == GL_UNSIGNED_INT) ? 4 : (a->type == GL_SHORT || a->type == GL_UNSIGNED_SHORT) ? 2 : 1;
     size_t stride = a->stride ? (size_t)a->stride : esz * (size_t)a->size;
-    const uint8_t *p = (const uint8_t *)(uintptr_t)a->ptr + stride * (size_t)i + esz * (size_t)k;
+    const uint8_t *p = (const uint8_t *)G2H(a->ptr) + stride * (size_t)i + esz * (size_t)k;
     switch (a->type) {
     case GL_FLOAT: { float f; memcpy(&f, p, 4); return f; }
     case GL_DOUBLE: { double d; memcpy(&d, p, 8); return (float)d; }
@@ -1265,9 +1288,9 @@ static void draw_elements(GlCtx *c, int mode, int n, int type, uint64_t ptr) {
     if (n <= 0 || !ptr) return;
     uint32_t *idx = malloc(sizeof(uint32_t) * (size_t)n);
     for (int i = 0; i < n; i++) {
-        if (type == GL_UNSIGNED_BYTE) idx[i] = ((const uint8_t *)(uintptr_t)ptr)[i];
-        else if (type == GL_UNSIGNED_SHORT) idx[i] = ((const uint16_t *)(uintptr_t)ptr)[i];
-        else idx[i] = ((const uint32_t *)(uintptr_t)ptr)[i];
+        if (type == GL_UNSIGNED_BYTE) idx[i] = ((const uint8_t *)G2H(ptr))[i];
+        else if (type == GL_UNSIGNED_SHORT) idx[i] = ((const uint16_t *)G2H(ptr))[i];
+        else idx[i] = ((const uint32_t *)G2H(ptr))[i];
     }
     draw_indexed(c, mode, n, idx, 0);
     free(idx);
@@ -1449,11 +1472,12 @@ HLE(glu_Build2DMipmaps) {
 HLE(glu_ErrorString) {
     static const char *names[] = { "no error", "invalid enum", "invalid value", "invalid operation", "stack overflow", "stack underflow", "out of memory" };
     uint32_t e = UA(0);
-    RET((uint64_t)(uintptr_t)(e == 0 ? names[0] : (e >= 0x500 && e <= 0x505) ? names[e - 0x500 + 1] : "unknown error"));
+    static const char *unknown = "unknown error";
+    RET(gl_str(e == 0 ? names[0] : (e >= 0x500 && e <= 0x505) ? names[e - 0x500 + 1] : unknown));
 }
 typedef struct Quadric { int normals, texture, style; } Quadric;
-HLE(glu_NewQuadric) { Quadric *q = calloc(1, sizeof *q); q->normals = 100000; RET((uint64_t)(uintptr_t)q); } // GLU_SMOOTH
-HLE(glu_DeleteQuadric) { free(PA(0)); RET(0); }
+HLE(glu_NewQuadric) { Quadric *q = g_calloc(1, sizeof *q); q->normals = 100000; RET(q); } // GLU_SMOOTH (the program holds the pointer)
+HLE(glu_DeleteQuadric) { g_free(PA(0)); RET(0); }
 HLE(glu_QuadricNormals) { Quadric *q = PA(0); if (q) q->normals = IA(1); RET(0); }
 HLE(glu_QuadricTexture) { Quadric *q = PA(0); if (q) q->texture = IA(1) != 0; RET(0); }
 HLE(glu_QuadricDrawStyle) { Quadric *q = PA(0); if (q) q->style = IA(1); RET(0); }
@@ -1465,8 +1489,8 @@ static void qv(GlCtx *c, const Quadric *q, float x, float y, float z, float nx, 
 HLE(glu_Sphere) {
     CTX();
     const Quadric *q = PA(0);
-    float r = (float)da(st, 1);
-    int slices = IA(2), stacks = IA(3);
+    float r = (float)DAS(1, 1);
+    int slices = IAS(2, 3), stacks = IAS(3, 4);
     if (!q || slices < 3 || stacks < 2) return;
     int wire = q->style == 100011; // GLU_LINE
     for (int i = 0; i < stacks; i++) {
@@ -1485,8 +1509,8 @@ HLE(glu_Sphere) {
 HLE(glu_Cylinder) {
     CTX();
     const Quadric *q = PA(0);
-    float rb = (float)da(st, 1), rt = (float)da(st, 2), h = (float)da(st, 3);
-    int slices = IA(4), stacks = (int)(int32_t)hle_arg(st, 5);
+    float rb = (float)DAS(1, 1), rt = (float)DAS(2, 3), h = (float)DAS(3, 5);
+    int slices = IAS(4, 7), stacks = IAS(5, 8);
     if (!q || slices < 3 || stacks < 1) return;
     float nz = (rb - rt) / h;
     for (int i = 0; i < stacks; i++) {
@@ -1504,8 +1528,8 @@ HLE(glu_Cylinder) {
 HLE(glu_Disk) {
     CTX();
     const Quadric *q = PA(0);
-    float ri = (float)da(st, 1), ro = (float)da(st, 2);
-    int slices = IA(3), loops = (int)(int32_t)hle_arg(st, 4);
+    float ri = (float)DAS(1, 1), ro = (float)DAS(2, 3);
+    int slices = IAS(3, 5), loops = IAS(4, 6);
     if (!q || slices < 3 || loops < 1) return;
     for (int l = 0; l < loops; l++) {
         float r0 = ri + (ro - ri) * l / loops, r1 = ri + (ro - ri) * (l + 1) / loops;
@@ -1521,15 +1545,15 @@ HLE(glu_Disk) {
 HLE(glu_Project) {
     // (objx, objy, objz, model[16] double*, proj[16] double*, view[4] int*, winx*, winy*, winz*)
     double o[4] = { da(st, 0), da(st, 1), da(st, 2), 1 };
-    const double *mm = PA(3), *pm = PA(4);
-    const int32_t *vp = PA(5);
+    const double *mm = PAS(3, 6), *pm = PAS(4, 7);
+    const int32_t *vp = PAS(5, 8);
     double e[4], cl[4];
     for (int i = 0; i < 4; i++) e[i] = mm[i] * o[0] + mm[4 + i] * o[1] + mm[8 + i] * o[2] + mm[12 + i] * o[3];
     for (int i = 0; i < 4; i++) cl[i] = pm[i] * e[0] + pm[4 + i] * e[1] + pm[8 + i] * e[2] + pm[12 + i] * e[3];
     if (cl[3] == 0) { RET(0); return; }
     for (int i = 0; i < 3; i++) cl[i] /= cl[3];
     double wx = vp[0] + (cl[0] + 1) * vp[2] / 2, wy = vp[1] + (cl[1] + 1) * vp[3] / 2, wz = (cl[2] + 1) / 2;
-    memcpy(PA(6), &wx, 8); memcpy(PA(7), &wy, 8); memcpy(PA(8), &wz, 8);
+    memcpy(PAS(6, 9), &wx, 8); memcpy(PAS(7, 10), &wy, 8); memcpy(PAS(8, 11), &wz, 8);
     RET(1);
 }
 

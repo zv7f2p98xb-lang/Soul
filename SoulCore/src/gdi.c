@@ -4,8 +4,8 @@
 #include <math.h>
 #include <strings.h>
 
-#define CSTR(n) ((const char *)(uintptr_t)hle_arg(st, (n)))
-#define WSTR(n) ((const uint16_t *)(uintptr_t)hle_arg(st, (n)))
+#define CSTR(n) ((const char *)G2H(hle_arg(st, (n))))
+#define WSTR(n) ((const uint16_t *)G2H(hle_arg(st, (n))))
 #define ARGI(n) ((int32_t)hle_arg(st, (n)))
 
 static GdiObj g_gdi[GDI_MAX];
@@ -39,7 +39,8 @@ GdiObj *gdi_get(uint64_t h, int type) {
 void gdi_free(uint64_t h) {
     GdiObj *o = gdi_get(h, 0);
     if (!o || o->stock) return;
-    if (o->type == GO_BITMAP && o->owns_bits) free(o->surf.bits);
+    if (o->type == GO_BITMAP && o->owns_bits == 1) free(o->surf.bits);
+    if (o->type == GO_BITMAP && o->owns_bits == 2) g_free(o->surf.bits);
     if (o->type == GO_DC) free(o->dc);
     memset(o, 0, sizeof *o);
 }
@@ -85,9 +86,14 @@ uint64_t gdi_default_font(void) { return g_stock[17]; }
 uint64_t gdi_make_brush(uint32_t colorref) { return make_brush(colorref & 0xFFFFFF, 0, 0); }
 uint64_t gdi_make_font(int height, int weight, const char *face) { return make_font(height, weight, 0, 0, face, 0); }
 
+// DIB section bits live in guest memory: release them while the process (and its 4 GB window) exists.
+void gdi_release_guest_bits(void) {
+    for (int i = 0; i < GDI_MAX; i++)
+        if (g_gdi[i].type == GO_BITMAP && g_gdi[i].owns_bits == 2) { g_free(g_gdi[i].surf.bits); g_gdi[i].surf.bits = NULL; g_gdi[i].owns_bits = 0; }
+}
 void gdi_reset_objects(void) {
     for (int i = 0; i < GDI_MAX; i++) {
-        if (g_gdi[i].type == GO_BITMAP && g_gdi[i].owns_bits) free(g_gdi[i].surf.bits);
+        if (g_gdi[i].type == GO_BITMAP && g_gdi[i].owns_bits == 1) free(g_gdi[i].surf.bits);
         if (g_gdi[i].type == GO_DC) free(g_gdi[i].dc);
     }
     memset(g_gdi, 0, sizeof g_gdi);
@@ -828,27 +834,31 @@ static void get_object(X86State *st, int wide) {
     uint8_t *out = PTR(2);
     if (!o) { RET(0); return; }
     if (o->type == GO_BITMAP) {
-        if (!out) { RET(o->surf.bits && !o->owns_bits ? 104 : 32); return; }
+        // BITMAP { bmType, bmWidth, bmHeight, bmWidthBytes, bmPlanes, bmBitsPixel, bmBits }: 32 / 24 bytes;
+        // DIBSECTION adds BITMAPINFOHEADER, dsBitfields, dshSection, dsOffset: 104 / 84 bytes
+        const int bms = g_mode32 ? 24 : 32, dss = g_mode32 ? 84 : 104;
+        int dib = o->owns_bits == 2;
+        if (!out) { RET(dib ? dss : bms); return; }
         uint8_t bm[32] = { 0 };
         int32_t v[4] = { 0, o->surf.w, o->surf.h, o->surf.stride };
         memcpy(bm, v, 16);
         uint16_t planes = 1, bpp = (uint16_t)o->surf.bpp;
         memcpy(bm + 16, &planes, 2); memcpy(bm + 18, &bpp, 2);
-        uint64_t bits = (uint64_t)(uintptr_t)o->surf.bits;
-        memcpy(bm + 24, &bits, 8);
-        memcpy(out, bm, (size_t)(cb < 32 ? cb : 32));
-        if (cb >= 104) {
+        uint64_t bits = dib ? H2G(o->surf.bits) : 0; // only DIB sections expose their pixels
+        memcpy(bm + (g_mode32 ? 20 : 24), &bits, (size_t)PSZ);
+        memcpy(out, bm, (size_t)(cb < bms ? cb : bms));
+        if (cb >= dss) {
             uint8_t bih[40] = { 0 };
             uint32_t sz = 40; int32_t w = o->surf.w, h = o->surf.top_down ? -o->surf.h : o->surf.h;
             memcpy(bih, &sz, 4); memcpy(bih + 4, &w, 4); memcpy(bih + 8, &h, 4); memcpy(bih + 12, &planes, 2); memcpy(bih + 14, &bpp, 2);
             uint32_t image = (uint32_t)(o->surf.stride * o->surf.h);
             memcpy(bih + 20, &image, 4);
-            memcpy(out + 32, bih, 40);
-            memset(out + 72, 0, 32);
-            RET(104);
+            memcpy(out + bms, bih, 40);
+            memset(out + bms + 40, 0, (size_t)(dss - bms - 40));
+            RET(dss);
             return;
         }
-        RET(cb < 32 ? cb : 32);
+        RET(cb < bms ? cb : bms);
     } else if (o->type == GO_FONT) {
         size_t sz = wide ? 92 : 60;
         if (!out) { RET(sz); return; }
@@ -899,7 +909,7 @@ HLE(g_SetDCPenColor) { GdiObj *p = gdi_get(g_stock[19], GO_PEN); uint32_t old = 
 static uint64_t create_font(X86State *st, int wide) {
     char face[64] = "";
     uint64_t fp = hle_arg(st, 13);
-    if (fp) { if (wide) w2u((const uint16_t *)(uintptr_t)fp, -1, face, sizeof face); else snprintf(face, sizeof face, "%s", (const char *)(uintptr_t)fp); }
+    if (fp) { if (wide) w2u((const uint16_t *)G2H(fp), -1, face, sizeof face); else snprintf(face, sizeof face, "%s", (const char *)G2H(fp)); }
     if ((hle_arg(st, 12) & 3) == 1 && !face[0]) snprintf(face, sizeof face, "Courier");
     return make_font(ARGI(0), ARGI(4), (int)(hle_arg(st, 5) & 0xFF), (int)(hle_arg(st, 6) & 0xFF), face, 0);
 }
@@ -936,7 +946,7 @@ HLE(g_CreateBitmap) {
         const uint8_t *src = PTR(4);
         int sstride = ((w * bpp + 15) / 16) * 2; // CreateBitmap rows are WORD aligned
         Surface s = { 0 };
-        s.bits = (uint8_t *)(uintptr_t)src; s.w = w; s.h = h; s.bpp = bpp; s.top_down = 1; s.stride = sstride;
+        s.bits = (uint8_t *)src; s.w = w; s.h = h; s.bpp = bpp; s.top_down = 1; s.stride = sstride;
         s.palette[0] = 0xFF000000u; s.palette[1] = 0xFFFFFFFFu;
         if (bpp == 1 || bpp == 32 || bpp == 24 || bpp == 16)
             for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) surf_put(&o->surf, x, y, surf_get(&s, x, y));
@@ -953,13 +963,13 @@ HLE(g_CreateDIBSection) {
     uint8_t *bmi = PTR(1);
     if (!surface_from_bmi(&s, NULL, bmi)) { RET(0); return; }
     size_t size = (size_t)s.stride * (size_t)s.h;
-    uint8_t *bits = calloc(1, size + 64);
+    uint8_t *bits = g_calloc(1, size + 64);
     GdiObj *o;
     uint64_t h = gdi_alloc(GO_BITMAP, &o);
     s.bits = bits;
     o->surf = s;
-    o->owns_bits = 1;
-    if (ARG(3)) mem_wr(ARG(3), 8, (uint64_t)(uintptr_t)bits);
+    o->owns_bits = 2;
+    if (ARG(3)) wr_ptr(ARG(3), H2G(bits));
     RET(h);
 }
 HLE(g_CreateDIBitmap) {
@@ -1017,7 +1027,7 @@ HLE(g_StretchDIBits) {
     // (hdc, xDest, yDest, wDest, hDest, xSrc, ySrc, wSrc, hSrc, bits, bmi, usage, rop)
     Dc *dc = dc_get(ARG(0));
     Surface s;
-    if (!dc || !surface_from_bmi(&s, (void *)(uintptr_t)hle_arg(st, 9), (const uint8_t *)(uintptr_t)hle_arg(st, 10))) { RET(0); return; }
+    if (!dc || !surface_from_bmi(&s, G2H(hle_arg(st, 9)), (const uint8_t *)G2H(hle_arg(st, 10)))) { RET(0); return; }
     int ysrc = ARGI(6), hsrc = ARGI(8);
     if (!s.top_down) ysrc = s.h - ysrc - hsrc; // source rectangle is bottom-up for bottom-up DIBs
     blit(dc, ARGI(1), ARGI(2), ARGI(3), ARGI(4), &s, ARGI(5), ysrc, ARGI(7), hsrc, (uint32_t)hle_arg(st, 12), dc->text_color, dc->bk_color, 0);
@@ -1027,7 +1037,7 @@ HLE(g_SetDIBitsToDevice) {
     // (hdc, xDest, yDest, w, h, xSrc, ySrc, uStartScan, cScanLines, bits, bmi, usage)
     Dc *dc = dc_get(ARG(0));
     Surface s;
-    if (!dc || !surface_from_bmi(&s, (void *)(uintptr_t)hle_arg(st, 9), (const uint8_t *)(uintptr_t)hle_arg(st, 10))) { RET(0); return; }
+    if (!dc || !surface_from_bmi(&s, G2H(hle_arg(st, 9)), (const uint8_t *)G2H(hle_arg(st, 10)))) { RET(0); return; }
     int w = ARGI(3), h = ARGI(4), ysrc = ARGI(6);
     if (!s.top_down) ysrc = s.h - ysrc - h;
     blit(dc, ARGI(1), ARGI(2), w, h, &s, ARGI(5), ysrc, w, h, SRCCOPY, 0, 0xFFFFFF, 0);
@@ -1148,7 +1158,7 @@ HLE(g_LineTo) {
 }
 static int32_t *read_points(uint64_t p, int n) {
     int32_t *pts = malloc(sizeof(int32_t) * 2 * (size_t)(n > 0 ? n : 1));
-    memcpy(pts, (void *)(uintptr_t)p, sizeof(int32_t) * 2 * (size_t)n);
+    memcpy(pts, G2H(p), sizeof(int32_t) * 2 * (size_t)n);
     return pts;
 }
 HLE(g_Polyline) { Dc *dc = dc_get(ARG(0)); int n = ARGI(2); if (!dc || n < 2) { RET(0); return; } int32_t *p = read_points(ARG(1), n); draw_polygon(dc, p, n, 0); free(p); RET(1); }
@@ -1217,11 +1227,11 @@ static void text_out(X86State *st, int wide, int ext) {
     if (!dc) { RET(0); return; }
     int x = ARGI(1), y = ARGI(2);
     uint64_t sp; int n; const int32_t *rc = NULL; uint32_t opts = 0;
-    if (ext) { opts = (uint32_t)ARG(3); rc = (const int32_t *)(uintptr_t)hle_arg(st, 4); sp = hle_arg(st, 5); n = (int)(int32_t)hle_arg(st, 6); }
+    if (ext) { opts = (uint32_t)ARG(3); rc = (const int32_t *)G2H(hle_arg(st, 4)); sp = hle_arg(st, 5); n = (int)(int32_t)hle_arg(st, 6); }
     else { sp = ARG(3); n = (int)(int32_t)hle_arg(st, 4); }
     char *s;
-    if (wide) { s = malloc((size_t)(n > 0 ? n : 0) * 3 + 4); w2u((const uint16_t *)(uintptr_t)sp, n, s, (size_t)(n > 0 ? n : 0) * 3 + 4); }
-    else { s = malloc((size_t)(n > 0 ? n : 0) + 1); if (n > 0) memcpy(s, (void *)(uintptr_t)sp, (size_t)n); s[n > 0 ? n : 0] = 0; }
+    if (wide) { s = malloc((size_t)(n > 0 ? n : 0) * 3 + 4); w2u((const uint16_t *)G2H(sp), n, s, (size_t)(n > 0 ? n : 0) * 3 + 4); }
+    else { s = malloc((size_t)(n > 0 ? n : 0) + 1); if (n > 0) memcpy(s, G2H(sp), (size_t)n); s[n > 0 ? n : 0] = 0; }
     int r[4];
     int use_rect = rc && (opts & 2); // ETO_OPAQUE
     if (use_rect) { r[0] = rc[0]; r[1] = rc[1]; r[2] = rc[2]; r[3] = rc[3]; }
@@ -1473,7 +1483,7 @@ uint64_t gdi_bitmap_from_dib(const uint8_t *bmi, const uint8_t *bits) {
         size_t colors = bpp <= 8 ? (used ? used : (1u << bpp)) : (comp == 3 ? 3 : 0);
         bits = bmi + hsize + colors * (hsize == 12 ? 3 : 4);
     }
-    if (!surface_from_bmi(&s, (void *)(uintptr_t)bits, bmi)) return 0;
+    if (!surface_from_bmi(&s, (void *)bits, bmi)) return 0;
     uint64_t hb = make_bitmap(s.w, s.h, 32, 1, NULL, 1);
     GdiObj *o = gdi_get(hb, GO_BITMAP);
     if (!o) return 0;
