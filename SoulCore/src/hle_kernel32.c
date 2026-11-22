@@ -606,10 +606,12 @@ static const char *fake_module_name(uint64_t h) {
     for (FakeMod *m = g_fake_mods; m; m = m->next) if (H2G(m->mem) == h) return m->name;
     return NULL;
 }
+static uint64_t g_unhandled_filter; // SetUnhandledExceptionFilter (32-bit SEH)
 // Per-process kernel32 state: fake system modules and cached command lines.
 static char *g_cmdline_a;
 static uint16_t *g_cmdline_w;
 void k32_shutdown(void) {
+    g_unhandled_filter = 0;
     while (g_fake_mods) { FakeMod *n = g_fake_mods->next; g_pages_free(g_fake_mods->mem, 4096); free(g_fake_mods); g_fake_mods = n; }
     g_free(g_cmdline_a); g_cmdline_a = NULL;
     g_free(g_cmdline_w); g_cmdline_w = NULL;
@@ -881,13 +883,175 @@ HLE(k32_CheckRemoteDebuggerPresent) { if (ARG(1)) mem_wr(ARG(1), 4, 0); RET(1); 
 HLE(k32_OutputDebugStringA) { soul_log("[debug] %s", CSTR(0)); RET(0); }
 HLE(k32_OutputDebugStringW) { char *s = w2u_dup(WSTR(0)); soul_log("[debug] %s", s); free(s); RET(0); }
 HLE(k32_DebugBreak) { soul_fatal(st, "Program DebugBreak() çağırdı"); }
+// ---- structured exception handling (32-bit programs) -----------------------------------------------
+// Exceptions are dispatched like Windows does: handlers registered in the fs:[0] chain are called
+// one after the other with (EXCEPTION_RECORD*, frame, CONTEXT*, dispatcher context). The handler
+// runs as ordinary guest code and returns to a Soul thunk, so a handler that never returns (Delphi
+// and MSVC handlers unwind and jump straight into the except block) leaves nothing behind.
+// The dispatch block lives on the guest stack: [magic, current frame, 0, 0][EXCEPTION_RECORD][CONTEXT].
+#define SEH_MAGIC 0x53454844u
+#define SEH_REC 16
+#define SEH_CTX (16 + 80)
+#define SEH_BLOCK (16 + 80 + 0x2CC)
+
+static void ctx_capture32(X86State *st, uint64_t ctx, uint32_t eip, uint32_t esp) {
+    memset(G2H(ctx), 0, 0x2CC);
+    mem_wr(ctx + 0x00, 4, 0x1003F); // CONTEXT_ALL (x86)
+    mem_wr(ctx + 0x9C, 4, st->gpr[RDI]); mem_wr(ctx + 0xA0, 4, st->gpr[RSI]); mem_wr(ctx + 0xA4, 4, st->gpr[RBX]);
+    mem_wr(ctx + 0xA8, 4, st->gpr[RDX]); mem_wr(ctx + 0xAC, 4, st->gpr[RCX]); mem_wr(ctx + 0xB0, 4, st->gpr[RAX]);
+    mem_wr(ctx + 0xB4, 4, st->gpr[RBP]); mem_wr(ctx + 0xB8, 4, eip); mem_wr(ctx + 0xBC, 4, 0x23);
+    mem_wr(ctx + 0xC0, 4, x86_flags(st)); mem_wr(ctx + 0xC4, 4, esp); mem_wr(ctx + 0xC8, 4, 0x2B);
+    mem_wr(ctx + 0x8C, 4, 0x2B); mem_wr(ctx + 0x90, 4, 0x53); mem_wr(ctx + 0x94, 4, 0x2B); mem_wr(ctx + 0x98, 4, 0x2B);
+}
+static void ctx_restore32(X86State *st, uint64_t ctx) {
+    st->gpr[RDI] = mem_rd(ctx + 0x9C, 4); st->gpr[RSI] = mem_rd(ctx + 0xA0, 4); st->gpr[RBX] = mem_rd(ctx + 0xA4, 4);
+    st->gpr[RDX] = mem_rd(ctx + 0xA8, 4); st->gpr[RCX] = mem_rd(ctx + 0xAC, 4); st->gpr[RAX] = mem_rd(ctx + 0xB0, 4);
+    st->gpr[RBP] = mem_rd(ctx + 0xB4, 4);
+    st->eflags = (st->eflags & ~(uint64_t)0xFFFFFFFFu) | (mem_rd(ctx + 0xC0, 4) | 2);
+    st->lf_op = LF_NONE;
+    st->rip = mem_rd(ctx + 0xB8, 4);
+    st->gpr[RSP] = mem_rd(ctx + 0xC4, 4);
+    st->thread->skip_ret = 1;
+}
+static uint64_t seh_ret_thunk(void);
+
+static void seh_unhandled(X86State *st, uint64_t blk) {
+    uint64_t rec = blk + SEH_REC, ctx = blk + SEH_CTX;
+    uint32_t code = (uint32_t)mem_rd(rec, 4);
+    mem_wr(blk, 4, 0);
+    if (g_unhandled_filter) {
+        uint32_t *ptrs = g_malloc(8);
+        ptrs[0] = (uint32_t)rec; ptrs[1] = (uint32_t)ctx;
+        uint64_t a[1] = { H2G(ptrs) };
+        int32_t r = (int32_t)soul_guest_call(st, g_unhandled_filter, 1, a);
+        g_free(ptrs);
+        if (r == -1) { ctx_restore32(st, ctx); return; }        // EXCEPTION_CONTINUE_EXECUTION
+        if (r == 1) { crt_flush_all(); soul_exit_process(st, (int)code); } // EXCEPTION_EXECUTE_HANDLER
+    }
+    if (code == 0xE06D7363) soul_fatal(st, "Program yakalanmamış bir C++ istisnası fırlattı");
+    if (code == 0xC0000094) soul_fatal(st, "Tamsayı sıfıra bölme (yakalanmadı) @%x", (unsigned)mem_rd(rec + 12, 4));
+    soul_fatal(st, "Program yakalanmamış bir Windows istisnası oluşturdu (kod 0x%08X)", code);
+}
+// Calls the handler of the next registration frame (or gives up when the chain ends).
+static void seh_next(X86State *st, uint64_t blk, uint32_t frame) {
+    uint32_t sp = (uint32_t)st->gpr[RSP];
+    if (frame == 0xFFFFFFFFu || frame == 0 || frame < sp - 0x1000 || frame & 3) { seh_unhandled(st, blk); return; }
+    uint32_t handler = (uint32_t)mem_rd(frame + 4, 4);
+    if (!handler) { seh_unhandled(st, blk); return; }
+    mem_wr(blk + 4, 4, frame);
+    uint32_t a = (uint32_t)blk - 20;
+    mem_wr(a, 4, seh_ret_thunk());
+    mem_wr(a + 4, 4, blk + SEH_REC);
+    mem_wr(a + 8, 4, frame);
+    mem_wr(a + 12, 4, blk + SEH_CTX);
+    mem_wr(a + 16, 4, 0);
+    st->gpr[RSP] = a;
+    st->rip = handler;
+    st->thread->skip_ret = 1;
+    SoulThread *t = st->thread;
+    if (t->seh_n == 16) { memmove(t->seh_disp, t->seh_disp + 1, sizeof(uint64_t) * 15); t->seh_n = 15; }
+    t->seh_disp[t->seh_n++] = blk;
+}
+// The exception handler returned (cdecl: its arguments are still on the stack).
+HLE(k32_SehReturn) {
+    SoulThread *t = st->thread;
+    uint64_t esp = (uint32_t)st->gpr[RSP], blk = 0;
+    while (t->seh_n > 0) {
+        uint64_t b = t->seh_disp[--t->seh_n];
+        if (b >= esp && mem_rd(b, 4) == SEH_MAGIC) { blk = b; break; }
+    }
+    if (!blk) soul_fatal(st, "İstisna işleyicisinden beklenmeyen dönüş");
+    uint32_t disp = (uint32_t)st->gpr[RAX];
+    st->gpr[RSP] = (uint32_t)blk - 64; // keep the dispatch block above the stack pointer
+    if (disp == 0) { // ExceptionContinueExecution
+        if (mem_rd(blk + SEH_REC + 4, 4) & 1) soul_fatal(st, "Sürdürülemez istisnadan sonra devam edilmek istendi");
+        mem_wr(blk, 4, 0);
+        ctx_restore32(st, blk + SEH_CTX);
+        return;
+    }
+    uint32_t frame = (uint32_t)mem_rd(blk + 4, 4);
+    seh_next(st, blk, (uint32_t)mem_rd(frame, 4)); // ExceptionContinueSearch (nested/collided: keep searching)
+}
+static uint64_t seh_ret_thunk(void) {
+    uint32_t id = hle_thunk_for(g_proc, k32_SehReturn, "soul", "SehReturn");
+    return g_proc->thunk_base + (uint64_t)id * SOUL_THUNK_STRIDE;
+}
+
+int soul_seh_raise(X86State *st, uint32_t code, uint32_t flags, uint64_t eip, uint64_t esp, int nparams, const uint32_t *params) {
+    if (!g_mode32) return 0;
+    uint64_t blk = (((uint32_t)st->gpr[RSP] - SEH_BLOCK - 64) & ~15u);
+    mem_wr(blk, 4, SEH_MAGIC); mem_wr(blk + 4, 4, 0); mem_wr(blk + 8, 8, 0);
+    uint64_t rec = blk + SEH_REC;
+    memset(G2H(rec), 0, 80);
+    mem_wr(rec, 4, code); mem_wr(rec + 4, 4, flags & 1); mem_wr(rec + 12, 4, eip);
+    if (nparams > 15) nparams = 15;
+    mem_wr(rec + 16, 4, (uint32_t)nparams);
+    for (int i = 0; i < nparams; i++) mem_wr(rec + 20 + 4 * (uint64_t)i, 4, params[i]);
+    ctx_capture32(st, blk + SEH_CTX, (uint32_t)eip, (uint32_t)esp);
+    if (g_proc->verbose) soul_log("[seh] istisna 0x%08X @%x\n", code, (unsigned)eip);
+    st->gpr[RSP] = (uint32_t)blk - 64;
+    seh_next(st, blk, (uint32_t)mem_rd(teb_of(st), 4));
+    return 1;
+}
+
 HLE(k32_RaiseException) {
     uint32_t code = (uint32_t)ARG(0);
     if (code == 0x406D1388) { RET(0); return; } // MS_VC_EXCEPTION (thread naming)
-    if (code == 0xE06D7363) soul_fatal(st, "Program bir C++ istisnası fırlattı; C++ istisnaları henüz desteklenmiyor");
+    if (g_mode32) {
+        uint32_t esp = (uint32_t)st->gpr[RSP], ret = (uint32_t)mem_rd(esp, 4);
+        uint32_t n = (uint32_t)ARG(2), params[15] = { 0 };
+        if (n > 15) n = 15;
+        for (uint32_t i = 0; i < n && ARG(3); i++) params[i] = (uint32_t)mem_rd(ARG(3) + 4 * (uint64_t)i, 4);
+        soul_seh_raise(st, code, (uint32_t)ARG(1), ret, esp + 4 + 16, (int)n, params); // continuing = returning from RaiseException
+        return;
+    }
+    if (code == 0xE06D7363) soul_fatal(st, "Program bir C++ istisnası fırlattı; 64-bit C++ istisnaları henüz desteklenmiyor");
     soul_fatal(st, "Program bir Windows istisnası oluşturdu (kod 0x%08X)", code);
 }
-HLE(k32_SetUnhandledExceptionFilter) { RET(0); }
+// RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue): runs the handlers of the frames
+// above TargetFrame in unwind mode (finally blocks, destructors) and removes them from the chain.
+static void rtl_unwind32(X86State *st) {
+    uint32_t target = (uint32_t)ARG(0), tip = (uint32_t)ARG(1), recp = (uint32_t)ARG(2), retval = (uint32_t)ARG(3);
+    uint32_t esp = (uint32_t)st->gpr[RSP], after = esp + 4 + 16;
+    uint8_t *rec = g_calloc(1, 80), *ctx = g_calloc(1, 0x2CC);
+    if (recp) memcpy(rec, G2H(recp), 80);
+    else { uint32_t c = 0xC0000027; memcpy(rec, &c, 4); } // STATUS_UNWIND
+    uint32_t fl; memcpy(&fl, rec + 4, 4);
+    fl |= 2 | (target ? 0 : 4); // EXCEPTION_UNWINDING (| EXCEPTION_EXIT_UNWIND)
+    memcpy(rec + 4, &fl, 4);
+    ctx_capture32(st, H2G(ctx), (uint32_t)mem_rd(esp, 4), after);
+    uint64_t teb = teb_of(st);
+    uint32_t frame = (uint32_t)mem_rd(teb, 4);
+    while (frame != 0xFFFFFFFFu && frame && frame != target) {
+        uint32_t handler = (uint32_t)mem_rd(frame + 4, 4);
+        if (handler) { uint64_t a[4] = { H2G(rec), frame, H2G(ctx), 0 }; soul_guest_call(st, handler, 4, a); }
+        frame = (uint32_t)mem_rd(frame, 4);
+        mem_wr(teb, 4, frame);
+    }
+    g_free(rec); g_free(ctx);
+    st->gpr[RAX] = retval;
+    if (tip && tip != mem_rd(esp, 4)) { st->rip = tip; st->gpr[RSP] = after; st->thread->skip_ret = 1; return; }
+    RET(retval);
+}
+HLE(k32_RtlUnwind) {
+    if (!g_mode32) soul_fatal(st, "Yapılandırılmış istisna işleme (SEH unwind) desteklenmiyor");
+    rtl_unwind32(st);
+}
+// NtContinue(CONTEXT*, alert) / RtlRaiseException(EXCEPTION_RECORD*)
+HLE(k32_NtContinue) {
+    if (!g_mode32) soul_fatal(st, "NtContinue desteklenmiyor");
+    ctx_restore32(st, ARG(0));
+}
+HLE(k32_RtlRaiseException) {
+    if (!g_mode32) soul_fatal(st, "RtlRaiseException desteklenmiyor");
+    uint64_t r = ARG(0);
+    uint32_t n = (uint32_t)mem_rd(r + 16, 4), params[15] = { 0 };
+    if (n > 15) n = 15;
+    for (uint32_t i = 0; i < n; i++) params[i] = (uint32_t)mem_rd(r + 20 + 4 * (uint64_t)i, 4);
+    uint32_t esp = (uint32_t)st->gpr[RSP];
+    soul_seh_raise(st, (uint32_t)mem_rd(r, 4), (uint32_t)mem_rd(r + 4, 4), mem_rd(esp, 4), esp + 8, (int)n, params);
+}
+HLE(k32_SetUnhandledExceptionFilter) { uint64_t old = g_unhandled_filter; g_unhandled_filter = ARG(0); RET(old); }
 HLE(k32_UnhandledExceptionFilter) { RET(1); }
 HLE(k32_AddVectoredExceptionHandler) { RET(0x5EC0); }
 HLE(k32_RemoveVectoredExceptionHandler) { RET(1); }
@@ -1774,7 +1938,8 @@ const HleEntry hle_kernel32_table[] = {
     { "UnhandledExceptionFilter", k32_UnhandledExceptionFilter, NULL }, { "AddVectoredExceptionHandler", k32_AddVectoredExceptionHandler, NULL },
     { "RemoveVectoredExceptionHandler", k32_RemoveVectoredExceptionHandler, NULL }, { "AddVectoredContinueHandler", k32_AddVectoredExceptionHandler, NULL },
     { "RtlCaptureContext", k32_RtlCaptureContext, NULL }, { "RtlLookupFunctionEntry", k32_RtlLookupFunctionEntry, NULL },
-    { "RtlVirtualUnwind", k32_RtlVirtualUnwind, NULL }, { "RtlUnwindEx", k32_RtlUnwindEx, NULL }, { "RtlUnwind", k32_RtlUnwindEx, NULL },
+    { "RtlVirtualUnwind", k32_RtlVirtualUnwind, NULL }, { "RtlUnwindEx", k32_RtlUnwindEx, NULL }, { "RtlUnwind", k32_RtlUnwind, NULL },
+    { "NtContinue", k32_NtContinue, NULL }, { "ZwContinue", k32_NtContinue, NULL }, { "RtlRaiseException", k32_RtlRaiseException, NULL },
     { "RtlPcToFileHeader", k32_RtlPcToFileHeader, NULL }, { "EncodePointer", k32_EncodePointer, NULL }, { "DecodePointer", k32_EncodePointer, NULL },
     { "RtlEncodePointer", k32_EncodePointer, NULL }, { "RtlDecodePointer", k32_EncodePointer, NULL },
     { "SetErrorMode", k32_SetErrorMode, NULL }, { "GetErrorMode", k32_GetErrorMode, NULL }, { "SetThreadErrorMode", k32_SetErrorMode, NULL },

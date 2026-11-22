@@ -68,7 +68,7 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86)
 | Pencereli programlar: user32 pencereleri, GDI, denetimler, menüler, diyaloglar, Dosya Aç/Kaydet | Ortak denetimlerin çoğu (ağaç/liste görünümü, sekmeler, araç çubukları) |
 | Dosya/klasör API'leri, ortam değişkenleri, zaman | .NET programları, `.msi` kurulumları |
 | printf/scanf ailesi, C++ STL (statik libstdc++) | Alt süreç başlatma (`CreateProcess`, `system`) |
-| setjmp/longjmp, TLS, programla gelen x64/x86 DLL'ler, 32-bit programlarda C++ istisnaları | 64-bit programlarda C++ istisnaları (SEH), AVX |
+| setjmp/longjmp, TLS, programla gelen x64/x86 DLL'ler; 32-bit programlarda C++ istisnaları ve SEH (fs:[0] zinciri, RaiseException, RtlUnwind, sıfıra bölme yakalama — Delphi/MSVC tarzı) | 64-bit programlarda C++ istisnaları (SEH unwind tabloları), AVX |
 | MessageBox, renkli konsol (SetConsoleTextAttribute) | Ağ (Winsock), ses |
 | Kalıcı kayıt defteri (programların ayarları korunur), web bağlantıları Safari'de açılır | Kurulum sihirbazları (Inno Setup/NSIS alt süreç başlatır), başka program başlatma |
 | CreateThread, kritik bölge, SRW, koşul değişkeni, olay/mutex/semafor | Gerçek paralel çalışma (iş parçacıkları sırayla çalışır) |

@@ -19,6 +19,13 @@ static inline void wr_loc(X86State *st, const X86Insn *in, Loc l, int size, uint
     else reg_wr(st, in, l.reg, size, v);
 }
 
+// #DE: 32-bit programs get EXCEPTION_INT_DIVIDE_BY_ZERO / _OVERFLOW through their SEH chain.
+static int divide_error(X86State *st, const X86Insn *in, int overflow) {
+    if (soul_seh_raise(st, overflow ? 0xC0000095u : 0xC0000094u, 0, in->addr, st->gpr[RSP], 0, NULL)) return 1;
+    if (overflow) soul_fatal(st, "Bölme taşması (#DE) @%llx", (unsigned long long)in->addr);
+    soul_fatal(st, "Tamsayı sıfıra bölme (#DE) @%llx", (unsigned long long)in->addr);
+}
+
 __attribute__((noreturn)) static void unsupported(X86State *st, const X86Insn *in) {
     const uint8_t *b = (const uint8_t *)G2H(in->addr);
     soul_fatal(st, "Desteklenmeyen x86 komutu @%016llx: %02x %02x %02x %02x %02x %02x (map %d op %02x)",
@@ -313,50 +320,50 @@ static void do_group3(X86State *st, const X86Insn *in, int size) {
         return;
     }
     case 6: { // DIV
-        if (v == 0) soul_fatal(st, "Tamsayı sıfıra bölme (#DE) @%llx", (unsigned long long)in->addr);
+        if (v == 0) { divide_error(st, in, 0); return; }
         if (size == 1) {
             uint64_t n = st->gpr[RAX] & 0xFFFF, q = n / v, r = n % v;
-            if (q > 0xFF) soul_fatal(st, "Bölme taşması (#DE)");
+            if (q > 0xFF) { divide_error(st, in, 1); return; }
             reg_wr(st, in, RAX, 2, (r << 8) | q);
         } else if (size == 2) {
             uint64_t n = ((st->gpr[RDX] & 0xFFFF) << 16) | (st->gpr[RAX] & 0xFFFF), q = n / v, r = n % v;
-            if (q > 0xFFFF) soul_fatal(st, "Bölme taşması (#DE)");
+            if (q > 0xFFFF) { divide_error(st, in, 1); return; }
             reg_wr(st, in, RAX, 2, q); reg_wr(st, in, RDX, 2, r);
         } else if (size == 4) {
             uint64_t n = ((st->gpr[RDX] & 0xFFFFFFFFull) << 32) | (st->gpr[RAX] & 0xFFFFFFFFull), q = n / v, r = n % v;
-            if (q > 0xFFFFFFFFull) soul_fatal(st, "Bölme taşması (#DE)");
+            if (q > 0xFFFFFFFFull) { divide_error(st, in, 1); return; }
             st->gpr[RAX] = q; st->gpr[RDX] = r;
         } else {
             unsigned __int128 n = ((unsigned __int128)st->gpr[RDX] << 64) | st->gpr[RAX];
             unsigned __int128 q = n / v;
-            if (q >> 64) soul_fatal(st, "Bölme taşması (#DE)");
+            if (q >> 64) { divide_error(st, in, 1); return; }
             st->gpr[RAX] = (uint64_t)q; st->gpr[RDX] = (uint64_t)(n % v);
         }
         return;
     }
     default: { // IDIV
         int64_t sv = sext(v, size);
-        if (sv == 0) soul_fatal(st, "Tamsayı sıfıra bölme (#DE) @%llx", (unsigned long long)in->addr);
+        if (sv == 0) { divide_error(st, in, 0); return; }
         if (size == 1) {
             int64_t n = (int16_t)st->gpr[RAX], q = n / sv, r = n % sv;
-            if (q != (int8_t)q) soul_fatal(st, "Bölme taşması (#DE)");
+            if (q != (int8_t)q) { divide_error(st, in, 1); return; }
             reg_wr(st, in, RAX, 2, ((uint64_t)(r & 0xFF) << 8) | (q & 0xFF));
         } else if (size == 2) {
             int64_t n = (int32_t)(((st->gpr[RDX] & 0xFFFF) << 16) | (st->gpr[RAX] & 0xFFFF)), q = n / sv, r = n % sv;
-            if (q != (int16_t)q) soul_fatal(st, "Bölme taşması (#DE)");
+            if (q != (int16_t)q) { divide_error(st, in, 1); return; }
             reg_wr(st, in, RAX, 2, (uint64_t)q); reg_wr(st, in, RDX, 2, (uint64_t)r);
         } else if (size == 4) {
             int64_t n = (int64_t)(((st->gpr[RDX] & 0xFFFFFFFFull) << 32) | (st->gpr[RAX] & 0xFFFFFFFFull));
-            if (sv == -1 && n == INT64_MIN) soul_fatal(st, "Bölme taşması (#DE)");
+            if (sv == -1 && n == INT64_MIN) { divide_error(st, in, 1); return; }
             int64_t q = n / sv, r = n % sv;
-            if (q != (int32_t)q) soul_fatal(st, "Bölme taşması (#DE)");
+            if (q != (int32_t)q) { divide_error(st, in, 1); return; }
             st->gpr[RAX] = (uint32_t)q; st->gpr[RDX] = (uint32_t)r;
         } else {
             __int128 n = (__int128)(((unsigned __int128)st->gpr[RDX] << 64) | st->gpr[RAX]);
             if (sv == -1 && (int64_t)st->gpr[RAX] == INT64_MIN && (int64_t)st->gpr[RDX] == -1)
-                soul_fatal(st, "Bölme taşması (#DE)");
+                { divide_error(st, in, 1); return; }
             __int128 q = n / sv, r = n % sv;
-            if (q != (int64_t)q) soul_fatal(st, "Bölme taşması (#DE)");
+            if (q != (int64_t)q) { divide_error(st, in, 1); return; }
             st->gpr[RAX] = (uint64_t)q; st->gpr[RDX] = (uint64_t)r;
         }
         return;

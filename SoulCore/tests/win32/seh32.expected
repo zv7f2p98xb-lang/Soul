@@ -1,0 +1,12 @@
+1 raise
+  outer: catches e0000002 params=1 p0=42
+2 continue execution
+  resumed 2 times
+3 nested frames
+  inner: passes e0000004 on
+  outer: catches e0000004 params=0 p0=0
+  inner: unwinding
+4 divide by zero
+  outer: catches c0000094 params=0 p0=0
+5 chain restored: yes
+unhandled filter: e0000009

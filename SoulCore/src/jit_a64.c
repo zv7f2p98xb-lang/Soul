@@ -756,6 +756,15 @@ static int translate(J *j, const Slot *s) {
                 em(e, a_mov(1, 0, R_ST));
                 mov_imm(j, 1, (uint64_t)(uintptr_t)copy);
                 call_helper(j, (void *)jit_h_exec);           // interpreter raises #DE or handles 128-bit cases
+                if (g_mode32) { // #DE became an SEH exception: continue at the handler the interpreter chose
+                    em(e, a_ldr_imm(3, T2, R_ST, ST_OFF(rip)));
+                    mov_imm(j, T3, next);
+                    em(e, a_addsub_reg(1, 1, 1, XZR, T2, T3, 0, 0));
+                    uint32_t *same = e->p;
+                    em(e, a_bcond(C_EQ, 0));
+                    emit_exit_reg(j, T2);
+                    if (!e->overflow) *same = a_bcond(C_EQ, (int32_t)(e->p - same));
+                }
                 uint32_t *done = e->p;
                 if (!e->overflow) {
                     for (int k = 0; k < ns; k++) {
@@ -1233,6 +1242,8 @@ static int callout_ok(const X86Insn *in) {
             return 0;
         case 0xFF:
             return (in->reg & 7) < 2 || (in->reg & 7) == 6;
+        case 0xF6: case 0xF7:
+            return (in->reg & 7) < 6; // DIV/IDIV may raise #DE (an SEH exception): leave the block first
         default:
             return 1;
         }

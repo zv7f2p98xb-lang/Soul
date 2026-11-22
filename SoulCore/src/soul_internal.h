@@ -35,6 +35,8 @@ struct SoulThread {
     void *stack_mem;
     size_t stack_size;
     uint64_t fls[128];
+    uint64_t seh_disp[16];  // 32-bit SEH: guest addresses of exception dispatches in progress
+    int seh_n;
     struct SoulThread *next;
 };
 
@@ -199,6 +201,11 @@ void gheap_reset(void);
 // anywhere (mmap) for 64-bit ones. Returns a host pointer.
 void *g_pages(size_t size);
 void g_pages_free(void *p, size_t size);
+
+// hle_kernel32.c: raises a Windows exception in a 32-bit program through its SEH chain
+// (fs:[0]); eip/esp describe where execution would continue. Returns 0 when it cannot be
+// dispatched (64-bit program), 1 when st now runs the first exception handler.
+int soul_seh_raise(X86State *st, uint32_t code, uint32_t flags, uint64_t eip, uint64_t esp, int nparams, const uint32_t *params);
 
 // pe.c
 int pe_machine(const char *host_path); // 0x14C (i386), 0x8664 (x64) or 0

@@ -21,7 +21,7 @@ struct AboutView: View {
                 Bullet(ok: true, "64-bit (x64) ve 32-bit (x86) programlar: ikisi de JIT ile ARM64'e çevrilip M çipinde çalışır")
                 Bullet(ok: true, "Konsol programları (C, C++, MinGW veya MSVC ile derlenmiş)")
                 Bullet(ok: true, "Dosya okuma/yazma, klasör listeleme, klavye girdisi, renkli konsol çıktısı")
-                Bullet(ok: true, "Programla gelen DLL'ler, statik C++ çalışma zamanı, setjmp/longjmp, TLS; 32-bit programlarda C++ istisnaları")
+                Bullet(ok: true, "Programla gelen DLL'ler, statik C++ çalışma zamanı, setjmp/longjmp, TLS; 32-bit programlarda C++ istisnaları ve Windows istisna işleme (SEH)")
                 Bullet(ok: true, "Pencereli (GUI) programlar: pencereler, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler, diyaloglar, zamanlayıcılar")
                 Bullet(ok: true, "OpenGL 1.x 3B grafik: Soul'un grafik çeviri katmanı (doku, ışık, sis, saydamlık, derinlik tamponu)")
                 Bullet(ok: true, "Dokunma → fare (uzun basış = sağ tık, iki parmak = tekerlek), donanım ve ekran klavyesi")
