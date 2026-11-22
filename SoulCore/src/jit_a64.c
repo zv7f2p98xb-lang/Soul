@@ -46,8 +46,9 @@ struct JitCache {
 // x86 flag producer kinds that map onto native NZCV
 enum { NK_NONE = 0, NK_SUB, NK_ADD, NK_LOGIC, NK_INC, NK_SHIFT, NK_FCMP };
 
-// host register roles
-enum { R_ST = 19, T0 = 0, T1 = 1, T2 = 2, T3 = 3, T4 = 4, R_EA = 6, S14 = 14, S15 = 15, R_CALL = 16 };
+// host register roles. R_GB holds the guest base (X86State.gbase): 32-bit programs live in a 4 GB
+// window, so their memory operands become R_GB + zero-extended 32-bit guest address.
+enum { R_ST = 19, R_GB = 20, T0 = 0, T1 = 1, T2 = 2, T3 = 3, T4 = 4, R_EA = 6, S14 = 14, S15 = 15, R_CALL = 16 };
 
 typedef struct {
     Emit e;
@@ -137,7 +138,10 @@ static void emit_ea(J *j, const X86Insn *in, int with_seg) {
     if (with_seg && in->seg) {
         em(e, a_ldr_imm(3, S15, R_ST, in->seg == SEG_FS ? ST_OFF(fs_base) : ST_OFF(gs_base)));
         em(e, a_addsub_reg(1, 0, 0, R_EA, R_EA, S15, 0, 0));
+        if (g_mode32) em(e, a_mov(0, R_EA, R_EA)); // linear addresses wrap at 4 GB
     }
+    // with_seg is set for memory operands (LEA wants the guest value): translate to a host address
+    if (with_seg && g_mode32) em(e, a_addsub_reg(1, 0, 0, R_EA, R_GB, R_EA, 0, 0));
 }
 
 // Load the r/m operand (register or memory, address must already be in R_EA for memory).
@@ -263,7 +267,7 @@ static void emit_epilogue(J *j) {
     em(e, a_ret());
 }
 
-#define PROLOGUE_INSNS 3
+#define PROLOGUE_INSNS 4
 
 // Block exit to a target held in register r (T2..T4 allowed). The guest rip is
 // stored, then the fast lookup table is probed inline: on a hit we jump straight
@@ -308,10 +312,205 @@ static void emit_exit_reg(J *j, int r) {
 
 static void emit_push(J *j, int hr_val) {
     Emit *e = &j->e;
+    if (g_mode32) { // ESP -= 4; [R_GB + ESP] = value (32-bit)
+        em(e, a_ldr_imm(2, T4, R_ST, gpr_off(RSP)));
+        em(e, a_addsub_imm(0, 1, 0, T4, T4, 4, 0));
+        em(e, a_str_imm(3, T4, R_ST, gpr_off(RSP)));
+        em(e, a_addsub_reg(1, 0, 0, S15, R_GB, T4, 0, 0));
+        em(e, a_str_imm(2, hr_val, S15, 0));
+        return;
+    }
     em(e, a_ldr_imm(3, T4, R_ST, gpr_off(RSP)));
     em(e, a_addsub_imm(1, 1, 0, T4, T4, 8, 0));
     em(e, a_str_imm(3, hr_val, T4, 0));
     em(e, a_str_imm(3, T4, R_ST, gpr_off(RSP)));
+}
+// Pops a stack slot into hr_dst; extra bytes (RET imm16) are released as well.
+static void emit_pop(J *j, int hr_dst, int64_t extra) {
+    Emit *e = &j->e;
+    if (g_mode32) {
+        em(e, a_ldr_imm(2, T4, R_ST, gpr_off(RSP)));
+        em(e, a_addsub_reg(1, 0, 0, S15, R_GB, T4, 0, 0));
+        em(e, a_ldr_imm(2, hr_dst, S15, 0));
+        if (extra + 4 < 4096) em(e, a_addsub_imm(0, 0, 0, T4, T4, (uint32_t)(4 + extra), 0));
+        else { mov_imm(j, S14, (uint64_t)(4 + extra)); em(e, a_addsub_reg(0, 0, 0, T4, T4, S14, 0, 0)); }
+        em(e, a_str_imm(3, T4, R_ST, gpr_off(RSP)));
+        return;
+    }
+    em(e, a_ldr_imm(3, T4, R_ST, gpr_off(RSP)));
+    em(e, a_ldr_imm(3, hr_dst, T4, 0));
+    add_imm(j, T4, T4, 8 + extra);
+    em(e, a_str_imm(3, T4, R_ST, gpr_off(RSP)));
+}
+
+// ---- x87 FPU --------------------------------------------------------------------------------------
+// The register stack lives in X86State.fpr[8] (doubles) with the top index in ftop, exactly as the
+// interpreter keeps it, so translated and interpreted x87 code can be freely mixed. S14 holds ftop
+// while an instruction is translated; S15 addresses the slot of ST(i).
+
+static void x87_top(J *j) { em(&j->e, a_ldr_imm(2, S14, R_ST, ST_OFF(ftop))); }
+static void x87_slot(J *j, int i) { // x15 = R_ST + ((ftop + i) & 7) * 8
+    Emit *e = &j->e;
+    if (i) { em(e, a_addsub_imm(0, 0, 0, S15, S14, (uint32_t)i, 0)); em(e, a_bfm(0, 2, S15, S15, 0, 2)); }
+    else em(e, a_bfm(0, 2, S15, S14, 0, 2));
+    em(e, a_addsub_reg(1, 0, 0, S15, R_ST, S15, 0, 3));
+}
+static void x87_ld(J *j, int d, int i) { x87_slot(j, i); em(&j->e, a_ldr_fp(3, d, S15, ST_OFF(fpr))); }
+static void x87_st(J *j, int d, int i) { x87_slot(j, i); em(&j->e, a_str_fp(3, d, S15, ST_OFF(fpr))); }
+static void x87_push(J *j, int d) { // ftop = (ftop - 1) & 7; ST(0) = d; tag valid
+    Emit *e = &j->e;
+    em(e, a_addsub_imm(0, 1, 0, S14, S14, 1, 0));
+    em(e, a_bfm(0, 2, S14, S14, 0, 2));
+    em(e, a_str_imm(2, S14, R_ST, ST_OFF(ftop)));
+    x87_st(j, d, 0);
+    em(e, a_addsub_reg(1, 0, 0, S15, R_ST, S14, 0, 0));
+    em(e, a_str_imm(0, XZR, S15, ST_OFF(ftag)));
+}
+static void x87_pop(J *j) { // tag empty; ftop = (ftop + 1) & 7
+    Emit *e = &j->e;
+    em(e, a_addsub_reg(1, 0, 0, S15, R_ST, S14, 0, 0));
+    em(e, a_movz(0, T3, 1, 0));
+    em(e, a_str_imm(0, T3, S15, ST_OFF(ftag)));
+    em(e, a_addsub_imm(0, 0, 0, S14, S14, 1, 0));
+    em(e, a_bfm(0, 2, S14, S14, 0, 2));
+    em(e, a_str_imm(2, S14, R_ST, ST_OFF(ftop)));
+}
+// d0 = d0 op d1 for the x87 arithmetic group (0 add, 1 mul, 4 sub, 5 subr, 6 div, 7 divr)
+static int x87_arith(J *j, int r) {
+    Emit *e = &j->e;
+    switch (r) {
+    case 0: em(e, a_fp2(1, 2, 0, 0, 1)); return 0;
+    case 1: em(e, a_fp2(1, 0, 0, 0, 1)); return 0;
+    case 4: em(e, a_fp2(1, 3, 0, 0, 1)); return 0;
+    case 5: em(e, a_fp2(1, 3, 0, 1, 0)); return 0;
+    case 6: em(e, a_fp2(1, 1, 0, 0, 1)); return 0;
+    case 7: em(e, a_fp2(1, 1, 0, 1, 0)); return 0;
+    default: return -1;
+    }
+}
+// FCOMI / FUCOMI ST(0), ST(i): ZF, PF, CF like UCOMISD (d0 = ST(0), d1 = ST(i))
+static void x87_fcomi(J *j) {
+    Emit *e = &j->e;
+    em(e, a_fcmp(1, 0, 1));
+    em(e, a_cset(0, T1, C_LT));
+    em(e, a_cset(0, T2, C_EQ));
+    em(e, a_cset(0, T3, C_VS));
+    em(e, a_logic_reg(0, 1, 0, T2, T2, T3, 0, 0));
+    em(e, a_ldr_imm(3, T4, R_ST, ST_OFF(eflags)));
+    mov_imm(j, S15, ~(uint64_t)F_ARITH);
+    em(e, a_logic_reg(1, 0, 0, T4, T4, S15, 0, 0));
+    em(e, a_logic_reg(1, 1, 0, T4, T4, T1, 0, 0));
+    em(e, a_logic_reg(1, 1, 0, T4, T4, T3, 0, 2));
+    em(e, a_logic_reg(1, 1, 0, T4, T4, T2, 0, 6));
+    em(e, a_str_imm(3, T4, R_ST, ST_OFF(eflags)));
+    em(e, a_str_imm(2, XZR, R_ST, ST_OFF(lf_op)));
+    j->nat = NK_FCMP;
+}
+
+static int translate_x87(J *j, const X86Insn *in) {
+    Emit *e = &j->e;
+    uint8_t op = in->op;
+    int r = in->reg & 7, i = in->rm & 7;
+    if (in->mod != 3) {
+        switch (op) {
+        case 0xD8: case 0xDC: { // arith ST(0), m32 / m64 (FCOM forms stay in the interpreter)
+            if (r == 2 || r == 3) return -1;
+            emit_ea(j, in, 1);
+            if (op == 0xD8) { em(e, a_ldr_fp(2, 1, R_EA, 0)); em(e, a_fcvt_s2d(1, 1)); }
+            else em(e, a_ldr_fp(3, 1, R_EA, 0));
+            x87_top(j);
+            x87_ld(j, 0, 0);
+            if (x87_arith(j, r)) return -1;
+            x87_st(j, 0, 0);
+            return 0;
+        }
+        case 0xD9:
+            if (r == 0) { emit_ea(j, in, 1); em(e, a_ldr_fp(2, 0, R_EA, 0)); em(e, a_fcvt_s2d(0, 0)); x87_top(j); x87_push(j, 0); return 0; }
+            if (r == 2 || r == 3) {
+                emit_ea(j, in, 1);
+                x87_top(j);
+                x87_ld(j, 0, 0);
+                em(e, a_fcvt_d2s(0, 0));
+                em(e, a_str_fp(2, 0, R_EA, 0));
+                if (r == 3) x87_pop(j);
+                return 0;
+            }
+            return -1;
+        case 0xDD:
+            if (r == 0) { emit_ea(j, in, 1); em(e, a_ldr_fp(3, 0, R_EA, 0)); x87_top(j); x87_push(j, 0); return 0; }
+            if (r == 2 || r == 3) {
+                emit_ea(j, in, 1);
+                x87_top(j);
+                x87_ld(j, 0, 0);
+                em(e, a_str_fp(3, 0, R_EA, 0));
+                if (r == 3) x87_pop(j);
+                return 0;
+            }
+            return -1;
+        case 0xDB: // FILD m32
+            if (r != 0) return -1;
+            emit_ea(j, in, 1);
+            em(e, a_ldr_imm(2, T0, R_EA, 0));
+            em(e, a_scvtf(0, 1, 0, T0));
+            x87_top(j);
+            x87_push(j, 0);
+            return 0;
+        case 0xDF: // FILD m16 / m64
+            if (r == 0) { emit_ea(j, in, 1); em(e, a_ldr_imm(1, T0, R_EA, 0)); em(e, a_sxt(T0, T0, 16)); em(e, a_scvtf(1, 1, 0, T0)); }
+            else if (r == 5) { emit_ea(j, in, 1); em(e, a_ldr_imm(3, T0, R_EA, 0)); em(e, a_scvtf(1, 1, 0, T0)); }
+            else return -1;
+            x87_top(j);
+            x87_push(j, 0);
+            return 0;
+        default:
+            return -1;
+        }
+    }
+    switch (op) {
+    case 0xD8: // ST(0) = ST(0) op ST(i)
+        if (r == 2 || r == 3) return -1;
+        x87_top(j);
+        x87_ld(j, 0, 0);
+        x87_ld(j, 1, i);
+        if (x87_arith(j, r)) return -1;
+        x87_st(j, 0, 0);
+        return 0;
+    case 0xDC: case 0xDE: { // ST(i) = ST(i) op ST(0) (reversed SUB/DIV encodings), DE pops
+        if (r == 2 || r == 3) return -1;
+        x87_top(j);
+        x87_ld(j, 0, i);
+        x87_ld(j, 1, 0);
+        static const int rev[8] = { 0, 1, -1, -1, 5, 4, 7, 6 }; // r=4: ST0-STi, r=5: STi-ST0, r=6: ST0/STi, r=7: STi/ST0
+        if (x87_arith(j, rev[r])) return -1;
+        x87_st(j, 0, i);
+        if (op == 0xDE) x87_pop(j);
+        return 0;
+    }
+    case 0xD9:
+        if (r == 0) { x87_top(j); x87_ld(j, 0, i); x87_push(j, 0); return 0; }  // FLD ST(i)
+        if (r == 1) { x87_top(j); x87_ld(j, 0, 0); x87_ld(j, 1, i); x87_st(j, 0, i); x87_st(j, 1, 0); return 0; } // FXCH
+        switch ((r << 3) | i) {
+        case 0x20: x87_top(j); x87_ld(j, 0, 0); em(e, 0x1E614000u); x87_st(j, 0, 0); return 0;            // FCHS (fneg d0, d0)
+        case 0x21: x87_top(j); x87_ld(j, 0, 0); em(e, 0x1E60C000u); x87_st(j, 0, 0); return 0;            // FABS (fabs d0, d0)
+        case 0x28: x87_top(j); em(e, 0x1E6E1000u); x87_push(j, 0); return 0;                              // FLD1 (fmov d0, #1.0)
+        case 0x2E: x87_top(j); em(e, a_fmov_from_gpr(1, 0, XZR)); x87_push(j, 0); return 0;               // FLDZ
+        case 0x3A: x87_top(j); x87_ld(j, 0, 0); em(e, a_fsqrt(1, 0, 0)); x87_st(j, 0, 0); return 0;     // FSQRT
+        default: return -1;
+        }
+    case 0xDD:
+        if (r == 2 || r == 3) { x87_top(j); x87_ld(j, 0, 0); x87_st(j, 0, i); if (r == 3) x87_pop(j); return 0; } // FST(P) ST(i)
+        return -1;
+    case 0xDB: case 0xDF: // FUCOMI(P) / FCOMI(P) ST(0), ST(i)
+        if (r != 5 && r != 6) return -1;
+        x87_top(j);
+        x87_ld(j, 0, 0);
+        x87_ld(j, 1, i);
+        x87_fcomi(j);
+        if (op == 0xDF) x87_pop(j);
+        return 0;
+    default:
+        return -1;
+    }
 }
 
 // Returns: 0 = translated (continue), 1 = translated and block ends, -1 = not translatable.
@@ -322,9 +521,22 @@ static int translate(J *j, const Slot *s) {
     uint8_t op = in->op;
     int osz = in->opsize;
     uint64_t next = in->addr + in->len;
+    const uint64_t amask = g_mode32 ? 0xFFFFFFFFull : ~0ull; // code addresses wrap at 4 GB in 32-bit mode
+    next &= amask;
 
     // LOCK prefixes are irrelevant: guest code runs on a single host thread.
     if (in->seg && in->seg != SEG_GS && in->seg != SEG_FS) return -1;
+
+    if (g_mode32 && in->map == MAP_1) {
+        if (op >= 0x40 && op <= 0x4F) { // INC / DEC r32 (REX prefixes in 64-bit mode): same as FF /0, FF /1
+            Slot t = *s;
+            t.in.op = 0xFF; t.in.mod = 3; t.in.rm = op & 7; t.in.reg = op >= 0x48 ? 1 : 0;
+            return translate(j, &t);
+        }
+        if (op == 0x63) return -1; // ARPL, not MOVSXD
+    }
+
+    if (in->map == MAP_1 && op >= 0xD8 && op <= 0xDF) return translate_x87(j, in);
 
     if (in->map == MAP_1) {
         // ---- ALU forms -------------------------------------------------------------------
@@ -490,14 +702,14 @@ static int translate(J *j, const Slot *s) {
             }
             if (op == 0xFF && (sub == 2 || sub == 4)) { // CALL / JMP indirect
                 if (in->mod != 3) emit_ea(j, in, 1);
-                load_rm(j, in, T2, 8);
+                load_rm(j, in, T2, g_mode32 ? 4 : 8);
                 if (sub == 2) { mov_imm(j, T1, next); emit_push(j, T1); }
                 emit_exit_reg(j, T2);
                 return 1;
             }
             if (op == 0xFF && sub == 6) {
                 if (in->mod != 3) emit_ea(j, in, 1);
-                load_rm(j, in, T1, 8);
+                load_rm(j, in, T1, g_mode32 ? 4 : 8);
                 emit_push(j, T1);
                 return 0;
             }
@@ -560,10 +772,7 @@ static int translate(J *j, const Slot *s) {
         case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F: {
             if (in->p66) return -1;
             int r = (op & 7) | ((in->rex & 1) << 3);
-            em(e, a_ldr_imm(3, T4, R_ST, gpr_off(RSP)));
-            em(e, a_ldr_imm(3, T1, T4, 0));
-            em(e, a_addsub_imm(1, 0, 0, T4, T4, 8, 0));
-            em(e, a_str_imm(3, T4, R_ST, gpr_off(RSP)));
+            emit_pop(j, T1, 0);
             em(e, a_str_imm(3, T1, R_ST, gpr_off(r)));
             return 0;
         }
@@ -624,33 +833,26 @@ static int translate(J *j, const Slot *s) {
             return 0;
         }
         case 0xC3:
-            em(e, a_ldr_imm(3, T4, R_ST, gpr_off(RSP)));
-            em(e, a_ldr_imm(3, T2, T4, 0));
-            em(e, a_addsub_imm(1, 0, 0, T4, T4, 8, 0));
-            em(e, a_str_imm(3, T4, R_ST, gpr_off(RSP)));
+            emit_pop(j, T2, 0);
             emit_exit_reg(j, T2);
             return 1;
         case 0xC2:
-            em(e, a_ldr_imm(3, T4, R_ST, gpr_off(RSP)));
-            em(e, a_ldr_imm(3, T2, T4, 0));
-            add_imm(j, T4, T4, 8 + (int64_t)in->imm);
-            em(e, a_str_imm(3, T4, R_ST, gpr_off(RSP)));
+            emit_pop(j, T2, (int64_t)(in->imm & 0xFFFF));
             emit_exit_reg(j, T2);
             return 1;
-        case 0xC9: // LEAVE
+        case 0xC9: // LEAVE: RSP = RBP, pop RBP
             em(e, a_ldr_imm(3, T4, R_ST, gpr_off(RBP)));
-            em(e, a_ldr_imm(3, T1, T4, 0));
-            em(e, a_addsub_imm(1, 0, 0, T4, T4, 8, 0));
             em(e, a_str_imm(3, T4, R_ST, gpr_off(RSP)));
+            emit_pop(j, T1, 0);
             em(e, a_str_imm(3, T1, R_ST, gpr_off(RBP)));
             return 0;
         case 0xE8:
             mov_imm(j, T1, next);
             emit_push(j, T1);
-            emit_exit_imm(j, next + in->imm);
+            emit_exit_imm(j, (next + in->imm) & amask);
             return 1;
         case 0xE9: case 0xEB:
-            emit_exit_imm(j, next + in->imm);
+            emit_exit_imm(j, (next + in->imm) & amask);
             return 1;
         default:
             break;
@@ -904,7 +1106,7 @@ static int translate(J *j, const Slot *s) {
 
 jcc: {
         int cc = op & 0xF;
-        uint64_t target = next + in->imm;
+        uint64_t target = (next + in->imm) & amask;
         int c = emit_cond(j, cc);
         uint32_t *br = e->p;
         em(e, a_bcond(c, 0));
@@ -972,7 +1174,7 @@ static int decode_block(uint64_t rip, Slot *slots) {
     uint64_t pc = rip;
     while (n < MAX_BLOCK_INSNS) {
         Slot *s = &slots[n];
-        if (x86_decode((const uint8_t *)(uintptr_t)pc, pc, &s->in) != 0) break;
+        if (x86_decode((const uint8_t *)G2H(pc), pc, &s->in) != 0) break;
         const X86Insn *in = &s->in;
         s->fread = is_cc_reader(in);
         s->fwrite = 0;
@@ -982,6 +1184,8 @@ static int decode_block(uint64_t rip, Slot *slots) {
             else if (op == 0x80 || op == 0x81 || op == 0x83 || op == 0x84 || op == 0x85 || op == 0xA8 || op == 0xA9) s->fwrite = 1;
             else if ((op == 0xF6 || op == 0xF7) && ((in->reg & 7) != 2)) s->fwrite = 1;
             else if ((op == 0xFE || op == 0xFF) && (in->reg & 7) < 2) s->fwrite = 2;
+            else if (g_mode32 && op >= 0x40 && op <= 0x4F) s->fwrite = 2; // INC/DEC r32
+            else if ((op == 0xDB || op == 0xDF) && in->mod == 3 && ((in->reg & 7) == 5 || (in->reg & 7) == 6)) s->fwrite = 1; // FCOMI
             else if (op == 0xD0 || op == 0xD1 || op == 0xD2 || op == 0xD3) s->fwrite = 1;
             else if (op == 0xC0 || op == 0xC1) s->fwrite = (in->imm & ((op == 0xC1 && in->opsize == 8) ? 63 : 31)) != 0;
             else if (op == 0x69 || op == 0x6B) s->fwrite = 1;
@@ -990,6 +1194,7 @@ static int decode_block(uint64_t rip, Slot *slots) {
         }
         n++;
         pc += in->len;
+        if (g_mode32) pc = (uint32_t)pc;
         // stop after control flow
         if (in->map == MAP_1) {
             uint8_t op = in->op;
@@ -1032,6 +1237,7 @@ static BlockFn compile(JitCache *jc, uint64_t rip, X86State *st) {
     em(e, a_stp_pre(29, 30, SP_REG, -16));
     em(e, a_stp_pre(19, 20, SP_REG, -16));
     em(e, a_mov(1, R_ST, 0));
+    em(e, a_ldr_imm(3, R_GB, R_ST, ST_OFF(gbase))); // part of the prologue (PROLOGUE_INSNS)
     uint32_t *count_at = e->p;
     em(e, a_ldr_imm(3, T0, R_ST, ST_OFF(icount_jit)));
     em(e, a_addsub_imm(1, 0, 0, T0, T0, 0, 0)); // patched with the instruction count

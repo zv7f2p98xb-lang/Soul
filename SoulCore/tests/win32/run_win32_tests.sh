@@ -17,6 +17,7 @@ i686-w64-mingw32-gcc -O2 -o "$OUT/winapi32.exe" winapi.c || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/threads32.exe" threads.c || exit 1
 i686-w64-mingw32-g++ -O2 -static -o "$OUT/cpp32.exe" cpp.cpp || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/registry32.exe" registry.c || exit 1
+i686-w64-mingw32-gcc -O0 -o "$OUT/x87ops32.exe" x87ops.c || exit 1   # x87 register forms (reference: real hardware)
 pass=0; fail=0
 check() {
   local name=$1; shift
@@ -35,5 +36,6 @@ check threads threads32.exe
 check cpp cpp32.exe
 check registry-write registry32.exe yaz
 check registry-read registry32.exe
+check x87ops x87ops32.exe
 echo "passed=$pass failed=$fail"
 [ $fail -eq 0 ]

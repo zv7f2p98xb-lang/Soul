@@ -427,6 +427,7 @@ static X86State *new_state(SoulThread *t) {
     memset(st, 0, sizeof *st);
     st->eflags = 0x202;
     st->mxcsr = 0x1F80;
+    st->gbase = g_gbase;
     x87_reset(st);
     st->thread = t;
     t->st = st;
@@ -613,7 +614,7 @@ int soul_process_create(const SoulLaunchOptions *o, SoulProcess **out, char *err
     setup_peb(p);
     make_teb(p, &p->main_thread);
 
-    if (o->jit_enabled && jitmem_ready() && !g_mode32) p->jit = jit_create(p);
+    if (o->jit_enabled && jitmem_ready()) p->jit = jit_create(p);
     p->use_jit = p->jit != NULL;
     *out = p;
     return 0;

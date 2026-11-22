@@ -53,6 +53,7 @@ typedef struct X86State {
     uint64_t lf_dst, lf_src, lf_res;
     uint32_t lf_op, lf_size;
     uint64_t fs_base, gs_base;
+    uint64_t gbase;          // host address of guest address 0 (32-bit programs; 0 for 64-bit ones)
     uint64_t icount_jit;
     uint64_t icount_interp;
     uint64_t _pad0;
