@@ -32,7 +32,6 @@ struct ProgramDetailView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(!program.is64Bit)
                 }
                 if let note = program.compatibilityNote {
                     Section { Label(note, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange) }

@@ -23,5 +23,9 @@ $CC -O2 -s -mwindows -o "$OUT/Yilan.exe" yilan.c
 $CC -O2 -s -mwindows -o "$OUT/MayinTarlasi.exe" mayin.c
 # 3D (OpenGL through Soul's graphics layer)
 $CC -O2 -s -mwindows -o "$OUT/Kup3B.exe" kup3b.c -lopengl32 -lglu32 -lm
+# 32-bit (x86) builds: same programs through the 32-bit mode of the JIT
+CC32=i686-w64-mingw32-gcc
+$CC32 -O2 -s -o "$OUT/Benchmark32.exe" benchmark.c
+$CC32 -O2 -s -mwindows -o "$OUT/Kup3B32.exe" kup3b.c -lopengl32 -lglu32 -lm
 cp samples.json "$OUT/samples.json"
 ls -la "$OUT"

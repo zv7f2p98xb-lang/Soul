@@ -25,7 +25,14 @@ final class ProgramLibrary: ObservableObject {
     private func load() {
         guard let data = try? Data(contentsOf: SoulPaths.libraryFile),
               let list = try? JSONDecoder().decode([WinProgram].self, from: data) else { return }
-        programs = list.filter { FileManager.default.fileExists(atPath: $0.hostURL.path) }
+        programs = list.filter { FileManager.default.fileExists(atPath: $0.hostURL.path) }.map { p in
+            // programs added before 32-bit support kept the old "not supported" note as their summary
+            var p = p
+            if !p.is64Bit && p.summary.hasPrefix("32-bit (x86) programlar henüz") {
+                p.summary = p.isGUI ? "Pencereli bilgisayar programı (x86, 32-bit)" : "Konsol programı (x86, 32-bit)"
+            }
+            return p
+        }
     }
 
     private func save() {
@@ -169,7 +176,8 @@ final class ProgramLibrary: ObservableObject {
             String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
         }
         if p.summary.isEmpty {
-            p.summary = p.compatibilityNote ?? (info.valid == 0 ? "Bilgisayar programı" : info.is_gui != 0 ? "Pencereli bilgisayar programı (x64)" : "Konsol programı (x64)")
+            let arch = p.is64Bit ? "x64" : "x86, 32-bit"
+            p.summary = p.compatibilityNote ?? (info.valid == 0 ? "Bilgisayar programı" : info.is_gui != 0 ? "Pencereli bilgisayar programı (\(arch))" : "Konsol programı (\(arch))")
         }
         extractIcon(for: p)
         return p

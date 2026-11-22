@@ -88,5 +88,17 @@
     "name": "C++ Demo",
     "description": "STL, sanal işlevler ve lambdalar kullanan C++ programı.",
     "args": ""
+  },
+  {
+    "file": "Benchmark32.exe",
+    "name": "JIT Benchmark (32-bit)",
+    "description": "Aynı benchmark'ın 32-bit (x86) derlemesi: x87 kayan nokta dahil JIT ile çalışır.",
+    "args": ""
+  },
+  {
+    "file": "Kup3B32.exe",
+    "name": "Küp 3B (32-bit)",
+    "description": "OpenGL küp ve kürenin 32-bit (x86) derlemesi.",
+    "args": ""
   }
 ]

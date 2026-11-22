@@ -116,7 +116,7 @@ struct ProgramCard: View {
             Text(program.name).font(.headline).lineLimit(1)
             Text(program.summary).font(.caption).foregroundStyle(.secondary).lineLimit(2, reservesSpace: true)
             HStack(spacing: 6) {
-                Badge(text: program.is64Bit ? "x64" : "x86", color: program.is64Bit ? .blue : .red)
+                Badge(text: program.is64Bit ? "x64" : "x86", color: program.is64Bit ? .blue : .teal)
                 Badge(text: program.isGUI ? "GUI" : "Konsol", color: program.isGUI ? .orange : .teal)
                 if program.isSample { Badge(text: "Örnek", color: .purple) }
             }

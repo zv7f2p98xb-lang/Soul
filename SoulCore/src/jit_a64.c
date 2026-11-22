@@ -60,7 +60,12 @@ typedef struct {
 
 static int jit_h_cond(X86State *st, int cc) { return x86_cond(st, cc); }
 static void jit_h_flags(X86State *st) { x86_flags(st); }
-static void jit_h_exec(X86State *st, const X86Insn *in) { x86_exec(st, in); }
+extern int g_interp_profile;
+extern uint64_t g_interp_hist[4 * 256];
+static void jit_h_exec(X86State *st, const X86Insn *in) {
+    if (__builtin_expect(g_interp_profile, 0)) g_interp_hist[in->map * 256 + in->op]++; // callouts show up in --profile too
+    x86_exec(st, in);
+}
 
 // ---- small emit helpers ---------------------------------------------------------------------
 
@@ -219,6 +224,40 @@ static int is_cc_reader(const X86Insn *in) {
 // ---- translation of single instructions ------------------------------------------------------------
 
 static int alu_op_supported(int aop) { return aop == 0 || aop == 1 || aop == 4 || aop == 5 || aop == 6 || aop == 7; }
+
+// ADC / SBB flags when they are still needed after the instruction (computed in C).
+static void jit_h_adc_flags(X86State *st, uint64_t dst, uint64_t src, uint64_t p) {
+    int cf = (int)(p & 1), sbb = (int)((p >> 1) & 1), size = (int)(p >> 8);
+    uint64_t m = size_mask(size), sign = 1ull << (size * 8 - 1);
+    dst &= m; src &= m;
+    uint64_t res = (sbb ? dst - src - (uint64_t)cf : dst + src + (uint64_t)cf) & m;
+    int c = sbb ? (dst < src || (cf && dst == src)) : (res < dst || (cf && res == dst));
+    int of = sbb ? ((((dst ^ src) & (dst ^ res)) & sign) != 0) : (((~(dst ^ src) & (dst ^ res)) & sign) != 0);
+    uint64_t f = (c ? F_CF : 0) | (of ? F_OF : 0) | (res == 0 ? F_ZF : 0) | ((res & sign) ? F_SF : 0) | (((dst ^ src ^ res) & 0x10) ? F_AF : 0);
+    if (!(__builtin_popcount((unsigned)(res & 0xFF)) & 1)) f |= F_PF;
+    st->eflags = (st->eflags & ~(uint64_t)F_ARITH) | f;
+    st->lf_op = LF_NONE;
+}
+// T0 = dst, T1 = src, T3 = x86 CF (0/1) -> T2 = dst + src + CF (ADC) or dst - src - CF (SBB)
+static void emit_adcsbb(J *j, int sbb, int size, int need) {
+    Emit *e = &j->e;
+    uint32_t sf = size == 8 ? 0x80000000u : 0;
+    if (!sbb) em(e, a_addsub_imm(0, 1, 1, XZR, T3, 1, 0));          // cmp w3, #1  -> ARM C = CF
+    else em(e, a_addsub_reg(0, 1, 1, XZR, XZR, T3, 0, 0));          // negs wzr, w3 -> ARM C = !CF
+    em(e, sf | (sbb ? 0x5A000000u : 0x1A000000u) | ((uint32_t)T1 << 16) | ((uint32_t)T0 << 5) | (uint32_t)T2); // adc / sbc
+    if (size == 4) em(e, a_mov(0, T2, T2));
+    j->nat = NK_NONE;
+    (void)need;
+}
+static void emit_adcsbb_flags(J *j, int sbb, int size) { // after the result was stored: x0 = dst, x1 = src, x3 = CF
+    Emit *e = &j->e;
+    mov_imm(j, S14, ((uint64_t)(uint32_t)size << 8) | ((uint64_t)sbb << 1));
+    em(e, a_logic_reg(1, 1, 0, T3, T3, S14, 0, 0));
+    em(e, a_mov(1, T2, T1));
+    em(e, a_mov(1, T1, T0));
+    em(e, a_mov(1, 0, R_ST));
+    call_helper(j, (void *)jit_h_adc_flags);
+}
 
 // T0 = dst value, T1 = src value -> T2 = result, flags as requested.
 static void emit_alu(J *j, int aop, int size, int need) {
@@ -542,6 +581,24 @@ static int translate(J *j, const Slot *s) {
         // ---- ALU forms -------------------------------------------------------------------
         if (op < 0x40 && (op & 7) < 6) {
             int aop = op >> 3, form = op & 7;
+            if (aop == 2 || aop == 3) { // ADC / SBB: 64-bit arithmetic in 32-bit programs
+                int size = (form & 1) ? osz : 1;
+                if (size < 4) return -1;
+                int c = emit_cond(j, 2);           // x86 CF (may call a helper: before the operands)
+                em(e, a_cset(0, T3, c));
+                if (form == 4 || form == 5) { load_reg(j, in, T0, RAX, size); mov_imm(j, T1, in->imm & size_mask(size)); }
+                else {
+                    if (in->mod != 3) emit_ea(j, in, 1);
+                    if (form <= 1) { load_rm(j, in, T0, size); load_reg(j, in, T1, in->reg, size); }
+                    else { load_reg(j, in, T0, in->reg, size); load_rm(j, in, T1, size); }
+                }
+                emit_adcsbb(j, aop == 3, size, need);
+                if (form == 4 || form == 5) store_reg(j, in, T2, RAX, size);
+                else if (form <= 1) store_rm(j, in, T2, size);
+                else store_reg(j, in, T2, in->reg, size);
+                if (need) emit_adcsbb_flags(j, aop == 3, size);
+                return 0;
+            }
             if (!alu_op_supported(aop)) return -1;
             int size = (form & 1) ? osz : 1;
             if (form == 4 || form == 5) {
@@ -562,8 +619,19 @@ static int translate(J *j, const Slot *s) {
         switch (op) {
         case 0x80: case 0x81: case 0x83: {
             int aop = in->reg & 7;
-            if (!alu_op_supported(aop)) return -1;
             int size = op == 0x80 ? 1 : osz;
+            if ((aop == 2 || aop == 3) && size >= 4) { // ADC / SBB r/m, imm
+                int c = emit_cond(j, 2);
+                em(e, a_cset(0, T3, c));
+                if (in->mod != 3) emit_ea(j, in, 1);
+                load_rm(j, in, T0, size);
+                mov_imm(j, T1, in->imm & size_mask(size));
+                emit_adcsbb(j, aop == 3, size, need);
+                store_rm(j, in, T2, size);
+                if (need) emit_adcsbb_flags(j, aop == 3, size);
+                return 0;
+            }
+            if (!alu_op_supported(aop)) return -1;
             if (in->mod != 3) emit_ea(j, in, 1);
             load_rm(j, in, T0, size);
             mov_imm(j, T1, in->imm & size_mask(size));
@@ -593,6 +661,41 @@ static int translate(J *j, const Slot *s) {
                 load_rm(j, in, T0, size);
                 mov_imm(j, T1, in->imm & size_mask(size));
                 emit_alu(j, 4, size, need);
+                return 0;
+            }
+            if ((sub == 4 || sub == 5) && size >= 4) { // MUL / IMUL r/m (one operand): RDX:RAX = RAX * src
+                int sgn = sub == 5;
+                if (in->mod != 3) emit_ea(j, in, 1);
+                load_rm(j, in, T1, size);
+                load_reg(j, in, T0, RAX, size);
+                if (size == 4) {
+                    em(e, (sgn ? 0x9B207C00u : 0x9BA07C00u) | ((uint32_t)T1 << 16) | ((uint32_t)T0 << 5) | (uint32_t)T2); // s/umull x2, w0, w1
+                    em(e, a_lsr(1, T3, T2, 32));
+                    if (need) {
+                        if (sgn) { em(e, a_sxt(T4, T2, 32)); em(e, a_addsub_reg(1, 1, 1, XZR, T2, T4, 0, 0)); }
+                        else em(e, a_addsub_imm(1, 1, 1, XZR, T3, 0, 0));
+                    }
+                } else {
+                    em(e, a_mul(1, T2, T0, T1));
+                    em(e, (sgn ? 0x9B407C00u : 0x9BC07C00u) | ((uint32_t)T1 << 16) | ((uint32_t)T0 << 5) | (uint32_t)T3); // s/umulh x3, x0, x1
+                    if (need) {
+                        if (sgn) { em(e, a_asr(1, T4, T2, 63)); em(e, a_addsub_reg(1, 1, 1, XZR, T3, T4, 0, 0)); }
+                        else em(e, a_addsub_imm(1, 1, 1, XZR, T3, 0, 0));
+                    }
+                }
+                if (need) em(e, a_cset(0, T4, C_NE));          // CF = OF = high half is significant
+                store_reg(j, in, T2, RAX, size);
+                store_reg(j, in, T3, RDX, size);
+                if (need) { // other arithmetic flags are undefined after MUL: keep eflags, set CF/OF
+                    em(e, a_ldr_imm(3, T0, R_ST, ST_OFF(eflags)));
+                    mov_imm(j, S15, ~(uint64_t)(F_CF | F_OF));
+                    em(e, a_logic_reg(1, 0, 0, T0, T0, S15, 0, 0));
+                    em(e, a_logic_reg(1, 1, 0, T0, T0, T4, 0, 0));
+                    em(e, a_logic_reg(1, 1, 0, T0, T0, T4, 0, 11));
+                    em(e, a_str_imm(3, T0, R_ST, ST_OFF(eflags)));
+                    em(e, a_str_imm(2, XZR, R_ST, ST_OFF(lf_op)));
+                }
+                j->nat = NK_NONE;
                 return 0;
             }
             if (sub == 2) { // NOT
