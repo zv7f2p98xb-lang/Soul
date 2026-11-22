@@ -7,6 +7,7 @@
 // notifier thread, so the render thread never waits for the guest.
 #include "hle.h"
 #include "gui.h"
+#include "audio.h"
 #include <math.h>
 #include <pthread.h>
 #include <strings.h>
@@ -55,13 +56,19 @@ static pthread_cond_t g_note_cv = PTHREAD_COND_INITIALIZER;
 
 // ---- notifications ----------------------------------------------------------------------------------------
 
-typedef struct Note { int kind; uint32_t pid; int cb_type; uint64_t target, instance, handle, p1; uint32_t msg; HObj *event; } Note;
+// kind 1: waveOut message, 2: DirectSound notify event, 3: call of a method of a guest callback object (XAudio2)
+typedef struct Note { int kind; uint32_t pid; int cb_type; uint64_t target, instance, handle, p1; uint32_t msg; HObj *event;
+                      uint64_t obj; int midx, nargs; uint64_t a1, a2; int *flag; uint32_t owner; } Note;
 static Note g_notes[1024];
 static int g_nnotes;
 // waveOutProc calls wait here for the process's audio callback thread
-typedef struct Call { uint32_t pid; uint64_t fn, handle, instance, p1; uint32_t msg; } Call;
+typedef struct Call { uint32_t pid; uint64_t fn; int nargs; uint64_t args[6]; uint64_t obj; int midx; int *flag; uint32_t owner; } Call;
 static Call g_calls[512];
 static int g_ncalls;
+// XAudio2 voices / engines have a unique non-zero owner number; the callback thread publishes the owner of the
+// call it is running, so DestroyVoice can wait for it
+static struct { uint32_t owner; SoulThread *thr; } g_exec[16];
+static int owner_alive(uint32_t owner);
 
 static void note_push(Note n) { // g_mu held
     if (g_nnotes < 1024) g_notes[g_nnotes++] = n;
@@ -71,13 +78,21 @@ static void deliver(Note *n) { // GIL held
     SoulProcess *p = soul_process_by_pid(n->pid);
     if (!p || p->released) return; // the program ended meanwhile
     if (n->kind == 2) { if (n->event) n->event->signaled = 1; return; } // DirectSound notify position
+    if (n->kind == 3) { // method of a guest callback object, run on the process's audio callback thread
+        pthread_mutex_lock(&g_mu);
+        if (!owner_alive(n->owner)) { /* destroyed while the note waited */ }
+        else if (g_ncalls < 512) g_calls[g_ncalls++] = (Call){ n->pid, 0, n->nargs, { n->obj, n->a1, n->a2 }, n->obj, n->midx, n->flag, n->owner };
+        else if (n->flag) *n->flag = 0;
+        pthread_mutex_unlock(&g_mu);
+        return;
+    }
     switch (n->cb_type) {
     case 1: win_post(n->target, n->msg, n->handle, n->p1); break;
     case 2: win_post_thread((uint32_t)n->target, n->msg, n->handle, n->p1); break;
     case 5: if (n->event) n->event->signaled = 1; break;
     case 3:
         pthread_mutex_lock(&g_mu);
-        if (g_ncalls < 512) g_calls[g_ncalls++] = (Call){ n->pid, n->target, n->handle, n->instance, n->p1, n->msg };
+        if (g_ncalls < 512) g_calls[g_ncalls++] = (Call){ n->pid, n->target, 5, { n->handle, n->msg, n->instance, n->p1, 0 }, 0, 0, NULL, 0 };
         pthread_mutex_unlock(&g_mu);
         break;
     default: break;
@@ -184,6 +199,8 @@ static int advance(Voice *v) {
     }
     return 0;
 }
+static int stream_mix(float *out, int frames);
+static void stream_process_exit(uint32_t pid);
 // Mixes frames into out (interleaved stereo). g_mu held.
 static int mix(float *out, int frames) {
     memset(out, 0, sizeof(float) * 2 * (size_t)frames);
@@ -215,6 +232,7 @@ static int mix(float *out, int frames) {
             if (ended || !v->used || !v->playing) break;
         }
     }
+    if (stream_mix(out, frames)) any = 1;
     for (int i = 0; i < 2 * frames; i++) out[i] = out[i] > 1 ? 1 : out[i] < -1 ? -1 : out[i];
     return any;
 }
@@ -285,6 +303,7 @@ void audio_process_exit(uint32_t pid) {
     pthread_mutex_lock(&g_mu);
     for (int i = 0; i < MAX_VOICES; i++) if (g_v[i].used && g_v[i].pid == pid) { free(g_v[i].own); g_v[i].own = NULL; g_v[i].used = 0; g_v[i].serial = 0; }
     for (int i = 0; i < g_ncalls;) { if (g_calls[i].pid == pid) g_calls[i] = g_calls[--g_ncalls]; else i++; }
+    stream_process_exit(pid);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -307,12 +326,20 @@ HLE(mm_SoulAudioThread) { // the program's "winmm" thread: runs waveOutProc call
         int have = 0;
         pthread_mutex_lock(&g_mu);
         for (int i = 0; i < g_ncalls; i++) if (g_calls[i].pid == g_proc->pid) { c = g_calls[i]; memmove(&g_calls[i], &g_calls[i + 1], sizeof(Call) * (size_t)(g_ncalls - i - 1)); g_ncalls--; have = 1; break; }
+        int slot = -1;
+        if (have && c.owner) for (int i = 0; i < 16 && slot < 0; i++) if (!g_exec[i].owner) { slot = i; g_exec[i].owner = c.owner; g_exec[i].thr = soul_cur_thread(); }
         pthread_mutex_unlock(&g_mu);
         if (!have) { gil_wait(200); continue; }
-        uint64_t args[5] = { c.handle, c.msg, c.instance, c.p1, 0 };
-        soul_guest_call(st, c.fn, 5, args);
+        uint64_t fn = c.fn;
+        if (c.obj) fn = rd_ptr(rd_ptr(c.obj) + (uint64_t)c.midx * (uint64_t)PSZ); // guest callback object: method by vtable index
+        if (fn) soul_guest_call(st, fn, c.nargs, c.args);
+        pthread_mutex_lock(&g_mu);
+        if (slot >= 0) g_exec[slot].owner = 0;
+        if (c.flag && (!c.owner || owner_alive(c.owner))) *c.flag = 0;
+        pthread_mutex_unlock(&g_mu);
     }
 }
+void saudio_ensure_callbacks(X86State *st);
 static void ensure_cb_thread(X86State *st) {
     if (g_cb_thread) return;
     g_cb_thread = 1;
@@ -320,6 +347,7 @@ static void ensure_cb_thread(X86State *st) {
     g_proc->thunks[id].argbytes = g_mode32 ? 4 : 0;
     soul_thread_create(st, g_proc->thunk_base + (uint64_t)id * SOUL_THUNK_STRIDE, 0, 1u << 20, 0);
 }
+void saudio_ensure_callbacks(X86State *st) { ensure_cb_thread(st); }
 static void notify_now(Voice *v, uint32_t msg, uint64_t p1) { // the program's own thread: open / close messages
     Note n = { 1, v->pid, v->cb_type, v->cb_target, v->cb_instance, v->handle, p1, msg, v->cb_event };
     pthread_mutex_lock(&g_mu);
@@ -910,6 +938,643 @@ HLE(ds_DirectSoundEnumerateW) { ds_enumerate(st, 1); }
 
 // mixerGetNumDevs / auxiliary
 HLE(mm_Zero) { RET(0); }
+
+// ---- stream voices (XAudio2) --------------------------------------------------------------------------------
+// See audio.h. Everything here runs under g_mu; events are pushed as notes of kind 3 and run on the audio
+// callback thread, in the order they happened. A voice's "processing pass" events are paced at 10 ms and at most
+// one pair per voice / engine is pending, so a slow guest cannot be flooded.
+
+#define SA_MAXV 256
+#define SA_MAXE 8
+#define SA_BLK 512
+#define SA_QMAX 64
+#define SA_PASS 441
+#define SA_MAXCB 4
+
+typedef struct SBuf {
+    const uint8_t *data;
+    uint8_t *own;                  // decoded ADPCM
+    uint32_t frames, begin, end, lbegin, lend, loops_left;
+    int loop_on, infinite, eos, started;
+    uint64_t ctx;
+} SBuf;
+typedef struct SVoice {
+    int used, type, eng, adpcm, running, stage;
+    uint32_t pid, gen;
+    int in_ch, rate, bits, block, is_float;
+    SAudioFormat fmt;
+    float volume, chvol[8], ratio, maxratio;
+    int route_default, nsend, send[16];
+    float mat[16][64];             // per send: index = dst channel * in_ch + src channel
+    SBuf q[SA_QMAX];
+    int qh, qn;
+    uint32_t pos;                  // frame in the head buffer
+    double frac;
+    uint64_t played;
+    uint64_t cb;
+    int pass_pending;
+    uint32_t pass_acc;
+    float *acc;                    // submix / mastering: input of the current block
+} SVoice;
+typedef struct SEngine {
+    int used, running, master, pass_pending, ncb;
+    uint32_t pid, pass_acc, gen;
+    uint64_t cbs[SA_MAXCB];
+} SEngine;
+static SVoice g_sv[SA_MAXV];
+static SEngine g_se[SA_MAXE];
+static uint32_t g_sgen;
+
+static int owner_alive(uint32_t owner) { // g_mu held
+    if (!owner) return 1;
+    for (int i = 0; i < SA_MAXV; i++) if (g_sv[i].used && g_sv[i].gen == owner) return 1;
+    for (int i = 0; i < SA_MAXE; i++) if (g_se[i].used && g_se[i].gen == owner) return 1;
+    return 0;
+}
+// g_mu held: drops the notes and calls of a destroyed voice / engine that were not delivered yet (order kept)
+static void purge_owner(uint32_t o) {
+    int k = 0;
+    for (int i = 0; i < g_nnotes; i++) if (g_notes[i].owner != o) g_notes[k++] = g_notes[i];
+    g_nnotes = k;
+    k = 0;
+    for (int i = 0; i < g_ncalls; i++) if (g_calls[i].owner != o) g_calls[k++] = g_calls[i];
+    g_ncalls = k;
+}
+// Waits (GIL released) until the callback thread is no longer running a callback of these owners. Not when
+// called from inside such a callback (XAudio2 forbids that anyway).
+static void wait_owners(const uint32_t *o, int n) {
+    SoulThread *t = soul_cur_thread();
+    for (;;) {
+        int busy = 0;
+        pthread_mutex_lock(&g_mu);
+        for (int i = 0; i < 16; i++) if (g_exec[i].owner && g_exec[i].thr != t) for (int k = 0; k < n; k++) if (g_exec[i].owner == o[k]) busy = 1;
+        pthread_mutex_unlock(&g_mu);
+        if (!busy) return;
+        gil_unlock(t);
+        usleep(1000);
+        gil_lock(t);
+    }
+}
+
+static uint32_t cur_pid(void) { return g_proc ? g_proc->pid : 0; }
+static SVoice *sv_get(int v) { return v >= 0 && v < SA_MAXV && g_sv[v].used && g_sv[v].pid == cur_pid() ? &g_sv[v] : NULL; }
+static SEngine *se_get(int e) { return e >= 0 && e < SA_MAXE && g_se[e].used && g_se[e].pid == cur_pid() ? &g_se[e] : NULL; }
+
+static void sv_call(SVoice *s, int midx, int nargs, uint64_t a1, int *flag) {
+    if (!s->cb) return;
+    Note n;
+    memset(&n, 0, sizeof n);
+    n.kind = 3; n.pid = s->pid; n.owner = s->gen; n.obj = s->cb; n.midx = midx; n.nargs = nargs; n.a1 = a1; n.flag = flag;
+    note_push(n);
+}
+static void sv_release_buf(SBuf *b) { free(b->own); b->own = NULL; }
+static void sv_free(SVoice *s) { // g_mu held
+    for (int i = 0; i < s->qn; i++) sv_release_buf(&s->q[(s->qh + i) % SA_QMAX]);
+    free(s->acc);
+    memset(s, 0, sizeof *s);
+}
+
+int saudio_format_parse(const uint8_t *w, SAudioFormat *f) {
+    memset(f, 0, sizeof *f);
+    uint16_t tag, ch, align, bits, cb;
+    uint32_t rate;
+    memcpy(&tag, w, 2); memcpy(&ch, w + 2, 2); memcpy(&rate, w + 4, 4); memcpy(&align, w + 12, 2); memcpy(&bits, w + 14, 2);
+    cb = tag == 1 || tag == 3 ? 0 : (uint16_t)(w[16] | w[17] << 8);
+    if (tag == 0xFFFE) {
+        memcpy(&cb, w + 16, 2);
+        if (cb < 22) return -1;
+        memcpy(&tag, w + 24, 2); // first word of the SubFormat GUID
+    }
+    if (!ch || ch > 8 || rate < 1000 || rate > 200000) return -1;
+    f->tag = tag; f->channels = ch; f->rate = (int)rate; f->bits = bits;
+    if (tag == 1) { if (bits != 8 && bits != 16 && bits != 24 && bits != 32) return -1; f->block = ch * bits / 8; }
+    else if (tag == 3) { if (bits != 32) return -1; f->block = ch * 4; }
+    else if (tag == 2) { // MS-ADPCM: samples per block, coefficient count, coefficient pairs
+        if (ch > 2 || bits != 4 || align < 7 * (uint16_t)ch || cb < 4) return -1;
+        uint16_t spb, nc;
+        memcpy(&spb, w + 18, 2); memcpy(&nc, w + 20, 2);
+        if (nc > 16 || (uint32_t)nc * 4 + 4 > cb || !spb) return -1;
+        for (int i = 0; i < nc; i++) { int16_t a, b; memcpy(&a, w + 22 + 4 * i, 2); memcpy(&b, w + 24 + 4 * i, 2); f->coef[i][0] = a; f->coef[i][1] = b; }
+        f->ncoef = nc; f->spb = spb; f->block = align;
+    } else return -1; // xWMA and others
+    return 0;
+}
+
+// MS-ADPCM -> 16-bit PCM. Returns frames, or -1.
+static int64_t adpcm_decode(const SAudioFormat *f, const uint8_t *d, uint32_t bytes, int16_t **out) {
+    static const int adapt[16] = { 230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230 };
+    int ch = f->channels, blk = f->block;
+    if (blk <= 0 || bytes % (uint32_t)blk) return -1;
+    uint32_t nb = bytes / (uint32_t)blk;
+    int spb = (blk - 7 * ch) * 2 / ch + 2;
+    int16_t *o = malloc((size_t)nb * (size_t)spb * (size_t)ch * 2 + 2);
+    if (!o) return -1;
+    for (uint32_t b = 0; b < nb; b++) {
+        const uint8_t *p = d + (size_t)b * (size_t)blk;
+        int16_t *op = o + (size_t)b * (size_t)spb * (size_t)ch;
+        int pred[2], delta[2], s1[2], s2[2], c1[2], c2[2];
+        for (int c = 0; c < ch; c++) {
+            int idx = p[c];
+            if (idx >= (f->ncoef ? f->ncoef : 7)) idx = 0;
+            static const int16_t std[7][2] = { { 256, 0 }, { 512, -256 }, { 0, 0 }, { 192, 64 }, { 240, 0 }, { 460, -208 }, { 392, -232 } };
+            c1[c] = f->ncoef ? f->coef[idx][0] : std[idx][0];
+            c2[c] = f->ncoef ? f->coef[idx][1] : std[idx][1];
+        }
+        const uint8_t *q = p + ch;
+        for (int c = 0; c < ch; c++, q += 2) delta[c] = (int16_t)(q[0] | q[1] << 8);
+        for (int c = 0; c < ch; c++, q += 2) s1[c] = (int16_t)(q[0] | q[1] << 8);
+        for (int c = 0; c < ch; c++, q += 2) s2[c] = (int16_t)(q[0] | q[1] << 8);
+        for (int c = 0; c < ch; c++) { op[c] = (int16_t)s2[c]; op[ch + c] = (int16_t)s1[c]; }
+        int n = 2;
+        const uint8_t *end = p + blk;
+        int nib = 0; // nibble counter over interleaved samples
+        for (; q < end && n < spb; q++) {
+            for (int h = 0; h < 2 && n < spb; h++, nib++) {
+                int c = ch == 2 ? h : 0;
+                int v = h == 0 ? q[0] >> 4 : q[0] & 15;
+                int sv = v >= 8 ? v - 16 : v;
+                pred[c] = ((s1[c] * c1[c] + s2[c] * c2[c]) >> 8) + sv * delta[c];
+                if (pred[c] > 32767) pred[c] = 32767;
+                if (pred[c] < -32768) pred[c] = -32768;
+                s2[c] = s1[c]; s1[c] = pred[c];
+                delta[c] = (adapt[v] * delta[c]) >> 8;
+                if (delta[c] < 16) delta[c] = 16;
+                op[(size_t)n * (size_t)ch + (size_t)c] = (int16_t)pred[c];
+                if (ch == 1 || h == 1) n++;
+            }
+        }
+    }
+    *out = o;
+    return (int64_t)nb * spb;
+}
+
+// ---- engines and voices
+int saudio_engine_new(void) {
+    pthread_mutex_lock(&g_mu);
+    int r = -1;
+    for (int i = 0; i < SA_MAXE; i++) if (!g_se[i].used) {
+        memset(&g_se[i], 0, sizeof g_se[i]);
+        g_se[i].used = 1; g_se[i].gen = ++g_sgen; g_se[i].running = 1; g_se[i].master = -1; g_se[i].pid = cur_pid();
+        ensure_threads();
+        r = i;
+        break;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+void saudio_engine_free(int e) {
+    uint32_t owners[SA_MAXV + 1];
+    int no = 0;
+    pthread_mutex_lock(&g_mu);
+    if (se_get(e)) {
+        for (int i = 0; i < SA_MAXV; i++) if (g_sv[i].used && g_sv[i].eng == e) { owners[no++] = g_sv[i].gen; purge_owner(g_sv[i].gen); sv_free(&g_sv[i]); }
+        owners[no++] = g_se[e].gen;
+        purge_owner(g_se[e].gen);
+        g_se[e].used = 0;
+    }
+    pthread_mutex_unlock(&g_mu);
+    wait_owners(owners, no);
+}
+void saudio_engine_run(int e, int on) { pthread_mutex_lock(&g_mu); SEngine *x = se_get(e); if (x) x->running = on != 0; pthread_mutex_unlock(&g_mu); }
+int saudio_engine_callback(int e, uint64_t obj, int add) {
+    pthread_mutex_lock(&g_mu);
+    SEngine *x = se_get(e);
+    int r = -1;
+    if (x) {
+        r = 0;
+        for (int i = 0; i < x->ncb; i++) if (x->cbs[i] == obj) { memmove(&x->cbs[i], &x->cbs[i + 1], sizeof(uint64_t) * (size_t)(x->ncb - i - 1)); x->ncb--; break; }
+        if (add) { if (x->ncb < SA_MAXCB) x->cbs[x->ncb++] = obj; else r = -1; }
+    }
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+void saudio_engine_stats(int e, uint32_t *active, uint32_t *total, uint32_t *sub) {
+    *active = *total = *sub = 0;
+    pthread_mutex_lock(&g_mu);
+    if (se_get(e)) for (int i = 0; i < SA_MAXV; i++) {
+        SVoice *s = &g_sv[i];
+        if (!s->used || s->eng != e) continue;
+        if (s->type == SA_SOURCE) { (*total)++; if (s->running && s->qn) (*active)++; }
+        else if (s->type == SA_SUBMIX) (*sub)++;
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+int saudio_voice_master(int e) { pthread_mutex_lock(&g_mu); SEngine *x = se_get(e); int m = x ? x->master : -1; pthread_mutex_unlock(&g_mu); return m; }
+
+int saudio_voice_new(int e, int type, const SAudioFormat *fmt, int channels, int rate, float max_ratio, uint64_t cb_obj, int stage) {
+    pthread_mutex_lock(&g_mu);
+    SEngine *x = se_get(e);
+    int r = -1;
+    if (!x || (type == SA_MASTER && x->master >= 0)) goto out;
+    if (type != SA_SOURCE && (channels < 1 || channels > 8)) goto out;
+    for (int i = 0; i < SA_MAXV; i++) if (!g_sv[i].used) {
+        SVoice *s = &g_sv[i];
+        memset(s, 0, sizeof *s);
+        s->used = 1; s->gen = ++g_sgen; s->type = type; s->eng = e; s->pid = x->pid; s->stage = stage; s->cb = cb_obj;
+        s->volume = 1; s->ratio = 1; s->route_default = 1;
+        for (int c = 0; c < 8; c++) s->chvol[c] = 1;
+        if (type == SA_SOURCE) {
+            s->fmt = *fmt; s->in_ch = fmt->channels; s->rate = fmt->rate; s->bits = fmt->bits; s->block = fmt->block; s->is_float = fmt->tag == 3;
+            if (fmt->tag == 2) { s->adpcm = 1; s->bits = 16; s->block = fmt->channels * 2; }
+            s->maxratio = max_ratio < 1.0f / 1024 ? 2.0f : max_ratio > 1024 ? 1024 : max_ratio;
+        } else {
+            s->in_ch = channels; s->rate = rate;
+            s->acc = calloc((size_t)SA_BLK * 8, sizeof(float));
+            if (!s->acc) { s->used = 0; goto out; }
+            if (type == SA_MASTER) x->master = i;
+        }
+        r = i;
+        break;
+    }
+out:
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+void saudio_voice_free(int v) {
+    uint32_t owner = 0;
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    if (s) {
+        owner = s->gen;
+        purge_owner(owner);
+        SEngine *x = se_get(s->eng);
+        if (x && x->master == v) x->master = -1;
+        for (int i = 0; i < SA_MAXV; i++) { // nothing may send to a destroyed voice
+            SVoice *o = &g_sv[i];
+            if (!o->used) continue;
+            for (int k = 0; k < o->nsend;) {
+                if (o->send[k] == v) { o->send[k] = o->send[o->nsend - 1]; memcpy(o->mat[k], o->mat[o->nsend - 1], sizeof o->mat[k]); o->nsend--; } else k++;
+            }
+        }
+        sv_free(s);
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (owner) wait_owners(&owner, 1);
+}
+
+static void def_matrix(int sch, int dch, float *m) {
+    memset(m, 0, 64 * sizeof(float));
+    if (sch == dch) { for (int i = 0; i < sch; i++) m[i * sch + i] = 1; return; }
+    if (sch == 1) { for (int d = 0; d < dch && d < 2; d++) m[d] = 1; return; }
+    if (dch == 1) { for (int s = 0; s < sch; s++) m[s] = sch == 2 ? 0.5f : 1.0f / (float)sch; return; }
+    for (int s = 0; s < sch; s++) {
+        if (s < dch && !(dch == 2 && sch > 2 && s > 1)) m[s * sch + s] = 1;
+        else if (dch == 2 && sch > 2) { // downmix of surround channels to stereo
+            if (s == 2) { m[0 * sch + s] = m[1 * sch + s] = 0.7071f; }
+            else if (s >= 4) m[(s & 1 ? 1 : 0) * sch + s] = 0.7071f;
+        }
+    }
+}
+int saudio_voice_sends(int v, int n, const int *dst) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    int r = -1;
+    if (!s || s->type == SA_MASTER || n > 16) goto out;
+    int ok = 1;
+    for (int i = 0; i < n && ok; i++) {
+        SVoice *d = sv_get(dst[i]);
+        if (!d || d->type == SA_SOURCE || d->eng != s->eng || d == s) ok = 0;
+        else if (d->type == SA_SUBMIX && d->stage <= s->stage) ok = 0; // a send must go to a later processing stage
+        for (int k = 0; k < i && ok; k++) if (dst[k] == dst[i]) ok = 0;
+    }
+    if (!ok) goto out;
+    if (n < 0) { s->route_default = 1; s->nsend = 0; }
+    else {
+        s->route_default = 0; s->nsend = n;
+        for (int i = 0; i < n; i++) { s->send[i] = dst[i]; def_matrix(s->in_ch, g_sv[dst[i]].in_ch, s->mat[i]); }
+    }
+    r = 0;
+out:
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+int saudio_voice_start(int v) { pthread_mutex_lock(&g_mu); SVoice *s = sv_get(v); if (s) s->running = 1; pthread_mutex_unlock(&g_mu); return s ? 0 : -1; }
+int saudio_voice_stop(int v) { pthread_mutex_lock(&g_mu); SVoice *s = sv_get(v); if (s) s->running = 0; pthread_mutex_unlock(&g_mu); return s ? 0 : -1; }
+
+int saudio_voice_submit(int v, const SAudioBuffer *in) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    int r = -1;
+    if (!s || s->type != SA_SOURCE) goto out;
+    if (s->qn >= SA_QMAX) goto out;
+    SBuf b;
+    memset(&b, 0, sizeof b);
+    uint32_t frames;
+    if (s->adpcm) {
+        int16_t *dec = NULL;
+        int64_t n = in->bytes ? adpcm_decode(&s->fmt, in->data, in->bytes, &dec) : 0;
+        if (n < 0) goto out;
+        frames = (uint32_t)n;
+        b.own = (uint8_t *)dec; b.data = (const uint8_t *)dec;
+    } else {
+        if (in->bytes % (uint32_t)s->block || in->bytes > 0x80000000u) goto out;
+        frames = in->bytes / (uint32_t)s->block;
+        b.data = in->data;
+    }
+    b.frames = frames; b.begin = in->play_begin;
+    b.end = in->play_length ? in->play_begin + in->play_length : frames;
+    if (in->play_begin > frames || b.end > frames || b.end < b.begin || (frames && !b.data)) { sv_release_buf(&b); goto out; }
+    if (in->loop_count) {
+        if (in->loop_count > 255) { sv_release_buf(&b); goto out; }
+        b.lbegin = in->loop_begin;
+        b.lend = in->loop_length ? in->loop_begin + in->loop_length : b.end;
+        if (b.lbegin < b.begin || b.lend > b.end || b.lend <= b.lbegin) { sv_release_buf(&b); goto out; }
+        b.loop_on = 1; b.infinite = in->loop_count == 255; b.loops_left = in->loop_count;
+    }
+    b.eos = in->eos != 0; b.ctx = in->context;
+    s->q[(s->qh + s->qn) % SA_QMAX] = b;
+    s->qn++;
+    r = 0;
+out:
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+void saudio_voice_flush(int v) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    if (s) {
+        int keep = s->running && s->qn && s->q[s->qh].started; // the buffer being played stays while the voice runs
+        int n = s->qn;
+        for (int i = keep ? 1 : 0; i < n; i++) {
+            SBuf *b = &s->q[(s->qh + i) % SA_QMAX];
+            sv_call(s, SA_CB_BUFFER_END, 2, b->ctx, NULL);
+            sv_release_buf(b);
+        }
+        s->qn = keep ? 1 : 0;
+        if (!keep) { s->qh = 0; s->pos = 0; }
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+void saudio_voice_exit_loop(int v) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    if (s && s->qn) { SBuf *b = &s->q[s->qh]; b->infinite = 0; b->loops_left = 0; }
+    pthread_mutex_unlock(&g_mu);
+}
+void saudio_voice_state(int v, uint64_t *ctx, uint32_t *queued, uint64_t *samples) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    *ctx = s && s->qn ? s->q[s->qh].ctx : 0;
+    *queued = s ? (uint32_t)s->qn : 0;
+    *samples = s ? s->played : 0;
+    pthread_mutex_unlock(&g_mu);
+}
+void saudio_voice_set_ratio(int v, float r) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    if (s && s->type == SA_SOURCE) s->ratio = r != r ? 1.0f : r < 1.0f / 1024 ? 1.0f / 1024 : r > s->maxratio ? s->maxratio : r;
+    pthread_mutex_unlock(&g_mu);
+}
+float saudio_voice_get_ratio(int v) { pthread_mutex_lock(&g_mu); SVoice *s = sv_get(v); float r = s ? s->ratio : 1; pthread_mutex_unlock(&g_mu); return r; }
+void saudio_voice_set_source_rate(int v, int rate) { pthread_mutex_lock(&g_mu); SVoice *s = sv_get(v); if (s && s->type == SA_SOURCE && rate >= 1000 && rate <= 200000) s->rate = rate; pthread_mutex_unlock(&g_mu); }
+void saudio_voice_set_volume(int v, float x) { pthread_mutex_lock(&g_mu); SVoice *s = sv_get(v); if (s) s->volume = x; pthread_mutex_unlock(&g_mu); }
+float saudio_voice_get_volume(int v) { pthread_mutex_lock(&g_mu); SVoice *s = sv_get(v); float r = s ? s->volume : 1; pthread_mutex_unlock(&g_mu); return r; }
+int saudio_voice_set_chvol(int v, int n, const float *x) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    int r = s && n == s->in_ch ? 0 : -1;
+    if (r == 0) for (int i = 0; i < n; i++) s->chvol[i] = x[i];
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+int saudio_voice_get_chvol(int v, int n, float *x) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    int r = s && n == s->in_ch ? 0 : -1;
+    if (r == 0) for (int i = 0; i < n; i++) x[i] = s->chvol[i];
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+// Index of the send to dst (dst < 0 or the default output = the mastering voice); makes a default route explicit. -1 if none.
+static int send_index(SVoice *s, int dst, int create) {
+    if (s->route_default) {
+        SEngine *x = se_get(s->eng);
+        int m = x ? x->master : -1;
+        if (m < 0 || (dst >= 0 && dst != m)) return -1;
+        if (!create) return -2; // default matrix
+        s->route_default = 0; s->nsend = 1; s->send[0] = m;
+        def_matrix(s->in_ch, g_sv[m].in_ch, s->mat[0]);
+        return 0;
+    }
+    for (int k = 0; k < s->nsend; k++) if (dst < 0 ? s->nsend == 1 : s->send[k] == dst) return k;
+    return -1;
+}
+int saudio_voice_set_matrix(int v, int dst, int sch, int dch, const float *m) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    int r = -1;
+    if (!s || s->type == SA_MASTER || sch != s->in_ch) goto out;
+    int k = send_index(s, dst, 1);
+    if (k < 0 || g_sv[s->send[k]].in_ch != dch) goto out;
+    for (int i = 0; i < sch * dch; i++) s->mat[k][i] = m[i];
+    r = 0;
+out:
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+int saudio_voice_get_matrix(int v, int dst, int sch, int dch, float *m) {
+    pthread_mutex_lock(&g_mu);
+    SVoice *s = sv_get(v);
+    int r = -1;
+    if (!s || s->type == SA_MASTER || sch != s->in_ch) goto out;
+    int k = send_index(s, dst, 0);
+    if (k == -2) { SEngine *x = se_get(s->eng); if (g_sv[x->master].in_ch != dch) goto out; float t[64]; def_matrix(sch, dch, t); memcpy(m, t, sizeof(float) * (size_t)(sch * dch)); r = 0; goto out; }
+    if (k < 0 || g_sv[s->send[k]].in_ch != dch) goto out;
+    memcpy(m, s->mat[k], sizeof(float) * (size_t)(sch * dch));
+    r = 0;
+out:
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+
+// ---- mixing
+static void sv_start_head(SVoice *s) { SBuf *b = &s->q[s->qh]; b->started = 1; s->pos = b->begin; sv_call(s, SA_CB_BUFFER_START, 2, b->ctx, NULL); }
+// Buffers whose play region has been played are finished: buffer end, then stream end for the last one.
+static void sv_finish_done(SVoice *s) {
+    while (s->qn && s->q[s->qh].started && s->pos >= s->q[s->qh].end) {
+        SBuf *b = &s->q[s->qh];
+        sv_call(s, SA_CB_BUFFER_END, 2, b->ctx, NULL);
+        if (b->eos) sv_call(s, SA_CB_STREAM_END, 1, 0, NULL);
+        sv_release_buf(b);
+        s->qh = (s->qh + 1) % SA_QMAX; s->qn--; s->pos = 0;
+    }
+}
+static int sv_settle(SVoice *s) { // 1 when a frame can be read
+    for (;;) {
+        if (!s->qn) return 0;
+        if (!s->q[s->qh].started) sv_start_head(s);
+        sv_finish_done(s);
+        if (s->qn && s->q[s->qh].started) return 1;
+    }
+}
+static void sv_advance(SVoice *s) {
+    SBuf *b = &s->q[s->qh];
+    s->pos++; s->played++;
+    if (b->loop_on && s->pos >= b->lend) {
+        if (b->infinite || b->loops_left > 0) {
+            if (!b->infinite) b->loops_left--;
+            s->pos = b->lbegin;
+            sv_call(s, SA_CB_LOOP_END, 2, b->ctx, NULL);
+        } else b->loop_on = 0;
+    }
+    sv_finish_done(s);
+}
+static void read_frame(const SVoice *s, const SBuf *b, uint32_t f, float *o) {
+    const uint8_t *p = b->data + (size_t)f * (size_t)s->block;
+    int bps = s->bits / 8;
+    for (int c = 0; c < s->in_ch; c++) o[c] = sample_at(p + c * bps, s->bits, s->is_float);
+}
+// Source voice -> blk frames of in_ch channels (linear resampling to the output rate). 1 when it produced sound.
+static int src_render(SVoice *s, float *out, int blk) {
+    int ch = s->in_ch, any = 0;
+    double step = (double)s->rate * (double)s->ratio / OUT_RATE;
+    for (int i = 0; i < blk; i++) {
+        float *o = out + (size_t)i * (size_t)ch;
+        if (!sv_settle(s)) { for (int c = 0; c < ch; c++) o[c] = 0; continue; }
+        SBuf *b = &s->q[s->qh];
+        float a[8] = { 0 }, n[8] = { 0 };
+        read_frame(s, b, s->pos, a);
+        uint32_t limit = b->loop_on ? b->lend : b->end;
+        if (s->frac > 0 && s->pos + 1 < limit) {
+            read_frame(s, b, s->pos + 1, n);
+            float t = (float)s->frac;
+            for (int c = 0; c < ch; c++) a[c] += (n[c] - a[c]) * t;
+        }
+        for (int c = 0; c < ch; c++) o[c] = a[c];
+        any = 1;
+        s->frac += step;
+        while (s->frac >= 1.0) {
+            s->frac -= 1.0;
+            sv_advance(s);
+            if (!s->qn || !s->q[s->qh].started) { s->frac = 0; break; }
+        }
+    }
+    return any;
+}
+static void route(const float *in, int sch, int blk, SVoice *d, const float *m) {
+    int dch = d->in_ch;
+    for (int i = 0; i < blk; i++) {
+        const float *x = in + (size_t)i * (size_t)sch;
+        float *y = d->acc + (size_t)i * (size_t)dch;
+        for (int c = 0; c < dch; c++) {
+            float sum = 0;
+            for (int k = 0; k < sch; k++) sum += m[c * sch + k] * x[k];
+            y[c] += sum;
+        }
+    }
+}
+static void send_out(SVoice *s, const float *x, int blk) {
+    if (s->route_default) {
+        SEngine *e = &g_se[s->eng];
+        if (e->master >= 0) { float m[64]; def_matrix(s->in_ch, g_sv[e->master].in_ch, m); route(x, s->in_ch, blk, &g_sv[e->master], m); }
+        return;
+    }
+    for (int k = 0; k < s->nsend; k++) if (g_sv[s->send[k]].used) route(x, s->in_ch, blk, &g_sv[s->send[k]], s->mat[k]);
+}
+static void apply_gain(SVoice *s, float *x, int blk) {
+    int ch = s->in_ch;
+    for (int i = 0; i < blk; i++) for (int c = 0; c < ch; c++) x[(size_t)i * (size_t)ch + (size_t)c] *= s->volume * s->chvol[c];
+}
+static void to_stereo(const float *v, int ch, float *l, float *r) {
+    switch (ch) {
+    case 1: *l = *r = v[0]; return;
+    case 2: *l = v[0]; *r = v[1]; return;
+    default: break;
+    }
+    *l = v[0]; *r = v[1];
+    if (ch == 4) { *l += 0.7071f * v[2]; *r += 0.7071f * v[3]; return; }
+    *l += 0.7071f * v[2]; *r += 0.7071f * v[2]; // front centre
+    if (ch > 4) *l += 0.7071f * v[4];
+    if (ch > 5) *r += 0.7071f * v[5];
+    if (ch > 6) *l += 0.7071f * v[6];
+    if (ch > 7) *r += 0.7071f * v[7];
+}
+static uint32_t frames_left(SVoice *s) {
+    uint64_t n = 0;
+    for (int i = 0; i < s->qn; i++) {
+        SBuf *b = &s->q[(s->qh + i) % SA_QMAX];
+        if (b->loop_on && b->infinite) return 0xFFFFFFFFu;
+        uint32_t from = i == 0 && b->started ? s->pos : b->begin;
+        n += b->end > from ? b->end - from : 0;
+    }
+    return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
+}
+static int engine_mix(int ei, float *out, int blk) {
+    static float tmp[SA_BLK * 8];
+    SEngine *e = &g_se[ei];
+    int any = 0;
+    for (int i = 0; i < SA_MAXV; i++) { SVoice *s = &g_sv[i]; if (s->used && s->eng == ei && s->acc) memset(s->acc, 0, sizeof(float) * (size_t)blk * (size_t)s->in_ch); }
+    for (int i = 0; i < SA_MAXV; i++) {
+        SVoice *s = &g_sv[i];
+        if (!s->used || s->eng != ei || s->type != SA_SOURCE || !s->running) continue;
+        if (s->qn && src_render(s, tmp, blk)) {
+            any = 1;
+            apply_gain(s, tmp, blk);
+            send_out(s, tmp, blk);
+        }
+        if (s->cb) { // processing pass every 10 ms: bytes the voice needs for the next pass
+            s->pass_acc += (uint32_t)blk;
+            if (s->pass_acc >= SA_PASS) {
+                s->pass_acc -= SA_PASS;
+                if (!s->pass_pending) {
+                    uint64_t need = (uint64_t)((double)SA_PASS * s->rate * s->ratio / OUT_RATE + 1);
+                    uint64_t have = frames_left(s);
+                    uint64_t bytes = have >= need ? 0 : (need - have) * (uint64_t)s->block;
+                    s->pass_pending = 1;
+                    sv_call(s, SA_CB_PASS_START, 2, bytes, NULL);
+                    sv_call(s, SA_CB_PASS_END, 1, 0, &s->pass_pending);
+                }
+            }
+        }
+    }
+    int order[SA_MAXV], n = 0;
+    for (int i = 0; i < SA_MAXV; i++) if (g_sv[i].used && g_sv[i].eng == ei && g_sv[i].type == SA_SUBMIX) {
+        int k = n++;
+        while (k > 0 && g_sv[order[k - 1]].stage > g_sv[i].stage) { order[k] = order[k - 1]; k--; }
+        order[k] = i;
+    }
+    for (int j = 0; j < n; j++) {
+        SVoice *s = &g_sv[order[j]];
+        memcpy(tmp, s->acc, sizeof(float) * (size_t)blk * (size_t)s->in_ch);
+        apply_gain(s, tmp, blk);
+        send_out(s, tmp, blk);
+    }
+    if (e->master >= 0) {
+        SVoice *m = &g_sv[e->master];
+        int ch = m->in_ch;
+        for (int i = 0; i < blk; i++) {
+            float v[8] = { 0 }, l, r;
+            for (int c = 0; c < ch; c++) v[c] = m->acc[(size_t)i * (size_t)ch + (size_t)c] * m->volume * m->chvol[c];
+            to_stereo(v, ch, &l, &r);
+            out[2 * i] += l;
+            out[2 * i + 1] += r;
+        }
+    }
+    if (e->ncb) {
+        e->pass_acc += (uint32_t)blk;
+        if (e->pass_acc >= SA_PASS) {
+            e->pass_acc -= SA_PASS;
+            if (!e->pass_pending) {
+                e->pass_pending = 1;
+                for (int i = 0; i < e->ncb; i++) { Note nt; memset(&nt, 0, sizeof nt); nt.kind = 3; nt.pid = e->pid; nt.owner = e->gen; nt.obj = e->cbs[i]; nt.midx = 0; nt.nargs = 1; note_push(nt); }
+                for (int i = 0; i < e->ncb; i++) { Note nt; memset(&nt, 0, sizeof nt); nt.kind = 3; nt.pid = e->pid; nt.owner = e->gen; nt.obj = e->cbs[i]; nt.midx = 1; nt.nargs = 1; nt.flag = i == e->ncb - 1 ? &e->pass_pending : NULL; note_push(nt); }
+            }
+        }
+    }
+    return any;
+}
+static int stream_mix(float *out, int frames) { // g_mu held
+    int any = 0;
+    for (int done = 0; done < frames; done += SA_BLK) {
+        int blk = frames - done < SA_BLK ? frames - done : SA_BLK;
+        for (int e = 0; e < SA_MAXE; e++) if (g_se[e].used && g_se[e].running && engine_mix(e, out + 2 * done, blk)) any = 1;
+    }
+    return any;
+}
+static void stream_process_exit(uint32_t pid) { // g_mu held
+    for (int i = 0; i < SA_MAXV; i++) if (g_sv[i].used && g_sv[i].pid == pid) sv_free(&g_sv[i]);
+    for (int i = 0; i < SA_MAXE; i++) if (g_se[i].used && g_se[i].pid == pid) g_se[i].used = 0;
+}
 
 const HleEntry hle_audio_table[] = {
     { "waveOutGetNumDevs", mm_waveOutGetNumDevs, NULL }, { "waveOutGetDevCapsA", mm_waveOutGetDevCapsA, NULL },

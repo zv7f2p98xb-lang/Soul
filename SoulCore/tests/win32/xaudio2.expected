@@ -1,0 +1,62 @@
+library: 1
+XAudio2Create: 0
+RegisterForCallbacks: 0
+CreateMasteringVoice: 0
+master channels=2 rate=44100
+second mastering voice: 88960001
+CreateSourceVoice: 0
+submit: 0 0
+queued before start=2 context=1 samples=0
+start: 0
+stream end seen: 1
+events: S1 E1 S2 E2 SE 
+queued=0 samples=11000
+voice pass callbacks: 1 engine pass callbacks: 1
+nosamplesplayed: queued=0
+loop submit: 0
+loop end seen: 1
+events: S7 L7 L7 E7 SE 
+loop ends=2 samples=6000
+ratio 1.0 -> 1.0
+samples=4410
+ratio 2.0 -> 2.0
+samples=4410
+double speed plays in about half the time: yes
+CreateSubmixVoice: 0
+CreateSourceVoice float via submix: 0
+set submix volume: 0
+submix volume 0.50
+matrix: 0 1 0 0 1
+channel volumes 0.25 0.75
+submix stream end seen: 1
+events: S5 E5 SE  samples=11025
+volume 0.50
+queued=3
+flush: 0
+queued after flush=0 events: E11 E12 E13 
+bad play region: 88960001
+bad loop region: 88960001
+queue limit: 64
+xWMA source voice: 88960001
+playing before destroy: 1
+callbacks after destroy: 0
+CreateAudioReverb: 0
+SetEffectChain: 0
+release: 0
+performance: latency>0=1
+x3daudio: 1
+emitter 0: dist=10.0 right>left=1 left>right=0 doppler=1.00
+emitter 1: dist=10.0 right>left=0 left>right=1 doppler=1.00
+emitter 2: dist=1.0 right>left=0 left>right=0 doppler=1.00
+farther is quieter: 1
+approaching doppler>1: 1
+curve: silent=1
+CoCreateInstance XAudio27: 0
+devices=1 init=0
+27 CreateMasteringVoice: 0
+27 CreateSourceVoice: 0
+27 stream end seen: 1
+27 events: S9 E9 SE  queued=0 samples=2200 channels=1 rate=22050
+27 release: 0
+release: 0
+done
