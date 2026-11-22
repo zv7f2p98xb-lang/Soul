@@ -75,11 +75,29 @@
 			<array>
 				<string>com.microsoft.windows-executable</string>
 				<string>com.soulemu.windows-dll</string>
+				<string>com.soulemu.windows-installer</string>
 			</array>
 		</dict>
 	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.soulemu.windows-installer</string>
+			<key>UTTypeDescription</key>
+			<string>Windows Installer Paketi (MSI)</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>msi</string>
+				</array>
+			</dict>
+		</dict>
 		<dict>
 			<key>UTTypeIdentifier</key>
 			<string>com.soulemu.windows-dll</string>

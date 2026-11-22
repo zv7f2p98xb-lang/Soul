@@ -17,6 +17,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq mingw-w64 gcc-aarch64-linux-gnu qemu-user
+      - name: Unit tests (inflate, MSI database; ASan)
+        run: SoulCore/tests/unit/run_unit_tests.sh
       - name: Build soulrun (x86-64 host, interpreter)
         run: make -C SoulCore
       - name: Differential tests (interpreter)
@@ -33,6 +35,8 @@ jobs:
         run: SoulCore/tests/win32/run_win32_tests.sh qemu-aarch64 ../../build/arm64/soulrun
       - name: GUI tests (JIT under qemu-aarch64)
         run: SoulCore/tests/gui/run_gui_tests.sh qemu-aarch64 build/arm64/soulrun
+      - name: Windows Installer tests (msi.dll, msiexec wizard; interpreter + JIT)
+        run: SoulCore/tests/msi/run_msi_tests.sh
       - name: Build sample Windows programs
         run: SoulCore/samples/build_samples.sh "$GITHUB_WORKSPACE/samples-out"
       - uses: actions/upload-artifact@v4

@@ -59,13 +59,8 @@ private let soulHttpCallback: SoulHttpFn = { _, reqPtr, respPtr in
     guard let reqPtr, let respPtr else { return -1 }
     let req = reqPtr.pointee
     let urlText = req.url.map { String(cString: $0) } ?? ""
-    func fill(_ text: String, _ field: UnsafeMutablePointer<CChar>, _ capacity: Int) {
-        let bytes = Array(text.utf8.prefix(capacity - 1))
-        for (i, b) in bytes.enumerated() { field[i] = CChar(bitPattern: b) }
-        field[bytes.count] = 0
-    }
     func setError(_ text: String) {
-        withUnsafeMutablePointer(to: &respPtr.pointee.error) { $0.withMemoryRebound(to: CChar.self, capacity: 256) { fill(text, $0, 256) } }
+        soul_http_response_set(respPtr, 0, nil, nil, text)
     }
     guard let url = URL(string: urlText) else { setError("geçersiz adres"); return -1 }
     var request = URLRequest(url: url)
@@ -98,10 +93,7 @@ private let soulHttpCallback: SoulHttpFn = { _, reqPtr, respPtr in
     }
     task.resume()
     done.wait()
-    respPtr.pointee.status = Int32(status)
-    withUnsafeMutablePointer(to: &respPtr.pointee.headers) { $0.withMemoryRebound(to: CChar.self, capacity: 16384) { fill(headers, $0, 16384) } }
-    withUnsafeMutablePointer(to: &respPtr.pointee.final_url) { $0.withMemoryRebound(to: CChar.self, capacity: 2048) { fill(finalURL, $0, 2048) } }
-    setError(failure)
+    soul_http_response_set(respPtr, Int32(status), headers, finalURL, failure)
     return status > 0 ? 0 : -1
 }
 

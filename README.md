@@ -2,7 +2,7 @@
 
 Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86) programları** Apple Silicon (M serisi) iPad'lerde — örneğin **iPad Air M3** — çalıştıran bir iPadOS uygulamasıdır. Programın x86 / x86-64 makine kodu çalışma anında **ARM64 koduna çevrilir (JIT)** ve doğrudan M çipinde çalışır; Windows API çağrıları ise iOS üzerinde yeniden yazılmış bir uyumluluk katmanı tarafından karşılanır.
 
-> Durum: **konsol ve pencereli (GUI) programlar çalışıyor** — C/C++ (MinGW, MSVC/UCRT) programları; dosya, klavye, renkli konsol, çoklu iş parçacığı, **Win32 pencereleri, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler ve diyaloglar** ve **OpenGL 1.x ile 3B grafik** (Soul'un kendi grafik çeviri katmanı). **32-bit (x86) programlar da çalışıyor** — konsol, pencereli ve OpenGL, JIT dahil (x87 FPU komutları da ARM64'e çevrilir). Direct3D oyunları ve kurulum sihirbazları **henüz yok** — ayrıntılar aşağıda.
+> Durum: **konsol ve pencereli (GUI) programlar çalışıyor** — C/C++ (MinGW, MSVC/UCRT) programları; dosya, klavye, renkli konsol, çoklu iş parçacığı, **Win32 pencereleri, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler ve diyaloglar** ve **OpenGL 1.x ile 3B grafik** (Soul'un kendi grafik çeviri katmanı). **32-bit (x86) programlar da çalışıyor** — konsol, pencereli ve OpenGL, JIT dahil (x87 FPU komutları da ARM64'e çevrilir). Direct3D oyunları **henüz yok** — ayrıntılar aşağıda.
 >
 > Ölçüm (CI'da Apple Silicon üzerinde iOS simülatörü, JIT açık): JIT Benchmark örneği **329 milyon x86 komutunu 0,18 sn'de** çalıştırdı (~1,8 milyar komut/sn), yorumlayıcıya göre ~20 kat hızlı.
 
@@ -55,7 +55,7 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86)
 ## Kullanım
 
 - **Program ekle (+):** bir `.exe` ya da program klasörü (DLL'leri/verileriyle) seçin, Dosyalar'dan sürükleyip bırakın ya da Dosyalar'da `.exe`'ye "Soul ile aç" deyin. Program `C:\Program Files\<Ad>\` altına kurulur.
-- **Kurulum dosyaları (setup.exe):** Inno Setup, NSIS ve benzeri kurulum programları tanınır, *Kurulum Dosyaları* bölümünde **Kur** düğmesiyle görünür. Kurulum sihirbazı normal bilgisayardaki gibi açılır (dil seçimi, lisans, klasör, bileşenler, ilerleme, bitiş); bittiğinde Başlat menüsü/masaüstü kısayolları taranır ve kurulan programlar kitaplığa **kendiliğinden eklenir**. Programların açtığı belgeler (beni oku, yardım sayfaları) Quick Look ile gösterilir.
+- **Kurulum dosyaları (setup.exe):** Inno Setup, NSIS ve benzeri kurulum programları tanınır, *Kurulum Dosyaları* bölümünde **Kur** düğmesiyle görünür. Kurulum sihirbazı normal bilgisayardaki gibi açılır (dil seçimi, lisans, klasör, bileşenler, ilerleme, bitiş); bittiğinde Başlat menüsü/masaüstü kısayolları taranır ve kurulan programlar kitaplığa **kendiliğinden eklenir**. **`.msi` paketleri** (Windows Installer) Soul'un kendi `msiexec` sihirbazıyla kurulur (`C:\windows\system32\msiexec.exe`; kurulum, onarım ve kaldırma ekranları Türkçedir); programlar `msiexec /i paket.msi /qn` ile de sessizce kurulabilir. Programların açtığı belgeler (beni oku, yardım sayfaları) Quick Look ile gösterilir.
 - **C: sürücüsü:** Dosyalar › iPad'imde › Soul › Soul › `drive_c`. Programların yazdığı dosyalar buradadır; buraya kopyaladığınız programları *C: sürücüsünü tara* ile kitaplığa ekleyebilirsiniz.
 - **Pencereli programlar:** program pencereleri bir masaüstünde gösterilir ve ekrana sığacak şekilde ölçeklenir. Dokunma sol tıktır (sürükleme = basılı tutup çekme), **uzun basış sağ tıktır**, iki parmakla kaydırma fare tekerleğidir; araç çubuğundaki *Sağ tık* modu tüm dokunuşları sağ tıka çevirir. iPad'e bağlı fare/izleme dörtgeni ve donanım klavyesi doğrudan çalışır (⌘ kısayolları Ctrl olarak gönderilir). Metin kutusuna dokununca ekran klavyesi açılır; *Klavye* düğmesiyle istendiğinde de açılabilir. Yeniden boyutlandırılabilir pencerelerde ⤢ düğmesi pencereyi ekran boyutuna getirir. Programın `printf` çıktısı *Konsol çıktısı* sayfasındadır.
 - **Konsol:** çıktı renkli gösterilir, alt satırdan programa klavye girdisi gönderilir; *Ctrl+Z* girdi sonudur. Üst çubukta çalışma süresi, MIPS, JIT oranı ve API çağrısı sayısı görünür.
@@ -67,13 +67,16 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86)
 |---|---|
 | 64-bit (x64) ve 32-bit (x86) programlar, ikisi de JIT ile (MinGW, MSVC/UCRT) | Direct3D 9/11/12, Vulkan, OpenGL 2+ gölgelendiricileri (GLSL) |
 | OpenGL 1.x 3B grafik (WGL, sabit işlevli çizim hattı, doku, ışık, sis, saydamlık) | 3B grafiğin Metal (GPU) arka ucu — şimdilik CPU'da çizilir |
-| Pencereli programlar: user32 pencereleri, GDI, denetimler, menüler, diyaloglar, Dosya Aç/Kaydet; ortak denetimler (liste/ağaç görünümü, sekmeler, araç çubuğu, başlık, up-down, SysLink, görüntü listeleri), RichEdit (RTF) | GDI+ (gdiplus), Direct2D/DirectWrite |
-| Kurulum programları: Inno Setup (yükleyici + kurulum süreci), NSIS (eklentileriyle); kısayollar (IShellLink, .lnk), INI dosyaları, SHFileOperation | `.msi` (Windows Installer) kurulumları, InstallShield |
+| Pencereli programlar: user32 pencereleri, GDI, denetimler, menüler, diyaloglar, Dosya Aç/Kaydet; ortak denetimler (liste/ağaç görünümü, sekmeler, araç çubuğu, başlık, up-down, SysLink, görüntü listeleri), RichEdit (RTF) | Direct2D/DirectWrite |
+| Kurulum programları: Inno Setup (yükleyici + kurulum süreci), NSIS (eklentileriyle); kısayollar (IShellLink, .lnk), INI dosyaları, SHFileOperation | InstallShield, LZX ile sıkıştırılmış `.msi` kabinleri, MSI'ın kendi diyalog tabloları, betik (VBScript/JScript) özel eylemleri |
 | Birden çok süreç: `CreateProcess`, `ShellExecute(Ex)`, borular, süreçler arası `SendMessage`/`WM_COPYDATA`; 32-bit ve 64-bit programlar birbirini başlatabilir | .NET programları |
+| Windows Installer (`.msi`): Soul'un `msiexec` sihirbazı, sessiz kurulum (`/qn`), kaldırma (`/x`), özel eylemler (DLL ve EXE), `msi.dll` API'si, MSZIP/depolanmış kabinler | |
+| GDI+ (gdiplus): çizim, fırça/kalem, metin, görüntüler (BMP/PNG/GIF/JPEG/ICO okuma), bellek akışları | GDI+ metafile'ları, JPEG/GIF/TIFF kaydetme |
+| XAudio2 / X3DAudio (2.7–2.9): kaynak sesleri, tamponlar, döngüler, frekans oranı, alt karışımlar — iPad hoparlöründen | xWMA, ses efektleri (şimdilik doğrudan geçer) |
 | Dosya/klasör API'leri, ortam değişkenleri, zaman; Delphi (VCL) ve MFC programları | |
 | printf/scanf ailesi, C++ STL (statik libstdc++) | |
 | setjmp/longjmp, TLS, programla gelen x64/x86 DLL'ler; 32-bit programlarda C++ istisnaları ve SEH (fs:[0] zinciri, RaiseException, RtlUnwind, sıfıra bölme yakalama — Delphi/MSVC tarzı) | 64-bit programlarda C++ istisnaları (SEH unwind tabloları), AVX |
-| MessageBox, renkli konsol (SetConsoleTextAttribute) | XAudio2, mikrofon (waveIn), MIDI |
+| MessageBox, renkli konsol (SetConsoleTextAttribute) | Mikrofon (waveIn), MIDI |
 | Ses: waveOut (pencere/iş parçacığı/olay/fonksiyon geri çağrıları), PlaySound/sndPlaySound (dosya, bellek, kaynak, sistem sesleri), Beep/MessageBeep, DirectSound (döngülü tamponlar, bildirim konumları, ses düzeyi/pan/frekans) — iPad hoparlöründen | DirectSound 3D, ses efektleri |
 | Ağ: Winsock (TCP/UDP, select, WSAAsyncSelect/WSAEventSelect, getaddrinfo), WinINet, WinHTTP, URLDownloadToFile (HTTPS iPad'in URLSession'ı ile) | FTP, IPv6'ya özgü API'ler |
 | Kalıcı kayıt defteri (programların ayarları korunur), web bağlantıları Safari'de açılır | |
@@ -99,7 +102,7 @@ Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 �
 
 OpenGL ön yüzü (`opengl.c`) matris yığınlarını, `glBegin/glEnd` ve köşe dizilerini, köşe başına ışıklandırmayı, sisi, çoklu dokuyu, görüntüleme listelerini, `glPushAttrib`'i ve GLU (perspektif, `gluLookAt`, küre/silindir/disk, mipmap) işlevlerini uygular; `SwapBuffers` kareyi pencereye aktarır ve ekran yenileme hızına (60 FPS) göre bekler. Çizim hattı, ön yüzlerden bağımsız bir arayüz (`sg_triangles/sg_lines/sg_points`) sunar; bu sayede Direct3D ön yüzü ve Metal (GPU) arka ucu aynı yapıya eklenebilir. Madeira'nın kullandığı DXMT ölçeğine (Direct3D 11 + gölgelendirici derleyicisi → Metal) ulaşmak çok aşamalı bir yol: sıradaki adımlar Direct3D 9 sabit işlevli ön yüz, Metal arka ucu ve gölgelendirici (DXBC/GLSL) çevirisi.
 
-Yol haritası: XAudio2, GDI+, `.msi` kurulumları, Direct3D 9 → Metal arka ucu → gölgelendirici çevirisi (Direct3D 11), .NET.
+Yol haritası: LZX kabinleri (`.msi`), Direct3D 9 → Metal arka ucu → gölgelendirici çevirisi (Direct3D 11), .NET.
 
 ### Birden çok süreç
 
@@ -116,6 +119,8 @@ SoulCore/tests/run_tests.sh                 # yerel derlemeyle karşılaştırma
 make -C SoulCore arm64
 SoulCore/tests/run_tests.sh qemu-aarch64 build/arm64/soulrun
 SoulCore/tests/win32/run_win32_tests.sh     # Win32 API, C++, iş parçacığı, x87 testleri (64 ve 32-bit)
+SoulCore/tests/unit/run_unit_tests.sh        # inflate ve MSI/CAB okuyucu birim testleri (ASan)
+SoulCore/tests/msi/run_msi_tests.sh         # Windows Installer: msi.dll, msiexec sihirbazı
 SoulCore/tests/gui/run_gui_tests.sh         # pencere/denetim/diyalog/OpenGL testleri, 64 ve 32-bit (betikle tıklama, yazma, menü)
 
 # Pencereli bir programı betikle sürmek ve ekran görüntüsü almak

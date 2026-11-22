@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <msi.h>
 #include <msiquery.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -222,6 +223,11 @@ static void sample_tests(void) {
     show_reg(HKEY_LOCAL_MACHINE, L"Software\\SoulOrnek", L"Yol", L"reg Yol");
     show_reg(HKEY_LOCAL_MACHINE, L"Software\\SoulOrnek", L"Sayi", L"reg Sayi");
     show_reg(HKEY_CURRENT_USER, L"Software\\SoulOrnek", L"Kisayol", L"reg Kisayol");
+    {
+        HKEY k;
+        P(L"SoulOrnek key gone: %d %d", RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\SoulOrnek", 0, KEY_READ, &k) != 0,
+          RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\SoulOrnek", 0, KEY_READ, &k) != 0);
+    }
     P(L"uninstall key: %d", exists(L"C:\\Windows\\Installer\\{5777B2F1-FBEE-4B87-9C3D-79BC72E3C3E8}.msi"));
     show_reg(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{5777B2F1-FBEE-4B87-9C3D-79BC72E3C3E8}", L"DisplayName", L"uninstall DisplayName");
     P(L"state: %d", (int)MsiQueryProductStateW(code));
@@ -300,6 +306,36 @@ static void msiexec_tests(void) {
     P(L"msiexec /x again: %lu", r);
 }
 
+// "msiexec" by name (a real file in system32) and ShellExecute of a .msi
+static void shell_tests(void) {
+    const wchar_t *code = L"{5777B2F1-FBEE-4B87-9C3D-79BC72E3C3E8}";
+    P(L"== CreateProcess / ShellExecute ==");
+    STARTUPINFOA si = { sizeof si };
+    PROCESS_INFORMATION pi;
+    char cmd[512];
+    strcpy(cmd, "msiexec /i C:\\sample.msi /qn");
+    BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    DWORD code_ = 99999;
+    if (ok) { WaitForSingleObject(pi.hProcess, 60000); GetExitCodeProcess(pi.hProcess, &code_); CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
+    P(L"CreateProcess msiexec /i: %d exit %lu state %d", ok, code_, (int)MsiQueryProductStateW(code));
+    strcpy(cmd, "msiexec /x {5777B2F1-FBEE-4B87-9C3D-79BC72E3C3E8} /qn");
+    ok = CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    code_ = 99999;
+    if (ok) { WaitForSingleObject(pi.hProcess, 60000); GetExitCodeProcess(pi.hProcess, &code_); CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
+    P(L"CreateProcess msiexec /x: %d exit %lu state %d", ok, code_, (int)MsiQueryProductStateW(code));
+    SHELLEXECUTEINFOW sx = { sizeof sx };
+    sx.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sx.lpFile = L"C:\\sample.msi";
+    sx.lpParameters = L"/qn";
+    sx.nShow = SW_SHOWNORMAL;
+    ok = ShellExecuteExW(&sx);
+    code_ = 99999;
+    if (ok && sx.hProcess) { WaitForSingleObject(sx.hProcess, 60000); GetExitCodeProcess(sx.hProcess, &code_); CloseHandle(sx.hProcess); }
+    P(L"ShellExecuteEx .msi: %d exit %lu state %d", ok, code_, (int)MsiQueryProductStateW(code));
+    MsiConfigureProductW(code, 0, INSTALLSTATE_ABSENT);
+    P(L"removed: state %d", (int)MsiQueryProductStateW(code));
+}
+
 int main(int argc, char **argv) {
     GetModuleFileNameW(NULL, g_dir, MAX_PATH);
     wchar_t *sl = wcsrchr(g_dir, L'\\');
@@ -308,5 +344,6 @@ int main(int argc, char **argv) {
     sample_tests();
     ca_tests();
     msiexec_tests();
+    shell_tests();
     return 0;
 }

@@ -89,6 +89,14 @@ static ssize_t read_some(int fd, uint8_t *buf, size_t cap, uint8_t *pend, size_t
     if (poll(&pf, 1, 30000) <= 0) return -1;
     return recv(fd, buf, cap, 0);
 }
+void soul_http_response_set(SoulHttpResponse *resp, int status, const char *headers, const char *final_url, const char *error) {
+    if (!resp) return;
+    resp->status = status;
+    snprintf(resp->headers, sizeof resp->headers, "%s", headers ? headers : "");
+    snprintf(resp->final_url, sizeof resp->final_url, "%s", final_url ? final_url : "");
+    snprintf(resp->error, sizeof resp->error, "%s", error ? error : "");
+}
+
 static int builtin_http(const SoulHttpRequest *rq, SoulHttpResponse *rs) {
     char url[2048];
     snprintf(url, sizeof url, "%s", rq->url);

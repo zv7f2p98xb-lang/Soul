@@ -29,6 +29,13 @@ x86_64-w64-mingw32-gcc -O2 -o "$OUT/http.exe" http.c http_winhttp.c -lws2_32 -lw
 i686-w64-mingw32-gcc -O2 -o "$OUT/http32.exe" http.c http_winhttp.c -lws2_32 -lwininet -lwinhttp -lurlmon || exit 1
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/audio.exe" audio.c -lwinmm -ldsound -ldxguid || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/audio32.exe" audio.c -lwinmm -ldsound -ldxguid || exit 1
+x86_64-w64-mingw32-gcc -O2 -o "$OUT/gdiplus.exe" gdiplus.c -lgdiplus -lgdi32 -lole32 -luuid -lshlwapi || exit 1
+i686-w64-mingw32-gcc -O2 -o "$OUT/gdiplus32.exe" gdiplus.c -lgdiplus -lgdi32 -lole32 -luuid -lshlwapi || exit 1
+x86_64-w64-mingw32-g++ -O2 -static -o "$OUT/xaudio2.exe" xaudio2.cpp -lole32 || exit 1
+i686-w64-mingw32-g++ -O2 -static -o "$OUT/xaudio2_32.exe" xaudio2.cpp -lole32 || exit 1
+x86_64-w64-mingw32-gcc -O2 -o "$OUT/msi.exe" msi.c -lmsi || exit 1
+i686-w64-mingw32-gcc -O2 -o "$OUT/msi32.exe" msi.c -lmsi || exit 1
+cp ../msi/sample.msi ../msi/ca.msi "$OUT/"
 pass=0; fail=0
 check() {
   local name=$1; shift
@@ -64,5 +71,21 @@ for wav in audio.wav audio32.wav; do
   if [ "$heard" == "$(printf 'heard: 330 440 550 660 880 990\nsound windows>=20: True')" ]; then pass=$((pass+1)); echo "PASS sound $wav";
   else fail=$((fail+1)); echo "FAIL sound $wav"; echo "$heard"; fi
 done
+check gdiplus gdiplus.exe
+check gdiplus gdiplus32.exe
+check xaudio2 --audio xaudio2.wav xaudio2.exe
+check xaudio2 --audio xaudio2_32.wav xaudio2_32.exe
+for wav in xaudio2.wav xaudio2_32.wav; do
+  heard=$(python3 audio_check.py --tones 440,660 "$OUT/$wav" 2>&1 | tail -1)
+  if [ "$heard" == "expected tones present: True" ]; then echo "ok   xaudio2 tones $wav";  # part of the xaudio2 check above, not counted twice
+  else fail=$((fail+1)); echo "FAIL xaudio2 sound $wav"; echo "$heard"; fi
+done
+# Windows Installer: the packages write into the drive folder; clean up so other tests and reruns see a fresh drive
+msi_clean() { rm -rf "$OUT/Program Files" "$OUT/Program Files (x86)" "$OUT/ProgramData" "$OUT/users" "$OUT/windows" "$OUT/Soul Test"; }
+msi_clean
+check msi --drive . msi.exe
+msi_clean
+check msi --drive . msi32.exe
+msi_clean
 echo "passed=$pass failed=$fail"
 [ $fail -eq 0 ]

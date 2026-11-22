@@ -48,9 +48,10 @@ readme exists: 0
 data dir exists: 0
 install dir exists: 0
 menu dir exists: 0
-reg Yol: (yok)
-reg Sayi: (yok)
-reg Kisayol: (yok)
+reg Yol: (anahtar yok)
+reg Sayi: (anahtar yok)
+reg Kisayol: (anahtar yok)
+SoulOrnek key gone: 1 1
 uninstall key: 0
 uninstall DisplayName: (anahtar yok)
 state: -1
@@ -81,3 +82,8 @@ msiexec /x /qn: 0 readme exists: 0 state: -1
 msiexec /i INSTALLDIR: 0 readme exists: 1
 msiexec /x package: 0 readme exists: 0 dir exists: 0
 msiexec /x again: 1605
+== CreateProcess / ShellExecute ==
+CreateProcess msiexec /i: 1 exit 0 state 5
+CreateProcess msiexec /x: 1 exit 0 state -1
+ShellExecuteEx .msi: 1 exit 0 state 5
+removed: state -1

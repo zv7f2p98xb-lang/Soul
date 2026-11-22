@@ -22,6 +22,21 @@ struct WinProgram: Identifiable, Codable, Hashable {
 
     var isInstaller: Bool { installerKind != nil }
 
+    /// Programs are identified by file and arguments: every Windows Installer entry runs the same msiexec.exe.
+    static func identityKey(relativePath: String, arguments: String) -> String {
+        relativePath.lowercased() + "\u{1}" + arguments
+    }
+    var identityKey: String { Self.identityKey(relativePath: relativePath, arguments: arguments) }
+
+    /// Entry created for a .msi package (runs msiexec.exe /i "<package>").
+    var isMSIPackage: Bool { installerKind == "Windows Installer (MSI)" && fileName.lowercased() == "msiexec.exe" }
+    /// The package file of such an entry (the quoted Windows path in its arguments).
+    var msiPackageURL: URL? {
+        let parts = arguments.components(separatedBy: "\"")
+        guard isMSIPackage, parts.count >= 3 else { return nil }
+        return SoulPaths.hostURL(forWindowsPath: parts[1])
+    }
+
     var hostURL: URL { SoulPaths.driveC.appendingPathComponent(relativePath) }
     var folderURL: URL { hostURL.deletingLastPathComponent() }
     var windowsPath: String { SoulPaths.windowsPath(forRelative: relativePath) }

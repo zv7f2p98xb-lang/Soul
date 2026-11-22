@@ -44,6 +44,9 @@ typedef struct SoulHttpResponse {
     char final_url[2048];     // after redirects
     char error[256];
 } SoulHttpResponse;
+// Fills a response (NULL = leave the field empty), truncating to the field sizes. Swift cannot import the large
+// char arrays of SoulHttpResponse, so hosts written in Swift fill it through this function.
+void soul_http_response_set(SoulHttpResponse *resp, int status, const char *headers, const char *final_url, const char *error);
 typedef int (*SoulHttpFn)(void *ctx, const SoulHttpRequest *req, SoulHttpResponse *resp); // 0 = done
 
 typedef struct SoulLaunchOptions {
@@ -195,6 +198,10 @@ typedef struct SoulLnkInfo {
     int icon_index;
 } SoulLnkInfo;
 int soul_lnk_read(const char *host_path, SoulLnkInfo *out); // 0 on success
+
+// Writes Soul's own Windows tools (msiexec.exe) into the C: drive (host path of the drive folder); 0 = ok.
+// Needs no running process; also called when a session starts.
+int soul_install_system_files(const char *drive_c_host_path);
 
 #ifdef __cplusplus
 }

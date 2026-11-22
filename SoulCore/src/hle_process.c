@@ -61,7 +61,7 @@ int proc_resolve_exe(const char *name, char *host, size_t hcap, char *win, size_
 static int builtin_tool(const char *name) {
     const char *bs = strrchr(name, '\\');
     const char *b = bs ? bs + 1 : name;
-    static const char *const tools[] = { "explorer", "regsvr32", "rundll32", "msiexec", "cmd", "taskkill", "schtasks", "sc",
+    static const char *const tools[] = { "explorer", "regsvr32", "rundll32", "cmd", "taskkill", "schtasks", "sc",
                                          "netsh", "reg", "attrib", "icacls", "takeown", "ngen", "regasm", "wevtutil", "ie4uinit", NULL };
     for (int i = 0; tools[i]; i++) {
         size_t l = strlen(tools[i]);
@@ -324,6 +324,15 @@ uint64_t shell_execute_file(const char *file, const char *params, const char *di
     struct stat sb;
     if (stat(host, &sb) != 0) { soul_log("[api] ShellExecute: '%s' bulunamadı\n", path); return 2; }
     if (S_ISDIR(sb.st_mode)) { soul_log("[Soul] Klasör açılmak istendi: %s\n", norm); return 42; }
+    if (dot && !strcasecmp(dot, ".msi")) { // Windows Installer packages: Soul's msiexec wizard
+        char cmd[2400], pw[1300];
+        snprintf(pw, sizeof pw, "%s", norm);
+        snprintf(cmd, sizeof cmd, "\"C:\\windows\\system32\\msiexec.exe\" /i \"%s\"%s%s", pw, params && *params ? " " : "", params ? params : "");
+        SoulProcess *p = start_process(NULL, cmd, dir, NULL, 0, fds, &err);
+        if (!p) return err == ERROR_FILE_NOT_FOUND ? 2 : 11;
+        *pp = p;
+        return 42;
+    }
     if (dot && !strcasecmp(dot, ".lnk")) {
         SoulLnkInfo li;
         if (soul_lnk_read(host, &li) == 0 && li.target[0]) return shell_execute_file(li.target, li.arguments, li.workdir, pp);

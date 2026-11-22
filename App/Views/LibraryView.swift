@@ -47,7 +47,7 @@ struct LibraryView: View {
                 .keyboardShortcut("o", modifiers: .command)
             }
         }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.exe, .folder, .item], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.exe, .folder, UTType(filenameExtension: "msi") ?? .item, .item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { library.importItems(urls) }
         }
         .dropDestination(for: URL.self) { urls, _ in

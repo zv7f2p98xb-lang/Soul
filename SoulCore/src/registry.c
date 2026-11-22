@@ -593,6 +593,12 @@ int reg_host_key_exists(uint32_t root, const char *subkey) {
     return r && walk(r, subkey, 0) ? 1 : 0;
 }
 
+int reg_host_key_is_empty(uint32_t root, const char *subkey) {
+    RKey *r = key_of(root);
+    RKey *k = r ? walk(r, subkey, 0) : NULL;
+    return k && k->nkids == 0 && k->nvals == 0 ? 1 : 0;
+}
+
 const HleEntry hle_registry_table[] = {
     { "RegOpenKeyExA", r_RegOpenKeyExA, NULL }, { "RegOpenKeyExW", r_RegOpenKeyExW, NULL }, { "RegOpenKeyA", r_RegOpenKeyA, NULL },
     { "RegOpenKeyW", r_RegOpenKeyW, NULL }, { "RegCreateKeyExA", r_RegCreateKeyExA, NULL }, { "RegCreateKeyExW", r_RegCreateKeyExW, NULL },

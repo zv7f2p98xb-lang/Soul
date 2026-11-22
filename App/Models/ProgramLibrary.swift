@@ -107,7 +107,7 @@ final class ProgramLibrary: ObservableObject {
     }
 
     private func register(_ program: WinProgram) {
-        if programs.contains(where: { $0.relativePath == program.relativePath }) { return }
+        if programs.contains(where: { $0.identityKey == program.identityKey }) { return }
         programs.append(program)
         programs.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -117,6 +117,10 @@ final class ProgramLibrary: ObservableObject {
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: source.path, isDirectory: &isDir) else {
             throw NSError(domain: "Soul", code: 1, userInfo: [NSLocalizedDescriptionKey: "Dosya bulunamadı"])
+        }
+        // A Windows Installer package runs through Soul's msiexec (C:\windows\system32\msiexec.exe /i "<package>").
+        if !isDir.boolValue && source.pathExtension.lowercased() == "msi" {
+            return try installMSI(source)
         }
         // Already inside drive_c (e.g. opened in place from Files): just register it.
         if let rel = SoulPaths.relativeToDriveC(source) {
@@ -131,9 +135,6 @@ final class ProgramLibrary: ObservableObject {
             return findExecutables(in: dest).compactMap { makeProgram(at: $0) }
         }
         let ext = source.pathExtension.lowercased()
-        if ext == "msi" {
-            throw NSError(domain: "Soul", code: 3, userInfo: [NSLocalizedDescriptionKey: "MSI (Windows Installer) paketleri henüz desteklenmiyor. Programın .exe kurulum dosyasını deneyin."])
-        }
         guard ext == "exe" else {
             throw NSError(domain: "Soul", code: 2, userInfo: [NSLocalizedDescriptionKey: "Yalnızca .exe dosyaları veya program klasörleri kurulabilir. ZIP arşivlerini önce Dosyalar uygulamasında açın."])
         }
@@ -150,6 +151,34 @@ final class ProgramLibrary: ObservableObject {
         let dest = dir.appendingPathComponent(source.lastPathComponent)
         try fm.copyItem(at: source, to: dest)
         return [makeProgram(at: dest)].compactMap { $0 }
+    }
+
+    nonisolated static let msiInstallerKind = "Windows Installer (MSI)"
+
+    /// Keeps the package in C:\users\soul\Downloads (unless it already is inside drive_c) and returns a library
+    /// entry that starts msiexec.exe with it.
+    nonisolated private static func installMSI(_ source: URL) throws -> [WinProgram] {
+        let fm = FileManager.default
+        SoulPaths.ensure() // also writes msiexec.exe into windows/system32
+        var package = source
+        if SoulPaths.relativeToDriveC(source) == nil {
+            package = SoulPaths.downloads.appendingPathComponent(source.lastPathComponent)
+            try? fm.removeItem(at: package)
+            try fm.copyItem(at: source, to: package)
+        }
+        guard let packageRel = SoulPaths.relativeToDriveC(package) else {
+            throw NSError(domain: "Soul", code: 4, userInfo: [NSLocalizedDescriptionKey: "Paket kopyalanamadı"])
+        }
+        let name = package.deletingPathExtension().lastPathComponent
+        let args = "/i \"\(SoulPaths.windowsPath(forRelative: packageRel))\""
+        guard var p = makeProgram(relativePath: "windows/system32/msiexec.exe", name: name,
+                                  summary: "Kurulum programı (\(msiInstallerKind)) — kurulan programlar kitaplığa eklenir", args: args) else {
+            throw NSError(domain: "Soul", code: 5, userInfo: [NSLocalizedDescriptionKey: "msiexec.exe bulunamadı"])
+        }
+        p.installerKind = msiInstallerKind
+        p.isGUI = true
+        p.is64Bit = false
+        return [p]
     }
 
     nonisolated private static func findExecutables(in dir: URL) -> [URL] {
@@ -240,9 +269,11 @@ final class ProgramLibrary: ObservableObject {
                       let rel = SoulPaths.relativeToDriveC(host) else { continue }
                 let exeName = host.deletingPathExtension().lastPathComponent.lowercased()
                 if exeName.hasPrefix("unins") || exeName.hasPrefix("uninst") { continue }
-                if programs.contains(where: { $0.relativePath.caseInsensitiveCompare(rel) == .orderedSame }) || added.contains(where: { $0.relativePath == rel }) { continue }
+                if exeName == "msiexec" { continue } // uninstall shortcuts of Windows Installer products
                 let title = url.deletingPathExtension().lastPathComponent
                 let args = withUnsafeBytes(of: info.arguments) { raw in String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self) }
+                let key = WinProgram.identityKey(relativePath: rel, arguments: args)
+                if programs.contains(where: { $0.identityKey == key }) || added.contains(where: { $0.identityKey == key }) { continue }
                 guard var p = Self.makeProgram(relativePath: rel, name: title, args: args) else { continue }
                 p.installedBySetup = true
                 p.installerKind = nil
@@ -262,9 +293,9 @@ final class ProgramLibrary: ObservableObject {
             banner = added.count == 1 ? "Kuruldu: \(names) kitaplığa eklendi." : "Kuruldu: \(names) kitaplığa eklendi."
         } else if program.isInstaller {
             // installers without shortcuts: look for new programs in Program Files
-            let before = Set(programs.map(\.relativePath))
+            let before = Set(programs.map(\.identityKey))
             rescan()
-            let new = programs.filter { !before.contains($0.relativePath) }
+            let new = programs.filter { !before.contains($0.identityKey) }
             banner = new.isEmpty ? "Kurulum bitti." : "Kuruldu: \(new.map(\.name).joined(separator: ", ")) kitaplığa eklendi."
         }
     }
@@ -321,7 +352,7 @@ final class ProgramLibrary: ObservableObject {
         var added = 0
         for url in found {
             guard let rel = SoulPaths.relativeToDriveC(url),
-                  !programs.contains(where: { $0.relativePath == rel }),
+                  !programs.contains(where: { $0.identityKey == WinProgram.identityKey(relativePath: rel, arguments: "") }),
                   let p = Self.makeProgram(relativePath: rel) else { continue }
             register(p)
             added += 1
@@ -335,7 +366,10 @@ final class ProgramLibrary: ObservableObject {
         programs.removeAll { $0.id == program.id }
         iconCache[program.id] = nil
         try? FileManager.default.removeItem(at: program.iconURL)
-        if deleteFiles && !program.isSample {
+        if deleteFiles && program.isMSIPackage {
+            // the entry runs the shared msiexec.exe: only the package itself may be deleted
+            if let pkg = program.msiPackageURL { try? FileManager.default.removeItem(at: pkg) }
+        } else if deleteFiles && !program.isSample {
             let folder = program.folderURL
             // only delete whole folders that live directly under Program Files
             if folder.deletingLastPathComponent().standardizedFileURL == SoulPaths.programFiles.standardizedFileURL {

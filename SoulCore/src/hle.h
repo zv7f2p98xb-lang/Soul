@@ -44,6 +44,7 @@ int reg_host_get(uint32_t root, const char *subkey, const char *name, uint32_t *
 int reg_host_delete_value(uint32_t root, const char *subkey, const char *name);
 int reg_host_delete_tree(uint32_t root, const char *subkey);
 int reg_host_key_exists(uint32_t root, const char *subkey);
+int reg_host_key_is_empty(uint32_t root, const char *subkey); // 1 if it exists with no values and no subkeys
 void audio_process_exit(uint32_t pid); // audio.c: stops the sounds of an ended process
 // hle_process.c: opens a program, document or link like Explorer (> 32 = success)
 uint64_t shell_execute_file(const char *file, const char *params, const char *dir, SoulProcess **started);

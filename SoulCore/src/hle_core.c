@@ -756,6 +756,7 @@ void hle_init_system(SoulProcess *p) {
         snprintf(d, sizeof d, "%s/%s", p->drive_c, dirs[i]);
         mkdir(d, 0755);
     }
+    soul_install_system_files(p->drive_c);
     gui_reset();
     comctl_reset();
     gl_reset();

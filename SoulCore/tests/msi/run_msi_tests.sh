@@ -30,7 +30,7 @@ clean
 # GUI: install and remove through the wizard
 (cd "$CORE/tools/msiexec" && ./build.sh >/dev/null) || exit 1
 D=$(mktemp -d)
-cp "$CORE/tools/msiexec/msiexec.exe" sample.msi "$D/"
+cp "$CORE/build/msiexec/msiexec.exe" sample.msi "$D/"
 guirun() { (cd "$D" && timeout 120 "$CORE/build/native/soulrun" --quiet --drive "$D" --gui-script "$CORE/tests/gui/$1.script" msiexec.exe "${@:2}" 2>&1 < /dev/null); }
 guirun msiexec /i 'C:\sample.msi' > "$D/out1.txt"
 if [ -f "$D/Program Files (x86)/Soul Örnek/readme.txt" ] && [ ! -s "$D/out1.txt" ]; then pass=$((pass+1)); echo "PASS msiexec-gui-install"; else fail=$((fail+1)); echo "FAIL msiexec-gui-install"; cat "$D/out1.txt"; fi

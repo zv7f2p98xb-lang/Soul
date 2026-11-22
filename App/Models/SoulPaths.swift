@@ -6,7 +6,7 @@ import Foundation
 ///       drive_c/                 <- mapped to C:\
 ///         Program Files/<App>/   <- installed programs
 ///         users/soul/...         <- profile, AppData, Temp
-///         windows/system32/      <- extra DLLs can be placed here
+///         windows/system32/      <- extra DLLs can be placed here; msiexec.exe (Soul writes it)
 ///       Icons/                   <- extracted program icons
 ///       library.json
 enum SoulPaths {
@@ -53,6 +53,8 @@ enum SoulPaths {
                     driveC.appendingPathComponent("users/soul/Temp", isDirectory: true), downloads] {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+        // Soul's own Windows tools (msiexec.exe) live in windows/system32
+        _ = soul_install_system_files(driveC.path)
     }
 
     /// "Program Files/App/app.exe" -> "C:\Program Files\App\app.exe"

@@ -8,6 +8,7 @@
 #include <time.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 extern const char *soul_csidl_path(int csidl);
 
@@ -136,7 +137,6 @@ static void ensure_parent_win(const char *win_file) {
     if (sl) { *sl = 0; ensure_dir_win(t); }
 }
 static int file_exists_host(const char *h) { struct stat sb; return stat(h, &sb) == 0; }
-static int file_exists_win(const char *w) { char h[2600]; host_of(w, h, sizeof h); return file_exists_host(h); }
 static int write_host_file(const char *host, const void *data, size_t len) {
     unlink(host);
     int fd = open(host, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -1076,14 +1076,41 @@ static int start_exe(const char *file, const char *params, const char *dir, int 
     return 0;
 }
 
+// Finds (case-insensitively, like path_w2h) or creates the directory/file `name` inside host directory `dir`.
+static void host_child(const char *dir, const char *name, char *out, size_t cap) {
+    snprintf(out, cap, "%s/%s", dir, name);
+    struct stat sb;
+    if (lstat(out, &sb) == 0) return;
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d))) if (!strcasecmp(de->d_name, name)) { snprintf(out, cap, "%s/%s", dir, de->d_name); break; }
+    closedir(d);
+}
+
+// Soul's own Windows tools (msiexec.exe) as real files in the C: drive; needs no running process.
+int soul_install_system_files(const char *drive_c) {
+    if (!drive_c || !*drive_c || !k_msiexec_stub_len) return -1;
+    char win[2600], sys[2600], exe[2600];
+    mkdir(drive_c, 0755);
+    host_child(drive_c, "windows", win, sizeof win);
+    mkdir(win, 0755);
+    host_child(win, "system32", sys, sizeof sys);
+    mkdir(sys, 0755);
+    host_child(sys, "msiexec.exe", exe, sizeof exe);
+    struct stat sb;
+    if (stat(exe, &sb) == 0 && (size_t)sb.st_size == k_msiexec_stub_len) {
+        size_t n = 0;
+        uint8_t *cur = read_host_file(exe, &n);
+        int same = cur && n == k_msiexec_stub_len && memcmp(cur, k_msiexec_stub, n) == 0;
+        free(cur);
+        if (same) return 0;
+    }
+    return write_host_file(exe, k_msiexec_stub, k_msiexec_stub_len) == 0 ? 0 : -1;
+}
+
 static void ensure_helper(void) {
-    const char *win = "C:\\Windows\\System32\\msiexec.exe";
-    if (file_exists_win(win)) return;
-    if (!k_msiexec_stub_len) return;
-    ensure_parent_win(win);
-    char h[2600];
-    host_of(win, h, sizeof h);
-    write_host_file(h, k_msiexec_stub, k_msiexec_stub_len);
+    if (g_proc) soul_install_system_files(g_proc->drive_c);
 }
 
 // runs the entry point of a custom action DLL; the DLL bitness decides where it runs
@@ -1611,6 +1638,21 @@ static int act_write_registry(MsiSess *s) {
     }
     return 0;
 }
+// deletes `key` while it is empty, then its empty parents; the top-level key below the hive ("Software") stays
+static void prune_empty_keys(uint32_t root, const char *key) {
+    char k[1300];
+    snprintf(k, sizeof k, "%s", key);
+    for (;;) {
+        size_t l = strlen(k);
+        while (l && k[l - 1] == '\\') k[--l] = 0;
+        char *sl = strrchr(k, '\\');
+        if (!sl) return; // top-level key
+        if (!strcasecmp(k, "Software\\Classes")) return; // the HKCR alias points here
+        if (!reg_host_key_is_empty(root, k)) return;
+        reg_host_delete_tree(root, k);
+        *sl = 0;
+    }
+}
 static int act_remove_registry(MsiSess *s) {
     int n = msidb_rows(s->db, "Registry");
     for (int i = 0; i < n; i++) {
@@ -1620,6 +1662,7 @@ static int act_remove_registry(MsiSess *s) {
         const char *rn = Sx(s, "Registry", i, "Name");
         if (!strcmp(rn, "-") || !strcmp(rn, "*")) reg_host_delete_tree(root, key);
         else if (strcmp(rn, "+")) { char *nm = fmt(s, rn); reg_host_delete_value(root, key, nm); free(nm); }
+        prune_empty_keys(root, key);
         free(key);
     }
     return 0;

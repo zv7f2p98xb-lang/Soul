@@ -29,9 +29,12 @@ struct AboutView: View {
                 Bullet(ok: true, "Kalıcı kayıt defteri: programlar ayarlarını kaydeder ve bir sonraki açılışta bulur; bağlantılar Safari'de açılır")
                 Bullet(ok: true, "Çoklu iş parçacığı: CreateThread, kritik bölgeler, olaylar, semaforlar, koşul değişkenleri")
 
+                Bullet(ok: true, "Kurulum sihirbazları (Inno Setup, NSIS, Windows Installer .msi), alt süreç başlatma (CreateProcess)")
+                Bullet(ok: true, "GDI+ çizimi ve görüntü dosyaları, ses (waveOut, DirectSound, XAudio2)")
+
                 Text("Henüz çalışmayanlar").font(.title2.weight(.semibold))
                 Bullet(ok: false, "Direct3D / Vulkan / gölgelendiricili (GLSL) OpenGL kullanan 3B oyunlar, Steam ve web tabanlı başlatıcılar")
-                Bullet(ok: false, ".NET programları, kurulum sihirbazları (.msi, Inno Setup), alt süreç başlatma (CreateProcess)")
+                Bullet(ok: false, ".NET programları, Direct3D, LZX ile sıkıştırılmış .msi paketleri")
                 Bullet(ok: false, "64-bit programlarda C++ istisnaları (SEH), AVX komutları")
 
                 Text("Madeira ile fark").font(.title2.weight(.semibold))
