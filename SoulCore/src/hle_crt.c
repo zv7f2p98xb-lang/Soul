@@ -906,7 +906,7 @@ HLE(crt_memcpy_s) { if (ARG(3) > ARG(1)) { RET(ERANGE); return; } memmove(PTR(0)
 static int wcmp(const uint16_t *a, const uint16_t *b, size_t n, int icase) {
     for (size_t i = 0; i < n; i++) {
         uint32_t x = a[i], y = b[i];
-        if (icase) { x = (uint32_t)towlower((wint_t)x); y = (uint32_t)towlower((wint_t)y); }
+        if (icase) { x = (uint32_t)uc_lower((uint32_t)x); y = (uint32_t)uc_lower((uint32_t)y); }
         if (x != y) return x < y ? -1 : 1;
         if (!x) return 0;
     }
@@ -932,8 +932,8 @@ HLE(crt_wcsstr) {
     RET(0);
 }
 HLE(crt__wcsdup) { const uint16_t *s = WSTR(0); size_t n = wstrlen(s); uint16_t *d = g_malloc((n + 1) * 2); memcpy(d, s, (n + 1) * 2); RET(d); }
-HLE(crt__wcslwr) { for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)towlower(*p); RET(ARG(0)); }
-HLE(crt__wcsupr) { for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)towupper(*p); RET(ARG(0)); }
+HLE(crt__wcslwr) { for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)uc_lower(*p); RET(ARG(0)); }
+HLE(crt__wcsupr) { for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)uc_upper(*p); RET(ARG(0)); }
 HLE(crt_wcscpy_s) { const uint16_t *s = WSTR(2); size_t n = wstrlen(s); if (n + 1 > ARG(1)) { RET(ERANGE); return; } memmove(PTR(0), s, (n + 1) * 2); RET(0); }
 HLE(crt_wcscat_s) { uint16_t *d = PTR(0); const uint16_t *s = WSTR(2); size_t a = wstrlen(d), n = wstrlen(s); if (a + n + 1 > ARG(1)) { RET(ERANGE); return; } memmove(d + a, s, (n + 1) * 2); RET(0); }
 HLE(crt_wcsncpy_s) { const uint16_t *s = WSTR(2); size_t n = 0; while (n < ARG(3) && s[n]) n++; if (n + 1 > ARG(1)) { RET(ERANGE); return; } memmove(PTR(0), s, n * 2); ((uint16_t *)PTR(0))[n] = 0; RET(0); }
@@ -1116,8 +1116,8 @@ HLE(crt_iswctype) {
     else { if (iswupper(c)) r |= 1; if (iswlower(c)) r |= 2; if (iswdigit(c)) r |= 4; if (iswspace(c)) r |= 8; if (iswpunct(c)) r |= 0x10; if (iswalpha(c)) r |= 0x100; }
     RET(r & m);
 }
-HLE(crt_towupper) { RET((uint16_t)towupper((wint_t)(uint16_t)ARG(0))); }
-HLE(crt_towlower) { RET((uint16_t)towlower((wint_t)(uint16_t)ARG(0))); }
+HLE(crt_towupper) { RET((uint16_t)uc_upper((uint32_t)(uint16_t)ARG(0))); }
+HLE(crt_towlower) { RET((uint16_t)uc_lower((uint32_t)(uint16_t)ARG(0))); }
 HLE(crt__isctype) { int c = (int)(int32_t)ARG(0); RET(c >= -1 && c < 256 ? (g_ctype_table[c + 1] & (unsigned)ARG(1)) : 0); }
 HLE(crt___pctype_func) { RET(g_cg->pctype); }
 static void *data_pctype(void) { return &g_cg->pctype; }
@@ -1370,7 +1370,7 @@ HLE_STUB_RET(crt__configthreadlocale, 2)
 HLE(crt__create_locale) { RET(g_cg->locale_obj); }
 HLE_STUB_RET(crt__free_locale, 0)
 HLE(crt__get_current_locale) { RET(g_cg->locale_obj); }
-HLE(crt__getpid) { RET(4242); }
+HLE(crt__getpid) { RET(g_proc->pid); }
 uint64_t k32_create_thread(X86State *st, uint64_t stack, uint64_t fn, uint64_t arg, uint32_t flags, uint64_t tid_out);
 // _beginthreadex(security, stack, start, arg, initflag, thrdaddr)
 HLE(crt__beginthreadex) {

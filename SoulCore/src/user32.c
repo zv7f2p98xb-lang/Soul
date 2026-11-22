@@ -653,8 +653,11 @@ uint64_t win_create(X86State *st, uint32_t exstyle, uint64_t cls_arg, uint64_t n
         if (w->h < 0) w->h = 0;
     } else {
         w->menu = menu;
-        if (cw == CW_USEDEFAULT || cw <= 0) { cw = g->screen_w * 3 / 4; ch = g->screen_h * 3 / 4; }
-        if (ch == CW_USEDEFAULT || ch <= 0) ch = g->screen_h * 3 / 4;
+        // only CW_USEDEFAULT asks for a default size: a 0 x 0 window (Delphi's TApplication) stays invisible
+        if (cw == CW_USEDEFAULT) { cw = g->screen_w * 3 / 4; ch = g->screen_h * 3 / 4; }
+        if (ch == CW_USEDEFAULT) ch = g->screen_h * 3 / 4;
+        if (cw < 0) cw = 0;
+        if (ch < 0) ch = 0;
         if (x == CW_USEDEFAULT) {
             int k = g->cascade++ % 8;
             x = 24 + 28 * k; y = 24 + 28 * k;
@@ -1011,7 +1014,12 @@ HLE(u_GetTopWindow) { Win **list; int n = children_of(ARG(0) == DESKTOP_HWND ? 0
 HLE(u_GetDesktopWindow) { RET(DESKTOP_HWND); }
 HLE(u_GetShellWindow) { RET(DESKTOP_HWND); }
 HLE(u_GetLastActivePopup) { RET(ARG(0)); }
-HLE(u_GetWindowThreadProcessId) { Win *w = win_get(ARG(0)); if (ARG(1)) mem_wr(ARG(1), 4, 4242); RET(w ? w->tid : 0); }
+HLE(u_GetWindowThreadProcessId) {
+    Win *w = win_get(ARG(0));
+    if (!w) { if (ARG(1)) mem_wr(ARG(1), 4, 0); RET(0); return; }
+    if (ARG(1)) mem_wr(ARG(1), 4, w->pid ? w->pid : g_proc->pid);
+    RET(w->tid);
+}
 
 static void enum_rec(X86State *st, uint64_t parent, uint64_t proc, uint64_t lp, int recurse, int *stop) {
     Win **list;
@@ -1115,7 +1123,9 @@ HLE(u_GetWindowWord) { RET((uint16_t)window_long(st, 1, 0, 0)); }
 
 static void prop_name(X86State *st, uint64_t p, int wide, char *out) {
     (void)st;
-    if (p < 0x10000) snprintf(out, 64, "#%u", (unsigned)p);
+    const char *atom_name(uint32_t a);
+    if (p < 0x10000 && atom_name((uint32_t)p)) snprintf(out, 64, "%s", atom_name((uint32_t)p)); // SetProp with an atom = its name
+    else if (p < 0x10000) snprintf(out, 64, "#%u", (unsigned)p);
     else { char *s = gstr(p, wide); snprintf(out, 64, "%s", s); free(s); }
 }
 static void set_prop(X86State *st, int wide) {
@@ -2933,7 +2943,7 @@ int soul_gui_windows(SoulProcess *p, SoulWindowInfo *out, int max) {
     int count = 0;
     for (int i = 0; i < WIN_MAX; i++) {
         Win *w = &g->wins[i];
-        if (w->used && !w->parent && w->visible && !w->message_only && w->pixels && w->ctl != CTL_TOOLTIP) list[count++] = w;
+        if (w->used && !w->parent && w->visible && !w->message_only && w->pixels && w->ctl != CTL_TOOLTIP && w->w > 0 && w->h > 0) list[count++] = w;
     }
     for (int a = 1; a < count; a++) for (int b = a; b > 0; b--) {
         int swap = list[b - 1]->zstamp > list[b]->zstamp ||
@@ -3070,6 +3080,20 @@ int soul_gui_has_windows(SoulProcess *p) {
     return 0;
 }
 
+// ---- imm32 (no input method editor: the iPad keyboard composes text) and flat scroll bars -----------
+HLE(u_ImmTrue) { RET(1); }
+HLE(u_ImmFalse) { RET(0); }
+HLE(u_ImmGetConversionStatus) { if (ARG(1)) mem_wr(ARG(1), 4, 0); if (ARG(2)) mem_wr(ARG(2), 4, 0); RET(1); }
+HLE(u_ImmVirtualKey) { RET(0); }
+HLE(u_FlatSBOk) { RET(1); }
+HLE(u_FlatSBGetProp) { if (ARG(2)) mem_wr(ARG(2), 4, 0); RET(1); }
+HLE(u_AnimateWindow) { // (hwnd, time, flags): show or hide at once
+    Win *w = win_get(ARG(0));
+    if (!w) { RET(0); return; }
+    win_show(st, w, ((uint32_t)ARG(2) & 0x10000) ? 0 : 5); // AW_HIDE
+    RET(1);
+}
+
 // ---- table ----------------------------------------------------------------------------------------
 #define E(n, f) { n, f, NULL }
 const HleEntry hle_user32_table[] = {
@@ -3140,6 +3164,18 @@ const HleEntry hle_user32_table[] = {
     E("SetCaretPos", u_SetCaretPos), E("GetCaretPos", u_GetCaretPos), E("GetCaretBlinkTime", u_GetCaretBlinkTime), E("SetCaretBlinkTime", u_SetCaretBlinkTime),
     E("SetScrollInfo", u_SetScrollInfo), E("GetScrollInfo", u_GetScrollInfo), E("SetScrollPos", u_SetScrollPos), E("GetScrollPos", u_GetScrollPos),
     E("SetScrollRange", u_SetScrollRange), E("GetScrollRange", u_GetScrollRange), E("ShowScrollBar", u_ShowScrollBar), E("EnableScrollBar", u_EnableScrollBar),
+    // comctl32's "flat" scroll bars are drawn like ordinary ones
+    E("FlatSB_SetScrollInfo", u_SetScrollInfo), E("FlatSB_GetScrollInfo", u_GetScrollInfo), E("FlatSB_SetScrollPos", u_SetScrollPos),
+    E("FlatSB_GetScrollPos", u_GetScrollPos), E("FlatSB_SetScrollRange", u_SetScrollRange), E("FlatSB_GetScrollRange", u_GetScrollRange),
+    E("FlatSB_ShowScrollBar", u_ShowScrollBar), E("FlatSB_EnableScrollBar", u_EnableScrollBar), E("FlatSB_SetScrollProp", u_FlatSBOk),
+    E("FlatSB_GetScrollProp", u_FlatSBGetProp), E("InitializeFlatSB", u_FlatSBOk), E("UninitializeFlatSB", u_FlatSBOk),
+    E("ImmAssociateContextEx", u_ImmTrue), E("ImmGetOpenStatus", u_ImmFalse), E("ImmSetOpenStatus", u_ImmTrue), E("ImmIsIME", u_ImmFalse),
+    E("ImmGetConversionStatus", u_ImmGetConversionStatus), E("ImmSetConversionStatus", u_ImmTrue), E("ImmNotifyIME", u_ImmTrue),
+    E("ImmGetDefaultIMEWnd", u_ImmFalse), E("ImmCreateContext", u_ImmFalse), E("ImmDestroyContext", u_ImmTrue),
+    E("ImmSetCompositionFontW", u_ImmTrue), E("ImmSetCompositionFontA", u_ImmTrue), E("ImmGetCompositionStringW", u_ImmFalse),
+    E("ImmGetCompositionStringA", u_ImmFalse), E("ImmGetVirtualKey", u_ImmVirtualKey), E("ImmDisableIME", u_ImmTrue),
+    E("ImmSetCandidateWindow", u_ImmTrue), E("ImmGetCompositionWindow", u_ImmFalse), E("ImmDisableTextFrameService", u_ImmTrue),
+    E("AnimateWindow", u_AnimateWindow), E("NotifyWinEvent", u_ImmTrue),
     E("CreateMenu", u_CreateMenu), E("CreatePopupMenu", u_CreatePopupMenu), E("DestroyMenu", u_DestroyMenu), E("AppendMenuA", u_AppendMenuA),
     E("AppendMenuW", u_AppendMenuW), E("InsertMenuA", u_InsertMenuA), E("InsertMenuW", u_InsertMenuW), E("ModifyMenuA", u_ModifyMenuA),
     E("ModifyMenuW", u_ModifyMenuW), E("DeleteMenu", u_DeleteMenu), E("RemoveMenu", u_RemoveMenu), E("SetMenu", u_SetMenu), E("GetMenu", u_GetMenu),

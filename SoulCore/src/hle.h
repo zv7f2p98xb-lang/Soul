@@ -24,6 +24,7 @@ extern const HleEntry hle_registry_table[];
 extern const HleEntry hle_shell_table[];
 extern const HleEntry hle_process_table[];
 extern const HleEntry hle_com_table[];
+extern const HleEntry hle_oleaut_table[];
 // hle_process.c: opens a program, document or link like Explorer (> 32 = success)
 uint64_t shell_execute_file(const char *file, const char *params, const char *dir, SoulProcess **started);
 const char *hle_ordinal_name(const char *dll, int ordinal); // name of a system DLL export known only by number
@@ -126,6 +127,8 @@ uint32_t errno_to_win(int e);
 
 // ---- strings -------------------------------------------------------------
 size_t wstrlen(const uint16_t *w);
+uint32_t uc_upper(uint32_t c); // Unicode case mapping (Latin, Turkish, Greek, Cyrillic)
+uint32_t uc_lower(uint32_t c);
 // Convert UTF-16 (len -1 = NUL terminated) to UTF-8; returns bytes written (excluding NUL)
 size_t w2u(const uint16_t *w, long wlen, char *out, size_t outcap);
 // Convert UTF-8 (len -1 = NUL terminated) to UTF-16; returns code units written (excluding NUL)

@@ -1440,7 +1440,81 @@ HLE(g_CreatePalette) { GdiObj *o; RET(gdi_alloc(GO_PALETTE, &o)); }
 HLE(g_SelectPalette) { Dc *dc = dc_get(ARG(0)); uint64_t old = dc ? dc->palette : 0; if (dc) dc->palette = ARG(1); RET(old ? old : g_stock[15]); }
 HLE_STUB_RET(g_RealizePalette, 0)
 HLE_STUB_RET(g_AddFontResourceEx, 1)
-HLE_STUB_RET(g_EnumFontFamiliesEx, 1)
+// Font enumeration: the faces Soul draws with its built-in fonts, reported as TrueType fonts.
+static const char *const k_enum_faces[] = { "Arial", "Calibri", "Consolas", "Courier New", "Lucida Console", "Microsoft Sans Serif",
+    "MS Sans Serif", "MS Shell Dlg", "MS Shell Dlg 2", "Segoe UI", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana", NULL };
+static int face_fixed(const char *f) { return !strcasecmp(f, "Consolas") || !strcasecmp(f, "Courier New") || !strcasecmp(f, "Lucida Console"); }
+// mode 0: EnumFontFamiliesEx (hdc, logfont, proc, lparam, flags); 1: EnumFontFamilies / EnumFonts (hdc, face, proc, lparam)
+static void enum_fonts(X86State *st, int wide, int mode) {
+    char want[64] = "";
+    uint64_t proc = ARG(2), lparam = ARG(3);
+    if (mode == 0 && ARG(1)) {
+        uint64_t lf = ARG(1);
+        if (wide) { char *s = w2u_dup(G2H(lf + 28)); snprintf(want, sizeof want, "%s", s); free(s); }
+        else snprintf(want, sizeof want, "%s", (const char *)G2H(lf + 28));
+    } else if (mode == 1 && ARG(1)) {
+        if (wide) { char *s = w2u_dup(PTR(1)); snprintf(want, sizeof want, "%s", s); free(s); }
+        else snprintf(want, sizeof want, "%s", (const char *)PTR(1));
+    }
+    size_t cs = wide ? 2 : 1;
+    size_t lf_size = 28 + 32 * cs, elf_size = lf_size + (64 + 32 + 32) * cs;
+    size_t tm_size = wide ? 60 : 56, ntm_size = tm_size + 16 + 24;
+    uint8_t *elf = g_calloc(1, elf_size), *ntm = g_calloc(1, ntm_size);
+    uint64_t r = 1;
+    for (int i = 0; k_enum_faces[i] && r; i++) {
+        const char *f = k_enum_faces[i];
+        if (want[0] && strcasecmp(want, f)) continue;
+        memset(elf, 0, elf_size); memset(ntm, 0, ntm_size);
+        int32_t lf[7] = { -16, 0, 0, 0, 400, 0, 0 };
+        memcpy(elf, lf, sizeof lf);
+        elf[23] = 1;                              // DEFAULT_CHARSET would be 1; ANSI_CHARSET = 0
+        elf[23] = 0;
+        elf[24] = 7;                              // OUT_TT_PRECIS
+        elf[27] = (uint8_t)((face_fixed(f) ? 1 : 2) | (face_fixed(f) ? 0x30 : 0x20)); // pitch | FF_MODERN / FF_SWISS
+        if (wide) {
+            u2w(f, -1, (uint16_t *)(elf + 28), 32);
+            u2w(f, -1, (uint16_t *)(elf + lf_size), 64);
+            u2w("Regular", -1, (uint16_t *)(elf + lf_size + 128), 32);
+            u2w("Western", -1, (uint16_t *)(elf + lf_size + 192), 32);
+        } else {
+            snprintf((char *)elf + 28, 32, "%s", f);
+            snprintf((char *)elf + lf_size, 64, "%s", f);
+            snprintf((char *)elf + lf_size + 64, 32, "Regular");
+            snprintf((char *)elf + lf_size + 96, 32, "Western");
+        }
+        int32_t tm[11] = { 16, 13, 3, 0, 0, face_fixed(f) ? 8 : 7, 16, 400, 0, 96, 96 };
+        memcpy(ntm, tm, sizeof tm);
+        uint8_t *tail = ntm + 44 + (wide ? 8 : 4); // after the first/last/default/break characters
+        if (wide) { uint16_t ch[4] = { 32, 0xFFFC, 0x1F, 32 }; memcpy(ntm + 44, ch, 8); }
+        else { ntm[44] = 32; ntm[45] = 255; ntm[46] = 31; ntm[47] = 32; }
+        tail[3] = (uint8_t)((face_fixed(f) ? 0 : 1) | 4 | 2); // tmPitchAndFamily: variable pitch | TrueType | vector
+        uint32_t flags = 0x40;                     // NTM_REGULAR
+        memcpy(ntm + tm_size, &flags, 4);
+        uint64_t args[4] = { H2G(elf), H2G(ntm), 4 /* TRUETYPE_FONTTYPE */, lparam };
+        r = soul_guest_call(st, proc, 4, args) & 0xFFFFFFFF;
+    }
+    g_free(elf); g_free(ntm);
+    RET(r);
+}
+HLE(g_EnumFontFamiliesExW) { enum_fonts(st, 1, 0); }
+HLE(g_EnumFontFamiliesExA) { enum_fonts(st, 0, 0); }
+HLE(g_EnumFontFamiliesW) { enum_fonts(st, 1, 1); }
+HLE(g_EnumFontFamiliesA) { enum_fonts(st, 0, 1); }
+HLE(g_RectVisible) { RET(1); }
+HLE(g_UnrealizeObject) { RET(1); }
+HLE(g_GetDIBColorTable) { // (hdc, start, count, RGBQUAD*): the palette of the bitmap selected into the DC
+    Dc *dc = dc_get(ARG(0));
+    if (!dc || !ARG(3)) { RET(0); return; }
+    GdiObj *bm = gdi_get(dc->bitmap, GO_BITMAP);
+    if (!bm || bm->surf.bpp > 8) { RET(0); return; }
+    uint32_t n = 1u << bm->surf.bpp, start = (uint32_t)ARG(1), cnt = (uint32_t)ARG(2), k = 0;
+    for (uint32_t i = start; i < n && k < cnt; i++, k++) {
+        uint32_t c = bm->surf.palette[i];
+        uint8_t q[4] = { (uint8_t)c, (uint8_t)(c >> 8), (uint8_t)(c >> 16), 0 };
+        memcpy((uint8_t *)PTR(3) + 4 * k, q, 4);
+    }
+    RET(k);
+}
 HLE(g_GetRegionData) { RET(0); }
 
 // ---- helpers used by user32 / built-in controls -------------------------------------------------
@@ -1578,7 +1652,10 @@ const HleEntry hle_gdi32_table[] = {
     { "CreateEllipticRgn", g_CreateEllipticRgn, NULL }, { "SetRectRgn", g_SetRectRgn, NULL }, { "CombineRgn", g_CombineRgn, NULL }, { "FillRgn", g_FillRgn, NULL },
     { "GetDeviceCaps", g_GetDeviceCaps, NULL }, { "GdiFlush", g_GdiFlush, NULL }, { "CreatePalette", g_CreatePalette, NULL },
     { "SelectPalette", g_SelectPalette, NULL }, { "RealizePalette", g_RealizePalette, NULL }, { "AddFontResourceExW", g_AddFontResourceEx, NULL },
-    { "AddFontResourceExA", g_AddFontResourceEx, NULL }, { "EnumFontFamiliesExW", g_EnumFontFamiliesEx, NULL }, { "EnumFontFamiliesExA", g_EnumFontFamiliesEx, NULL },
+    { "AddFontResourceExA", g_AddFontResourceEx, NULL }, { "EnumFontFamiliesExW", g_EnumFontFamiliesExW, NULL }, { "EnumFontFamiliesExA", g_EnumFontFamiliesExA, NULL },
+    { "EnumFontFamiliesW", g_EnumFontFamiliesW, NULL }, { "EnumFontFamiliesA", g_EnumFontFamiliesA, NULL },
+    { "EnumFontsW", g_EnumFontFamiliesW, NULL }, { "EnumFontsA", g_EnumFontFamiliesA, NULL },
+    { "RectVisible", g_RectVisible, NULL }, { "UnrealizeObject", g_UnrealizeObject, NULL }, { "GetDIBColorTable", g_GetDIBColorTable, NULL },
     { "GetRegionData", g_GetRegionData, NULL },
     { NULL, NULL, NULL }
 };

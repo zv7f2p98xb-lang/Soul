@@ -30,7 +30,8 @@ static const char *const k_system_dlls[] = {
     "shfolder", "apphelp", "propsys", "cryptbase", "oleacc", "clbcatq", "ntmarta", "riched20", "riched32", "msftedit",
     "msimg32", "winspool", "urlmon", "wintrust", "imagehlp", "shcore", "oledlg", "olepro32", "msacm32", "msvfw32",
     "avifil32", "credui", "dnsapi", "ncrypt", "sspicli", "profapi", "kernel.appcore", "msasn1", "mswsock", "wldap32",
-    "dwrite", "d2d1", "windowscodecs", "gdiplus", "ddraw", "dinput", "cabinet", "msi", "mscoree", "uiautomationcore", NULL
+    "dwrite", "d2d1", "windowscodecs", "gdiplus", "ddraw", "dinput", "cabinet", "msi", "mscoree", "uiautomationcore",
+    "rstrtmgr", "msctf", "sxs", "wer", "faultrep", "dbgcore", NULL
 };
 
 static void dll_key(const char *dll, char *out, size_t n) {
@@ -53,16 +54,25 @@ int hle_is_system_dll(const char *dll) {
 static const HleEntry *find_entry(const char *name) {
     // processes and COM first: they replace older stand-ins in the other tables
     const HleEntry *tables[] = { hle_process_table, hle_com_table, hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table,
-                                 hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table, hle_shell_table };
-    for (int t = 0; t < 12; t++)
+                                 hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table, hle_shell_table,
+                                 hle_oleaut_table };
+    for (int t = 0; t < 13; t++)
         for (const HleEntry *e = tables[t]; e->name; e++)
             if (strcmp(e->name, name) == 0) return e;
     return NULL;
 }
 
 // Stack bytes a 32-bit system function removes on return (0 = cdecl or unknown).
+// stdcall functions the generated table (MinGW import libraries) does not know
+static const StdcallArgs k_extra_stdcall[] = {
+    { "EventSetInformation", 20 }, { "GetDpiForMonitor", 16 }, { "GetDpiForShellUIComponent", 4 }, { "GetProcessDpiAwareness", 8 },
+    { "GetScaleFactorForMonitor", 8 }, { "GetTempPath2W", 8 }, { "OpenThemeDataForDpi", 12 }, { "ProcessPrng", 8 },
+    { "SetProcessDpiAwareness", 4 }, { "WaitOnAddress", 16 }, { "WakeByAddressAll", 4 }, { "WakeByAddressSingle", 4 },
+    { NULL, 0 }
+};
 static uint16_t stdcall_bytes(const char *name) {
     if (!name || name[0] == '#') return 0;
+    for (const StdcallArgs *e = k_extra_stdcall; e->name; e++) if (!strcmp(e->name, name)) return e->bytes;
     int lo = 0, hi = K_STDCALL_ARGS_COUNT - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
@@ -254,6 +264,36 @@ uint32_t errno_to_win(int e) {
 }
 
 // ---- strings ----------------------------------------------------------------
+
+// Unicode upper/lower case for the scripts Windows programs meet most (Latin incl. Turkish,
+// Greek, Cyrillic), independent of the host's C locale.
+uint32_t uc_upper(uint32_t c) {
+    if (c < 0x80) return c >= 'a' && c <= 'z' ? c - 32 : c;
+    if (c >= 0xE0 && c <= 0xFE && c != 0xF7) return c - 32;
+    if (c == 0xFF) return 0x178;
+    if (c == 0xB5) return 0x39C;
+    if (c == 0x131) return 'I';
+    if (c == 0x17F) return 'S';
+    if ((c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177)) return (c & 1) ? c - 1 : c;
+    if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) return (c & 1) ? c : c - 1;
+    if (c == 0x3C2) return 0x3A3;
+    if (c >= 0x3B1 && c <= 0x3C9) return c - 32;
+    if (c >= 0x430 && c <= 0x44F) return c - 32;
+    if (c >= 0x450 && c <= 0x45F) return c - 80;
+    return c;
+}
+uint32_t uc_lower(uint32_t c) {
+    if (c < 0x80) return c >= 'A' && c <= 'Z' ? c + 32 : c;
+    if (c >= 0xC0 && c <= 0xDE && c != 0xD7) return c + 32;
+    if (c == 0x178) return 0xFF;
+    if (c == 0x130) return 'i';
+    if ((c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177)) return (c & 1) ? c : c + 1;
+    if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) return (c & 1) ? c + 1 : c;
+    if (c >= 0x391 && c <= 0x3A9 && c != 0x3A2) return c + 32;
+    if (c >= 0x410 && c <= 0x42F) return c + 32;
+    if (c >= 0x400 && c <= 0x40F) return c + 80;
+    return c;
+}
 
 size_t wstrlen(const uint16_t *w) {
     size_t n = 0;

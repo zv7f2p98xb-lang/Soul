@@ -830,8 +830,11 @@ static uint64_t rich_stream_in(X86State *st, Win *w, uint64_t fmt, uint64_t es) 
         n += (size_t)got;
     }
     g_free(buf);
+    if (getenv("SOUL_DEBUG_RTF")) { soul_log("[rtf] fmt=%llx n=%zu: %.300s\n", (unsigned long long)fmt, n, data ? (const char *)data : ""); }
     if (!(w = win_get(h))) { free(data); return 0; }
-    char *t = rich_decode(data ? data : (const uint8_t *)"", n, (fmt & 0x10) != 0, (fmt & 2) != 0);
+    // like RichEdit, SF_RTF data that is not RTF ("{\rtf...") is read as plain text
+    int rtf = (fmt & 2) && n >= 5 && !memcmp(data, "{\\rtf", 5);
+    char *t = rich_decode(data ? data : (const uint8_t *)"", n, (fmt & 0x10) != 0, rtf);
     free(data);
     rich_set(st, w, t, (fmt & 0x8000) != 0);
     Cps c = to_cps(t);

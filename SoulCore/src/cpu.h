@@ -63,6 +63,9 @@ typedef struct X86State {
     double fpr[8];
     uint16_t fcw, fsw;
     uint8_t ftag[8];
+    // FILD m64 keeps the exact integer next to the double, so FISTP m64 of the unchanged value
+    // writes all 64 bits back (Delphi's Move copies memory 8 bytes at a time this way)
+    int64_t fexact[8];
     volatile int32_t stop_req;
     int32_t exit_code;
     SoulThread *thread;

@@ -919,6 +919,262 @@ HLE(adv_EqualSid) {
 HLE(adv_GetLengthSid) { const uint8_t *a = PTR(0); RET(a ? 8 + 4 * (uint32_t)a[1] : 0); }
 HLE(adv_IsValidSid) { const uint8_t *a = PTR(0); RET(a && a[0] == 1); }
 
+// ---- user interface languages (Delphi's runtime calls these directly on Vista and later) ---------------
+
+static void ui_languages(X86State *st, int flags_arg, int num_arg, int buf_arg, int cch_arg) {
+    uint32_t flags = (uint32_t)hle_arg(st, flags_arg);
+    const char *lang = (flags & 0x4) ? "0409" : "en-US"; // MUI_LANGUAGE_ID or MUI_LANGUAGE_NAME
+    uint32_t need = (uint32_t)strlen(lang) + 2;           // double-NUL list
+    if (num_arg >= 0 && hle_arg(st, num_arg)) mem_wr(hle_arg(st, num_arg), 4, 1);
+    uint64_t cchp = hle_arg(st, cch_arg), buf = hle_arg(st, buf_arg);
+    uint32_t cap = cchp ? (uint32_t)mem_rd(cchp, 4) : 0;
+    if (cchp) mem_wr(cchp, 4, need);
+    if (!buf) { RET(1); return; }
+    if (cap < need) FAIL(ERROR_INSUFFICIENT_BUFFER);
+    uint16_t *w = (uint16_t *)G2H(buf);
+    for (uint32_t i = 0; i + 2 < need; i++) w[i] = (uint16_t)lang[i];
+    w[need - 2] = 0; w[need - 1] = 0;
+    RET(1);
+}
+HLE(k32_GetThreadPreferredUILanguages) { ui_languages(st, 0, 1, 2, 3); }
+HLE(k32_GetUserPreferredUILanguages) { ui_languages(st, 0, 1, 2, 3); }
+HLE(k32_GetSystemPreferredUILanguages) { ui_languages(st, 0, 1, 2, 3); }
+HLE(k32_GetProcessPreferredUILanguages) { ui_languages(st, 0, 1, 2, 3); }
+HLE(k32_SetThreadPreferredUILanguages) { if (hle_arg(st, 2)) mem_wr(hle_arg(st, 2), 4, 1); RET(1); }
+HLE(k32_SetProcessPreferredUILanguages) { RET(1); }
+HLE(k32_GetThreadUILanguage) { RET(0x409); }
+HLE(k32_SetThreadUILanguage) { RET(ARG(0) ? ARG(0) : 0x409); }
+HLE(k32_SetThreadLocale) { RET(1); }
+HLE(k32_GetThreadLocale) { RET(0x409); }
+HLE(k32_SetSearchPathMode) { RET(1); }
+HLE(k32_SetProcessDEPPolicy) { RET(1); }
+HLE(k32_GetProcessDEPPolicy) { if (ARG(1)) mem_wr(ARG(1), 4, 1); if (ARG(2)) mem_wr(ARG(2), 4, 1); RET(1); }
+
+// ---- atoms (one table for global and local atoms, shared by every process) -------------------------
+
+typedef struct Atom { char name[256]; int refs; } Atom;
+static Atom g_atoms[0x4000 - 1];
+static int g_atom_n;
+const char *atom_name(uint32_t a) {
+    if (a >= 0xC000 && a - 0xC000 < (uint32_t)g_atom_n && g_atoms[a - 0xC000].refs > 0) return g_atoms[a - 0xC000].name;
+    return NULL;
+}
+static uint32_t atom_find(const char *s) {
+    if (s[0] == '#') { long v = strtol(s + 1, NULL, 10); return v > 0 && v < 0xC000 ? (uint32_t)v : 0; }
+    for (int i = 0; i < g_atom_n; i++) if (g_atoms[i].refs > 0 && !strcasecmp(g_atoms[i].name, s)) return 0xC000u + (uint32_t)i;
+    return 0;
+}
+static uint32_t atom_add(const char *s) {
+    uint32_t a = atom_find(s);
+    if (a >= 0xC000) { g_atoms[a - 0xC000].refs++; return a; }
+    if (a) return a;
+    int slot = -1;
+    for (int i = 0; i < g_atom_n; i++) if (g_atoms[i].refs <= 0) { slot = i; break; }
+    if (slot < 0) { if (g_atom_n >= (int)(sizeof g_atoms / sizeof g_atoms[0])) return 0; slot = g_atom_n++; }
+    snprintf(g_atoms[slot].name, sizeof g_atoms[slot].name, "%s", s);
+    g_atoms[slot].refs = 1;
+    return 0xC000u + (uint32_t)slot;
+}
+static char *atom_arg(X86State *st, int wide) {
+    if (ARG(0) < 0x10000) { char b[16]; snprintf(b, sizeof b, "#%u", (unsigned)ARG(0)); return strdup(b); }
+    return gstr(ARG(0), wide);
+}
+static void add_atom(X86State *st, int wide) { char *s = atom_arg(st, wide); RET(s ? atom_add(s) : 0); free(s); }
+static void find_atom(X86State *st, int wide) { char *s = atom_arg(st, wide); uint32_t a = s ? atom_find(s) : 0; free(s); if (!a) FAIL(ERROR_FILE_NOT_FOUND); RET(a); }
+static void atom_get_name(X86State *st, int wide) {
+    uint32_t a = (uint32_t)(ARG(0) & 0xFFFF);
+    char b[16];
+    const char *n = atom_name(a);
+    if (!n && a && a < 0xC000) { snprintf(b, sizeof b, "#%u", a); n = b; }
+    if (!n) FAIL(ERROR_INVALID_HANDLE);
+    RET(put_trunc(ARG(1), (size_t)(uint32_t)ARG(2), n, wide));
+}
+HLE(k32_GlobalAddAtomA) { add_atom(st, 0); }
+HLE(k32_GlobalAddAtomW) { add_atom(st, 1); }
+HLE(k32_GlobalFindAtomA) { find_atom(st, 0); }
+HLE(k32_GlobalFindAtomW) { find_atom(st, 1); }
+HLE(k32_GlobalGetAtomNameA) { atom_get_name(st, 0); }
+HLE(k32_GlobalGetAtomNameW) { atom_get_name(st, 1); }
+HLE(k32_GlobalDeleteAtom) {
+    uint32_t a = (uint32_t)(ARG(0) & 0xFFFF);
+    if (a >= 0xC000 && a - 0xC000 < (uint32_t)g_atom_n && g_atoms[a - 0xC000].refs > 0) g_atoms[a - 0xC000].refs--;
+    RET(0);
+}
+
+// ---- user32 case conversion (buffers) ------------------------------------------------------------------
+
+HLE(u32_CharUpperBuffW) { uint16_t *p = PTR(0); uint32_t n = (uint32_t)ARG(1); for (uint32_t i = 0; p && i < n; i++) p[i] = (uint16_t)uc_upper(p[i]); RET(n); }
+HLE(u32_CharLowerBuffW) { uint16_t *p = PTR(0); uint32_t n = (uint32_t)ARG(1); for (uint32_t i = 0; p && i < n; i++) p[i] = (uint16_t)uc_lower(p[i]); RET(n); }
+HLE(u32_CharUpperBuffA) { char *p = PTR(0); uint32_t n = (uint32_t)ARG(1); for (uint32_t i = 0; p && i < n; i++) p[i] = (char)toupper((unsigned char)p[i]); RET(n); }
+HLE(u32_CharLowerBuffA) { char *p = PTR(0); uint32_t n = (uint32_t)ARG(1); for (uint32_t i = 0; p && i < n; i++) p[i] = (char)tolower((unsigned char)p[i]); RET(n); }
+HLE(u32_IsCharUpperW) { uint32_t c = (uint16_t)ARG(0); RET(uc_lower(c) != c); }
+HLE(u32_IsCharLowerW) { uint32_t c = (uint16_t)ARG(0); RET(uc_upper(c) != c); }
+HLE(k32_EnumCalendarInfo) { RET(1); }
+uint64_t k32_virtual_query(uint64_t addr, uint8_t *b); // hle_kernel32.c
+HLE(k32_VirtualQueryEx) { // the calling process only
+    if (ARG(0) != (uint64_t)-1 && ARG(0) != 0) {
+        HObj *o = h_get(ARG(0));
+        if (!o || o->type != H_PROCESS || o->ptr != g_proc) FAIL(ERROR_ACCESS_DENIED);
+    }
+    RET(k32_virtual_query(ARG(1), PTR(2)));
+}
+
+// ---- wtsapi32 / misc system information ------------------------------------------------------------------
+
+HLE(wts_RegisterSessionNotification) { RET(1); }
+HLE(wts_QuerySessionInformation) { RET(0); }
+HLE(k32_GetLogicalProcessorInformation) { // one core with one logical processor
+    uint64_t buf = ARG(0), lenp = ARG(1);
+    uint32_t need = g_mode32 ? 24 : 32; // SYSTEM_LOGICAL_PROCESSOR_INFORMATION
+    uint32_t cap = lenp ? (uint32_t)mem_rd(lenp, 4) : 0;
+    if (lenp) mem_wr(lenp, 4, need);
+    if (!buf || cap < need) FAIL(ERROR_INSUFFICIENT_BUFFER);
+    memset(G2H(buf), 0, need);
+    wr_ptr(buf, 1);                     // ProcessorMask
+    mem_wr(buf + (uint64_t)PSZ, 4, 0);  // RelationProcessorCore
+    RET(1);
+}
+
+// ---- uxtheme: visual styles are off (programs then draw the classic look themselves) -----------------------
+
+#define E_FAIL_HR 0x80004005u
+HLE(ux_False) { RET(0); }
+HLE(ux_Ok) { RET(0); }
+HLE(ux_Fail) { RET(E_FAIL_HR); }
+HLE(ux_BeginBufferedPaint) { // (hdcTarget, rect, format, params, &hdc): no buffering, paint straight into the target
+    if (hle_arg(st, 4)) wr_ptr(hle_arg(st, 4), ARG(0));
+    RET(0);
+}
+HLE(ux_GetThemeSysColor) { RET(gui_sys_color((int)ARG(1))); }
+HLE(ux_GetCurrentThemeName) { if (ARG(0) && ARG(1)) mem_wr(ARG(0), 2, 0); RET(E_FAIL_HR); }
+HLE(ux_GetThemeAppProperties) { RET(0); }
+
+// ---- security: the user is an elevated administrator; descriptors and ACLs are accepted -------------------
+
+// S-1-5-21-1-2-3-1000 (the user) and S-1-5-32-544 (Administrators)
+static uint64_t make_sid(int admin) {
+    uint8_t *s = g_calloc(1, 28);
+    s[0] = 1; s[7] = 5;
+    if (admin) { s[1] = 2; uint32_t v[2] = { 32, 544 }; memcpy(s + 8, v, 8); }
+    else { s[1] = 5; uint32_t v[5] = { 21, 1, 2, 3, 1000 }; memcpy(s + 8, v, 20); }
+    return H2G(s);
+}
+HLE(adv_GetTokenInformation) { // (token, class, buffer, length, &returned)
+    uint32_t cls = (uint32_t)ARG(1), cap = (uint32_t)ARG(3);
+    uint64_t buf = ARG(2), ret = hle_arg(st, 4);
+    uint32_t need;
+    switch (cls) {
+    case 1: case 4: case 5: need = (uint32_t)(2 * PSZ) + 28; break;     // TokenUser / Owner / PrimaryGroup
+    case 2: need = 4 + (uint32_t)(2 * PSZ) + 28; break;                  // TokenGroups: one group
+    case 18: case 20: case 8: case 9: need = 4; break;                  // ElevationType, Elevation, Type, ImpersonationLevel
+    case 25: need = (uint32_t)(2 * PSZ) + 12; break;                     // TokenIntegrityLevel
+    default: if (ret) mem_wr(ret, 4, 0); FAIL(ERROR_INVALID_PARAMETER);
+    }
+    if (ret) mem_wr(ret, 4, need);
+    if (!buf || cap < need) FAIL(ERROR_INSUFFICIENT_BUFFER);
+    memset(G2H(buf), 0, need);
+    switch (cls) {
+    case 1: case 4: case 5: { uint64_t sid = buf + (uint64_t)(2 * PSZ); memcpy(G2H(sid), G2H(make_sid(cls == 5 ? 0 : 0)), 28); wr_ptr(buf, sid); break; }
+    case 2: { uint64_t sid = buf + 4 + (uint64_t)(2 * PSZ); mem_wr(buf, 4, 1); memcpy(G2H(sid), G2H(make_sid(1)), 16); wr_ptr(buf + (g_mode32 ? 4 : 8), sid); mem_wr(buf + (g_mode32 ? 8 : 16), 4, 0xF); break; }
+    case 18: mem_wr(buf, 4, 2); break;  // TokenElevationTypeFull
+    case 20: mem_wr(buf, 4, 1); break;  // elevated
+    case 8: mem_wr(buf, 4, 1); break;   // TokenPrimary
+    case 9: mem_wr(buf, 4, 2); break;
+    case 25: { // S-1-16-12288 (high integrity)
+        uint64_t sid = buf + (uint64_t)(2 * PSZ);
+        uint8_t s[12] = { 1, 1, 0, 0, 0, 0, 0, 16, 0, 0x30, 0, 0 };
+        memcpy(G2H(sid), s, 12);
+        wr_ptr(buf, sid);
+        mem_wr(buf + (uint64_t)PSZ, 4, 0x20);
+        break;
+    }
+    }
+    RET(1);
+}
+HLE(adv_True) { RET(1); }
+HLE(adv_Success) { RET(0); }
+HLE(adv_InitializeSecurityDescriptor) { if (ARG(0)) { memset(PTR(0), 0, g_mode32 ? 20 : 40); ((uint8_t *)PTR(0))[0] = 1; } RET(1); }
+HLE(adv_GetSecurityDescriptorDacl) { if (ARG(1)) mem_wr(ARG(1), 4, 0); if (ARG(2)) wr_ptr(ARG(2), 0); if (ARG(3)) mem_wr(ARG(3), 4, 0); RET(1); }
+HLE(adv_ConvertStringSecurityDescriptor) { // (string, revision, &descriptor, &size)
+    uint64_t sd = H2G(g_calloc(1, 64));
+    ((uint8_t *)G2H(sd))[0] = 1;
+    if (ARG(2)) wr_ptr(ARG(2), sd);
+    if (ARG(3)) mem_wr(ARG(3), 4, 64);
+    RET(1);
+}
+HLE(adv_SetEntriesInAcl) { if (hle_arg(st, 3)) wr_ptr(hle_arg(st, 3), H2G(g_calloc(1, 8))); RET(0); }
+HLE(adv_GetNamedSecurityInfo) { for (int i = 3; i < 8; i++) if (hle_arg(st, i)) wr_ptr(hle_arg(st, i), 0); RET(0); }
+static void sid_string(X86State *st, int wide) { // (sid, &string): LocalFree'd by the caller
+    const uint8_t *s = PTR(0);
+    if (!s) FAIL(ERROR_INVALID_PARAMETER);
+    char out[200];
+    uint64_t auth = 0;
+    for (int i = 2; i < 8; i++) auth = auth << 8 | s[i];
+    int n = snprintf(out, sizeof out, "S-%u-%llu", s[0], (unsigned long long)auth);
+    for (int i = 0; i < s[1] && i < 15; i++) { uint32_t v; memcpy(&v, s + 8 + 4 * i, 4); n += snprintf(out + n, sizeof out - (size_t)n, "-%u", v); }
+    wr_ptr(ARG(1), wide ? H2G(u2w_gdup(out)) : H2G(g_strdup(out)));
+    RET(1);
+}
+HLE(adv_ConvertSidToStringSidW) { sid_string(st, 1); }
+HLE(adv_ConvertSidToStringSidA) { sid_string(st, 0); }
+HLE(adv_ConvertStringSidToSid) { if (ARG(1)) wr_ptr(ARG(1), make_sid(0)); RET(1); }
+static void lookup_account_sid(X86State *st, int wide) { // (system, sid, name, &cchName, domain, &cchDomain, &use)
+    const char *name = "soul", *dom = "IPAD";
+    uint64_t np = ARG(3), dp = hle_arg(st, 5);
+    uint32_t nc = np ? (uint32_t)mem_rd(np, 4) : 0, dc = dp ? (uint32_t)mem_rd(dp, 4) : 0;
+    if (nc < 5 || dc < 5) { if (np) mem_wr(np, 4, 5); if (dp) mem_wr(dp, 4, 5); FAIL(ERROR_INSUFFICIENT_BUFFER); }
+    put_trunc(ARG(2), nc, name, wide);
+    put_trunc(hle_arg(st, 4), dc, dom, wide);
+    mem_wr(np, 4, 4); mem_wr(dp, 4, 4);
+    if (hle_arg(st, 6)) mem_wr(hle_arg(st, 6), 4, 1); // SidTypeUser
+    RET(1);
+}
+HLE(adv_LookupAccountSidW) { lookup_account_sid(st, 1); }
+HLE(adv_LookupAccountSidA) { lookup_account_sid(st, 0); }
+
+// ---- Restart Manager: no other program holds the installer's files ---------------------------------------
+
+HLE(rm_StartSession) { if (ARG(0)) mem_wr(ARG(0), 4, 1); if (ARG(2)) mem_wr(ARG(2), 2, 0); RET(0); }
+HLE(rm_Success) { RET(0); }
+HLE(rm_GetList) { if (ARG(1)) mem_wr(ARG(1), 4, 0); if (ARG(2)) mem_wr(ARG(2), 4, 0); if (hle_arg(st, 4)) mem_wr(hle_arg(st, 4), 4, 0); RET(0); }
+
+// ---- DPI: Soul's screen is 96 DPI and every program is DPI aware ------------------------------------------
+
+HLE(shc_GetProcessDpiAwareness) { if (ARG(1)) mem_wr(ARG(1), 4, 1); RET(0); }
+HLE(u_GetAwarenessFromDpiAwarenessContext) { RET(1); }
+HLE(u_IsValidDpiAwarenessContext) { RET(1); }
+HLE(u_AreDpiAwarenessContextsEqual) { RET(ARG(0) == ARG(1)); }
+HLE(u_GetWindowDpiAwarenessContext) { RET((uint64_t)-2); }
+HLE(u_GetDpi96) { RET(96); }
+
+// ---- resources -------------------------------------------------------------------------------------
+
+#define ERROR_RESOURCE_TYPE_NOT_FOUND 1813
+HLE(k32_FindResourceA) { uint64_t e = pe_resource_entry(ARG(0), ARG(2), ARG(1), 0); if (!e) FAIL(ERROR_RESOURCE_TYPE_NOT_FOUND); RET(e); }
+HLE(k32_FindResourceW) { uint64_t e = pe_resource_entry(ARG(0), ARG(2), ARG(1), 1); if (!e) FAIL(ERROR_RESOURCE_TYPE_NOT_FOUND); RET(e); }
+HLE(k32_FindResourceExA) { uint64_t e = pe_resource_entry(ARG(0), ARG(1), ARG(2), 0); if (!e) FAIL(ERROR_RESOURCE_TYPE_NOT_FOUND); RET(e); }
+HLE(k32_FindResourceExW) { uint64_t e = pe_resource_entry(ARG(0), ARG(1), ARG(2), 1); if (!e) FAIL(ERROR_RESOURCE_TYPE_NOT_FOUND); RET(e); }
+HLE(k32_LoadResource) { RET(pe_resource_data(ARG(0), ARG(1), NULL)); }
+HLE(k32_LockResource) { RET(ARG(0)); }
+HLE(k32_SizeofResource) { uint32_t n = 0; if (!ARG(1)) { RET(0); return; } pe_resource_data(ARG(0), ARG(1), &n); RET(n); }
+HLE(k32_FreeResource) { RET(0); }
+
+// ---- netapi32 -------------------------------------------------------------------------------------------
+
+HLE(net_NetWkstaGetInfo) { // level 100: WKSTA_INFO_100 { platform_id, computername, langroup, ver_major, ver_minor }
+    if ((uint32_t)ARG(1) != 100 || !ARG(2)) { RET(124); return; } // ERROR_INVALID_LEVEL
+    const char *L = "4PP44";
+    uint64_t b = H2G(g_calloc(1, gs_size(L)));
+    gs_set(b, L, 0, 500);
+    gs_set(b, L, 1, H2G(u2w_gdup("IPAD")));
+    gs_set(b, L, 2, H2G(u2w_gdup("WORKGROUP")));
+    gs_set(b, L, 3, 10);
+    gs_set(b, L, 4, 0);
+    wr_ptr(ARG(2), b);
+    RET(0);
+}
+HLE(net_NetApiBufferFree) { g_free(PTR(0)); RET(0); }
+
 // ---- ordinal-only exports ---------------------------------------------------------------------------
 
 typedef struct OrdName { const char *dll; int ord; const char *name; } OrdName;
@@ -988,7 +1244,77 @@ const HleEntry hle_shell_table[] = {
     { "ExitWindowsEx", u32_ExitWindowsEx, NULL },
     { "AdjustTokenPrivileges", adv_AdjustTokenPrivileges, NULL }, { "LookupPrivilegeValueA", adv_LookupPrivilegeValue, NULL },
     { "LookupPrivilegeValueW", adv_LookupPrivilegeValue, NULL }, { "CheckTokenMembership", adv_CheckTokenMembership, NULL },
-    { "AllocateAndInitializeSid", adv_AllocateAndInitializeSid, NULL }, { "FreeSid", adv_FreeSid, NULL }, { "EqualSid", adv_EqualSid, NULL },
+    { "AllocateAndInitializeSid", adv_AllocateAndInitializeSid, NULL },
+    { "RmStartSession", rm_StartSession, NULL }, { "RmEndSession", rm_Success, NULL }, { "RmRegisterResources", rm_Success, NULL },
+    { "RmGetList", rm_GetList, NULL }, { "RmShutdown", rm_Success, NULL }, { "RmRestart", rm_Success, NULL }, { "FreeSid", adv_FreeSid, NULL }, { "EqualSid", adv_EqualSid, NULL },
     { "GetLengthSid", adv_GetLengthSid, NULL }, { "IsValidSid", adv_IsValidSid, NULL },
+    { "GetThreadPreferredUILanguages", k32_GetThreadPreferredUILanguages, NULL }, { "GetUserPreferredUILanguages", k32_GetUserPreferredUILanguages, NULL },
+    { "GetSystemPreferredUILanguages", k32_GetSystemPreferredUILanguages, NULL }, { "GetProcessPreferredUILanguages", k32_GetProcessPreferredUILanguages, NULL },
+    { "SetThreadPreferredUILanguages", k32_SetThreadPreferredUILanguages, NULL }, { "SetProcessPreferredUILanguages", k32_SetProcessPreferredUILanguages, NULL },
+    { "GetThreadUILanguage", k32_GetThreadUILanguage, NULL }, { "SetThreadUILanguage", k32_SetThreadUILanguage, NULL },
+    { "SetThreadLocale", k32_SetThreadLocale, NULL }, { "GetThreadLocale", k32_GetThreadLocale, NULL },
+    { "SetSearchPathMode", k32_SetSearchPathMode, NULL }, { "SetProcessDEPPolicy", k32_SetProcessDEPPolicy, NULL },
+    { "GetProcessDEPPolicy", k32_GetProcessDEPPolicy, NULL },
+    { "GlobalAddAtomA", k32_GlobalAddAtomA, NULL }, { "GlobalAddAtomW", k32_GlobalAddAtomW, NULL },
+    { "AddAtomA", k32_GlobalAddAtomA, NULL }, { "AddAtomW", k32_GlobalAddAtomW, NULL },
+    { "GlobalFindAtomA", k32_GlobalFindAtomA, NULL }, { "GlobalFindAtomW", k32_GlobalFindAtomW, NULL },
+    { "FindAtomA", k32_GlobalFindAtomA, NULL }, { "FindAtomW", k32_GlobalFindAtomW, NULL },
+    { "GlobalGetAtomNameA", k32_GlobalGetAtomNameA, NULL }, { "GlobalGetAtomNameW", k32_GlobalGetAtomNameW, NULL },
+    { "GetAtomNameA", k32_GlobalGetAtomNameA, NULL }, { "GetAtomNameW", k32_GlobalGetAtomNameW, NULL },
+    { "GlobalDeleteAtom", k32_GlobalDeleteAtom, NULL }, { "DeleteAtom", k32_GlobalDeleteAtom, NULL },
+    { "CharUpperBuffW", u32_CharUpperBuffW, NULL }, { "CharLowerBuffW", u32_CharLowerBuffW, NULL },
+    { "CharUpperBuffA", u32_CharUpperBuffA, NULL }, { "CharLowerBuffA", u32_CharLowerBuffA, NULL },
+    { "IsCharUpperW", u32_IsCharUpperW, NULL }, { "IsCharLowerW", u32_IsCharLowerW, NULL },
+    { "EnumCalendarInfoW", k32_EnumCalendarInfo, NULL }, { "VirtualQueryEx", k32_VirtualQueryEx, NULL }, { "EnumCalendarInfoA", k32_EnumCalendarInfo, NULL },
+    { "FindResourceA", k32_FindResourceA, NULL }, { "FindResourceW", k32_FindResourceW, NULL },
+    { "FindResourceExA", k32_FindResourceExA, NULL }, { "FindResourceExW", k32_FindResourceExW, NULL },
+    { "LoadResource", k32_LoadResource, NULL }, { "LockResource", k32_LockResource, NULL }, { "SizeofResource", k32_SizeofResource, NULL },
+    { "FreeResource", k32_FreeResource, NULL },
+    { "NetWkstaGetInfo", net_NetWkstaGetInfo, NULL },
+    { "GetTokenInformation", adv_GetTokenInformation, NULL }, { "InitializeSecurityDescriptor", adv_InitializeSecurityDescriptor, NULL },
+    { "SetSecurityDescriptorDacl", adv_True, NULL }, { "SetSecurityDescriptorOwner", adv_True, NULL }, { "SetSecurityDescriptorGroup", adv_True, NULL },
+    { "SetSecurityDescriptorSacl", adv_True, NULL }, { "GetSecurityDescriptorDacl", adv_GetSecurityDescriptorDacl, NULL },
+    { "InitializeAcl", adv_True, NULL }, { "AddAccessAllowedAce", adv_True, NULL }, { "AddAccessAllowedAceEx", adv_True, NULL },
+    { "AddAccessDeniedAce", adv_True, NULL }, { "IsValidSecurityDescriptor", adv_True, NULL }, { "SetKernelObjectSecurity", adv_True, NULL },
+    { "SetFileSecurityW", adv_True, NULL }, { "SetFileSecurityA", adv_True, NULL },
+    { "ConvertStringSecurityDescriptorToSecurityDescriptorW", adv_ConvertStringSecurityDescriptor, NULL },
+    { "ConvertStringSecurityDescriptorToSecurityDescriptorA", adv_ConvertStringSecurityDescriptor, NULL },
+    { "SetEntriesInAclW", adv_SetEntriesInAcl, NULL }, { "SetEntriesInAclA", adv_SetEntriesInAcl, NULL },
+    { "SetNamedSecurityInfoW", adv_Success, NULL }, { "SetNamedSecurityInfoA", adv_Success, NULL },
+    { "GetNamedSecurityInfoW", adv_GetNamedSecurityInfo, NULL }, { "GetNamedSecurityInfoA", adv_GetNamedSecurityInfo, NULL },
+    { "ConvertSidToStringSidW", adv_ConvertSidToStringSidW, NULL }, { "ConvertSidToStringSidA", adv_ConvertSidToStringSidA, NULL },
+    { "ConvertStringSidToSidW", adv_ConvertStringSidToSid, NULL }, { "ConvertStringSidToSidA", adv_ConvertStringSidToSid, NULL },
+    { "LookupAccountSidW", adv_LookupAccountSidW, NULL }, { "LookupAccountSidA", adv_LookupAccountSidA, NULL },
+    { "GetProcessDpiAwareness", shc_GetProcessDpiAwareness, NULL }, { "GetAwarenessFromDpiAwarenessContext", u_GetAwarenessFromDpiAwarenessContext, NULL },
+    { "IsValidDpiAwarenessContext", u_IsValidDpiAwarenessContext, NULL }, { "AreDpiAwarenessContextsEqual", u_AreDpiAwarenessContextsEqual, NULL },
+    { "GetWindowDpiAwarenessContext", u_GetWindowDpiAwarenessContext, NULL }, { "GetDpiFromDpiAwarenessContext", u_GetDpi96, NULL },
+    { "GetSystemDpiForProcess", u_GetDpi96, NULL }, { "GetDpiForShellUIComponent", u_GetDpi96, NULL },
+    { "IsThemeActive", ux_False, NULL }, { "IsAppThemed", ux_False, NULL }, { "IsCompositionActive", ux_False, NULL },
+    { "OpenThemeData", ux_False, NULL }, { "OpenThemeDataEx", ux_False, NULL }, { "OpenThemeDataForDpi", ux_False, NULL },
+    { "GetWindowTheme", ux_False, NULL }, { "CloseThemeData", ux_Ok, NULL }, { "EnableThemeDialogTexture", ux_Ok, NULL },
+    { "EnableTheming", ux_Ok, NULL }, { "SetThemeAppProperties", ux_Ok, NULL }, { "GetThemeAppProperties", ux_GetThemeAppProperties, NULL },
+    { "DrawThemeBackground", ux_Fail, NULL }, { "DrawThemeBackgroundEx", ux_Fail, NULL }, { "DrawThemeText", ux_Fail, NULL },
+    { "DrawThemeTextEx", ux_Fail, NULL }, { "DrawThemeEdge", ux_Fail, NULL }, { "DrawThemeIcon", ux_Fail, NULL },
+    { "DrawThemeParentBackground", ux_Fail, NULL }, { "DrawThemeParentBackgroundEx", ux_Fail, NULL },
+    { "GetThemePartSize", ux_Fail, NULL }, { "GetThemeColor", ux_Fail, NULL }, { "GetThemeInt", ux_Fail, NULL },
+    { "GetThemeMargins", ux_Fail, NULL }, { "GetThemeFont", ux_Fail, NULL }, { "GetThemeTextExtent", ux_Fail, NULL },
+    { "GetThemeBackgroundContentRect", ux_Fail, NULL }, { "GetThemeBackgroundExtent", ux_Fail, NULL },
+    { "GetThemeBackgroundRegion", ux_Fail, NULL }, { "GetThemeBool", ux_Fail, NULL }, { "GetThemeEnumValue", ux_Fail, NULL },
+    { "GetThemeMetric", ux_Fail, NULL }, { "GetThemePosition", ux_Fail, NULL }, { "GetThemeRect", ux_Fail, NULL },
+    { "GetThemeString", ux_Fail, NULL }, { "GetThemeTextMetrics", ux_Fail, NULL }, { "GetThemeTransitionDuration", ux_Fail, NULL },
+    { "HitTestThemeBackground", ux_Fail, NULL }, { "IsThemeBackgroundPartiallyTransparent", ux_False, NULL },
+    { "IsThemePartDefined", ux_False, NULL }, { "IsThemeDialogTextureEnabled", ux_False, NULL },
+    { "GetThemeSysColor", ux_GetThemeSysColor, NULL }, { "GetThemeSysColorBrush", ux_False, NULL }, { "GetThemeSysFont", ux_Fail, NULL },
+    { "GetThemeSysSize", ux_False, NULL }, { "GetThemeSysBool", ux_False, NULL }, { "GetThemeSysInt", ux_Fail, NULL },
+    { "GetCurrentThemeName", ux_GetCurrentThemeName, NULL },
+    { "BufferedPaintInit", ux_Ok, NULL }, { "BufferedPaintUnInit", ux_Ok, NULL }, { "BeginBufferedPaint", ux_BeginBufferedPaint, NULL },
+    { "EndBufferedPaint", ux_Ok, NULL }, { "BufferedPaintSetAlpha", ux_Ok, NULL }, { "BufferedPaintClear", ux_Ok, NULL },
+    { "BufferedPaintRenderAnimation", ux_False, NULL }, { "BufferedPaintStopAllAnimations", ux_Ok, NULL },
+    { "GetBufferedPaintBits", ux_Fail, NULL }, { "GetBufferedPaintDC", ux_False, NULL }, { "GetBufferedPaintTargetDC", ux_False, NULL },
+    { "BeginBufferedAnimation", ux_False, NULL }, { "EndBufferedAnimation", ux_Ok, NULL },
+    { "WTSRegisterSessionNotification", wts_RegisterSessionNotification, NULL }, { "WTSUnRegisterSessionNotification", wts_RegisterSessionNotification, NULL },
+    { "WTSRegisterSessionNotificationEx", wts_RegisterSessionNotification, NULL }, { "WTSUnRegisterSessionNotificationEx", wts_RegisterSessionNotification, NULL },
+    { "WTSQuerySessionInformationW", wts_QuerySessionInformation, NULL }, { "WTSQuerySessionInformationA", wts_QuerySessionInformation, NULL },
+    { "GetLogicalProcessorInformation", k32_GetLogicalProcessorInformation, NULL }, { "NetApiBufferFree", net_NetApiBufferFree, NULL },
     { NULL, NULL, NULL }
 };

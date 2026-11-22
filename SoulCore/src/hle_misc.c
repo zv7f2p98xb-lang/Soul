@@ -78,8 +78,8 @@ HLE(u32_wvsprintfA) {
 }
 HLE(u32_CharUpperA) { if (ARG(0) < 0x10000) { RET(toupper((int)ARG(0))); return; } for (char *p = PTR(0); *p; p++) *p = (char)toupper((unsigned char)*p); RET(ARG(0)); }
 HLE(u32_CharLowerA) { if (ARG(0) < 0x10000) { RET(tolower((int)ARG(0))); return; } for (char *p = PTR(0); *p; p++) *p = (char)tolower((unsigned char)*p); RET(ARG(0)); }
-HLE(u32_CharUpperW) { if (ARG(0) < 0x10000) { RET((uint16_t)towupper((wint_t)ARG(0))); return; } for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)towupper(*p); RET(ARG(0)); }
-HLE(u32_CharLowerW) { if (ARG(0) < 0x10000) { RET((uint16_t)towlower((wint_t)ARG(0))); return; } for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)towlower(*p); RET(ARG(0)); }
+HLE(u32_CharUpperW) { if (ARG(0) < 0x10000) { RET((uint16_t)uc_upper((uint32_t)ARG(0))); return; } for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)uc_upper(*p); RET(ARG(0)); }
+HLE(u32_CharLowerW) { if (ARG(0) < 0x10000) { RET((uint16_t)uc_lower((uint32_t)ARG(0))); return; } for (uint16_t *p = PTR(0); *p; p++) *p = (uint16_t)uc_lower(*p); RET(ARG(0)); }
 HLE(u32_CharNextA) { const char *p = CSTR(0); RET(*p ? p + 1 : p); }
 HLE(u32_CharNextW) { const uint16_t *p = WSTR(0); RET(*p ? p + 1 : p); }
 HLE(u32_CharPrevA) { const char *s = CSTR(0), *p = CSTR(1); RET(p > s ? p - 1 : s); }
@@ -116,7 +116,6 @@ HLE(adv_CryptAcquireContext) { wr_ptr(ARG(0), 0x5000); RET(1); }
 HLE(adv_CryptGenRandom) { random_bytes(PTR(2), (uint32_t)ARG(1)); RET(1); }
 HLE_STUB_RET(adv_CryptReleaseContext, 1)
 HLE(adv_OpenProcessToken) { wr_ptr(ARG(2), 0x6000); RET(1); }
-HLE(adv_GetTokenInformation) { if (hle_arg(st, 4)) mem_wr(hle_arg(st, 4), 4, 0); set_last_error(st, ERROR_INVALID_PARAMETER); RET(0); }
 HLE_STUB_RET(adv_EventRegister, 0)
 HLE_STUB_RET(adv_EventUnregister, 0)
 HLE_STUB_RET(adv_EventWriteTransfer, 0)
@@ -290,7 +289,7 @@ const HleEntry hle_misc_table[] = {
     { "GetDpiForSystem", u32_GetDpiForSystem, NULL },
     { "GetUserNameA", adv_GetUserNameA, NULL }, { "GetUserNameW", adv_GetUserNameW, NULL }, { "SystemFunction036", adv_SystemFunction036, NULL }, { "CryptAcquireContextA", adv_CryptAcquireContext, NULL },
     { "CryptAcquireContextW", adv_CryptAcquireContext, NULL }, { "CryptGenRandom", adv_CryptGenRandom, NULL }, { "CryptReleaseContext", adv_CryptReleaseContext, NULL },
-    { "OpenProcessToken", adv_OpenProcessToken, NULL }, { "GetTokenInformation", adv_GetTokenInformation, NULL },
+    { "OpenProcessToken", adv_OpenProcessToken, NULL }, 
     { "EventRegister", adv_EventRegister, NULL }, { "EventUnregister", adv_EventUnregister, NULL }, { "EventWriteTransfer", adv_EventWriteTransfer, NULL },
     { "EventSetInformation", adv_EventSetInformation, NULL },
     { "BCryptGenRandom", bcr_BCryptGenRandom, NULL }, { "ProcessPrng", bcr_ProcessPrng, NULL },

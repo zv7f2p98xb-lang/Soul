@@ -135,7 +135,12 @@ int x87_exec(X86State *st, const X86Insn *in) {
         case 0xDD:
             switch (r) {
             case 0: { double dd; memcpy(&dd, (void *)G2H(a), 8); fpush(st, dd); return 1; }
-            case 1: mem_wr(a, 8, f2i64(trunc(fpop(st)))); return 1;
+            case 1: { // FISTTP m64
+                unsigned slot = st->ftop;
+                double d = fpop(st);
+                mem_wr(a, 8, (double)st->fexact[slot] == d ? (uint64_t)st->fexact[slot] : f2i64(trunc(d)));
+                return 1;
+            }
             case 2: case 3: { double dd = *sti(st, 0); memcpy((void *)G2H(a), &dd, 8); if (r == 3) fpop(st); return 1; }
             case 4: return 1; // FRSTOR
             case 6: memset((void *)G2H(a), 0, 108); x87_reset(st); return 1; // FNSAVE
@@ -147,8 +152,34 @@ int x87_exec(X86State *st, const X86Insn *in) {
             case 0: fpush(st, (double)(int16_t)mem_rd(a, 2)); return 1;
             case 1: mem_wr(a, 2, f2i16(trunc(fpop(st)))); return 1;
             case 2: case 3: { double v = fround(st, *sti(st, 0)); mem_wr(a, 2, f2i16(v)); if (r == 3) fpop(st); return 1; }
-            case 5: fpush(st, (double)(int64_t)mem_rd(a, 8)); return 1;
-            case 7: { double v = fround(st, fpop(st)); mem_wr(a, 8, f2i64(v)); return 1; }
+            case 4: { // FBLD m80bcd
+                const uint8_t *b = G2H(a);
+                int64_t v = 0;
+                for (int k = 8; k >= 0; k--) v = v * 100 + (b[k] >> 4) * 10 + (b[k] & 15);
+                if (b[9] & 0x80) v = -v;
+                fpush(st, (double)v);
+                st->fexact[st->ftop] = v;
+                return 1;
+            }
+            case 6: { // FBSTP m80bcd: 18 decimal digits, two per byte, then the sign
+                unsigned slot = st->ftop;
+                double d = fpop(st);
+                uint8_t *b = G2H(a);
+                if (isnan(d) || fabs(d) >= 1e18) { memset(b, 0, 7); b[7] = 0xC0; b[8] = 0xFF; b[9] = 0xFF; return 1; } // indefinite
+                int64_t v = (double)st->fexact[slot] == d ? st->fexact[slot] : (int64_t)fround(st, d);
+                b[9] = (v < 0 || signbit(d)) ? 0x80 : 0;
+                uint64_t u = v < 0 ? (uint64_t)(-v) : (uint64_t)v;
+                for (int k = 0; k < 9; k++) { b[k] = (uint8_t)((u % 10) | ((u / 10 % 10) << 4)); u /= 100; }
+                return 1;
+            }
+            case 5: { int64_t v = (int64_t)mem_rd(a, 8); fpush(st, (double)v); st->fexact[st->ftop] = v; return 1; }
+            case 7: {
+                unsigned slot = st->ftop;
+                double d = fpop(st);
+                if ((double)st->fexact[slot] == d) mem_wr(a, 8, (uint64_t)st->fexact[slot]);
+                else mem_wr(a, 8, f2i64(fround(st, d)));
+                return 1;
+            }
             default: return 0;
             }
         default:
@@ -182,8 +213,13 @@ int x87_exec(X86State *st, const X86Insn *in) {
         }
         return 1;
     case 0xD9:
-        if (r == 0) { fpush(st, *sti(st, i)); return 1; }
-        if (r == 1) { double t = *sti(st, 0); *sti(st, 0) = *sti(st, i); *sti(st, i) = t; return 1; }
+        if (r == 0) { int64_t ex = st->fexact[(st->ftop + (unsigned)i) & 7]; fpush(st, *sti(st, i)); st->fexact[st->ftop] = ex; return 1; }
+        if (r == 1) {
+            unsigned a0 = st->ftop & 7, ai = (st->ftop + (unsigned)i) & 7;
+            double t = st->fpr[a0]; st->fpr[a0] = st->fpr[ai]; st->fpr[ai] = t;
+            int64_t x = st->fexact[a0]; st->fexact[a0] = st->fexact[ai]; st->fexact[ai] = x;
+            return 1;
+        }
         switch ((in->rm & 7) | (r << 3)) {
         case 0x10: return 1; // FNOP
         case 0x20: *sti(st, 0) = -*sti(st, 0); return 1;
@@ -250,8 +286,12 @@ int x87_exec(X86State *st, const X86Insn *in) {
         }
     case 0xDD:
         if (r == 0) { st->ftag[(st->ftop + (unsigned)i) & 7] = 1; return 1; } // FFREE
-        if (r == 2) { *sti(st, i) = *sti(st, 0); return 1; }
-        if (r == 3) { *sti(st, i) = *sti(st, 0); fpop(st); return 1; }
+        if (r == 2 || r == 3) {
+            *sti(st, i) = *sti(st, 0);
+            st->fexact[(st->ftop + (unsigned)i) & 7] = st->fexact[st->ftop & 7];
+            if (r == 3) fpop(st);
+            return 1;
+        }
         if (r == 4 || r == 5) { fcom_flags(st, *sti(st, 0), *sti(st, i)); if (r == 5) fpop(st); return 1; }
         return 0;
     case 0xDF:

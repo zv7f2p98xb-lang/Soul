@@ -496,8 +496,7 @@ static int translate_x87(J *j, const X86Insn *in) {
             return 0;
         case 0xDF: // FILD m16 / m64
             if (r == 0) { emit_ea(j, in, 1); em(e, a_ldr_imm(1, T0, R_EA, 0)); em(e, a_sxt(T0, T0, 16)); em(e, a_scvtf(1, 1, 0, T0)); }
-            else if (r == 5) { emit_ea(j, in, 1); em(e, a_ldr_imm(3, T0, R_EA, 0)); em(e, a_scvtf(1, 1, 0, T0)); }
-            else return -1;
+            else return -1; // FILD m64 keeps the exact integer: interpreter (x87.c)
             x87_top(j);
             x87_push(j, 0);
             return 0;

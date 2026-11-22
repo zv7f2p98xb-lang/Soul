@@ -1350,34 +1350,80 @@ HLE(k32_InitOnceBeginInitialize) {
 }
 HLE(k32_InitOnceComplete) { wr_ptr(ARG(0), ((uint32_t)ARG(1) & 4) ? 0 : 2); gil_notify(); RET(1); }
 
+// Named events, mutexes and semaphores: a second Create returns the existing object with
+// ERROR_ALREADY_EXISTS, Open finds it (names are kept per process).
+static uint64_t g_sync_name_arg; // name argument of the Create call being handled (0 = none)
+static int g_sync_name_wide;
+static uint64_t find_named(HType t, const char *name) {
+    HleState *h = hs();
+    for (int i = 0; i < MAX_HANDLES; i++) {
+        HObj *o = &h->handles[i];
+        if (o->type == t && o->path[0] == '\x01' && !strcmp(o->path + 1, name)) return HANDLE_BASE + (uint64_t)i * 4;
+    }
+    return 0;
+}
+static char *sync_name(void) {
+    uint64_t p = g_sync_name_arg;
+    g_sync_name_arg = 0;
+    if (!p) return NULL;
+    char *s = g_sync_name_wide ? w2u_dup((const uint16_t *)G2H(p)) : strdup((const char *)G2H(p));
+    if (s && !*s) { free(s); return NULL; }
+    return s;
+}
 static uint64_t make_sync(HType t, int signaled, int manual, long count) {
+    char *name = sync_name();
+    X86State *st = hle_state_of();
+    if (st && soul_cur_thread()) st = soul_cur_thread()->st;
+    if (name) {
+        uint64_t h = find_named(t, name);
+        if (h) { free(name); if (st) set_last_error(st, ERROR_ALREADY_EXISTS); return h; }
+    }
     HObj *o;
     uint64_t h = h_alloc(t, &o);
-    if (o) { o->signaled = signaled; o->manual = manual; o->count = count; }
+    if (o) {
+        o->signaled = signaled; o->manual = manual; o->count = count;
+        if (name) { o->path[0] = 1; snprintf(o->path + 1, sizeof o->path - 1, "%s", name); }
+    }
+    free(name);
+    if (st) set_last_error(st, 0);
     return h;
 }
-HLE(k32_CreateEventA) { RET(make_sync(H_EVENT, (int)ARG(2), (int)ARG(1), 0)); }
-HLE(k32_CreateEventW) { RET(make_sync(H_EVENT, (int)ARG(2), (int)ARG(1), 0)); }
-HLE(k32_CreateEventExW) { uint32_t f = (uint32_t)ARG(2); RET(make_sync(H_EVENT, (f & 2) != 0, (f & 1) != 0, 0)); }
+static void open_named(X86State *st, HType t, int wide) {
+    char *name = ARG(2) ? (wide ? w2u_dup(WSTR(2)) : strdup(CSTR(2))) : NULL;
+    uint64_t h = name ? find_named(t, name) : 0;
+    free(name);
+    if (!h) FAIL(ERROR_FILE_NOT_FOUND);
+    RET(h);
+}
+HLE(k32_OpenEventA) { open_named(st, H_EVENT, 0); }
+HLE(k32_OpenEventW) { open_named(st, H_EVENT, 1); }
+HLE(k32_OpenMutexA) { open_named(st, H_MUTEX, 0); }
+HLE(k32_OpenMutexW) { open_named(st, H_MUTEX, 1); }
+HLE(k32_OpenSemaphoreA) { open_named(st, H_SEMAPHORE, 0); }
+HLE(k32_OpenSemaphoreW) { open_named(st, H_SEMAPHORE, 1); }
+#define NAMED(arg, wide) (g_sync_name_arg = ARG(arg), g_sync_name_wide = (wide))
+HLE(k32_CreateEventA) { NAMED(3, 0); RET(make_sync(H_EVENT, (int)ARG(2), (int)ARG(1), 0)); }
+HLE(k32_CreateEventW) { NAMED(3, 1); RET(make_sync(H_EVENT, (int)ARG(2), (int)ARG(1), 0)); }
+HLE(k32_CreateEventExW) { NAMED(1, 1); uint32_t f = (uint32_t)ARG(2); RET(make_sync(H_EVENT, (f & 2) != 0, (f & 1) != 0, 0)); }
 HLE(k32_SetEvent) { HObj *o = h_get(ARG(0)); if (o) { o->signaled = 1; gil_notify(); } RET(o != NULL); }
 HLE(k32_ResetEvent) { HObj *o = h_get(ARG(0)); if (o) o->signaled = 0; RET(o != NULL); }
 static uint64_t make_mutex(int owned) {
-    HObj *o;
-    uint64_t h = h_alloc(H_MUTEX, &o);
-    if (o && owned) { o->owner = cur_tid(); o->recursion = 1; }
+    uint64_t h = make_sync(H_MUTEX, 0, 0, 0);
+    HObj *o = h_get(h);
+    if (o && owned && o->owner == 0) { o->owner = cur_tid(); o->recursion = 1; }
     return h;
 }
-HLE(k32_CreateMutexA) { RET(make_mutex(ARG(1) != 0)); }
-HLE(k32_CreateMutexW) { RET(make_mutex(ARG(1) != 0)); }
-HLE(k32_CreateMutexExW) { RET(make_mutex(((uint32_t)ARG(2) & 1) != 0)); }
+HLE(k32_CreateMutexA) { NAMED(2, 0); RET(make_mutex(ARG(1) != 0)); }
+HLE(k32_CreateMutexW) { NAMED(2, 1); RET(make_mutex(ARG(1) != 0)); }
+HLE(k32_CreateMutexExW) { NAMED(1, 1); RET(make_mutex(((uint32_t)ARG(2) & 1) != 0)); }
 HLE(k32_ReleaseMutex) {
     HObj *o = h_get(ARG(0));
     if (!o || o->type != H_MUTEX || o->owner != cur_tid()) FAIL(288); // ERROR_NOT_OWNER
     if (--o->recursion == 0) { o->owner = 0; gil_notify(); }
     RET(1);
 }
-HLE(k32_CreateSemaphoreA) { RET(make_sync(H_SEMAPHORE, ARG(1) > 0, 0, (long)(int32_t)ARG(1))); }
-HLE(k32_CreateSemaphoreW) { RET(make_sync(H_SEMAPHORE, ARG(1) > 0, 0, (long)(int32_t)ARG(1))); }
+HLE(k32_CreateSemaphoreA) { NAMED(3, 0); RET(make_sync(H_SEMAPHORE, ARG(1) > 0, 0, (long)(int32_t)ARG(1))); }
+HLE(k32_CreateSemaphoreW) { NAMED(3, 1); RET(make_sync(H_SEMAPHORE, ARG(1) > 0, 0, (long)(int32_t)ARG(1))); }
 HLE(k32_CreateSemaphoreExW) { RET(make_sync(H_SEMAPHORE, ARG(1) > 0, 0, (long)(int32_t)ARG(1))); }
 HLE(k32_ReleaseSemaphore) {
     HObj *o = h_get(ARG(0));
@@ -1605,24 +1651,22 @@ HLE(k32_VirtualProtect) {
     if ((uint32_t)ARG(2) & 0xF0) soul_flush_code_cache();
     RET(1);
 }
-HLE(k32_VirtualQuery) {
+uint64_t k32_virtual_query(uint64_t addr, uint8_t *b) {
     uint64_t base, abase, size;
     int type;
-    uint8_t *b = PTR(1);
     if (g_mode32) { // MEMORY_BASIC_INFORMATION32: 7 DWORDs
         uint32_t v[7] = { 0 };
-        if (!vm_query(ARG(0), &base, &abase, &size, &type)) {
-            v[0] = (uint32_t)(ARG(0) & ~0xFFFull); v[3] = 0x1000; v[4] = 0x10000; v[5] = 1;
+        if (!vm_query(addr, &base, &abase, &size, &type)) {
+            v[0] = (uint32_t)(addr & ~0xFFFull); v[3] = 0x1000; v[4] = 0x10000; v[5] = 1;
         } else {
             v[0] = (uint32_t)base; v[1] = (uint32_t)abase; v[2] = 0x40; v[3] = (uint32_t)size; v[4] = 0x1000; v[5] = 0x40; v[6] = (uint32_t)type;
         }
         memcpy(b, v, 28);
-        RET(28);
-        return;
+        return 28;
     }
     memset(b, 0, 48);
-    if (!vm_query(ARG(0), &base, &abase, &size, &type)) {
-        uint64_t page = ARG(0) & ~0xFFFull;
+    if (!vm_query(addr, &base, &abase, &size, &type)) {
+        uint64_t page = addr & ~0xFFFull;
         uint32_t state = 0x10000; // MEM_FREE
         memcpy(b, &page, 8);
         uint64_t sz = 0x1000;
@@ -1630,14 +1674,14 @@ HLE(k32_VirtualQuery) {
         memcpy(b + 32, &state, 4);
         uint32_t prot = 1;
         memcpy(b + 36, &prot, 4);
-        RET(48);
-        return;
+        return 48;
     }
     uint32_t prot = 0x40, state = 0x1000;
     memcpy(b, &base, 8); memcpy(b + 8, &abase, 8); memcpy(b + 16, &prot, 4);
     memcpy(b + 24, &size, 8); memcpy(b + 32, &state, 4); memcpy(b + 36, &prot, 4); memcpy(b + 40, &type, 4);
-    RET(48);
+    return 48;
 }
+HLE(k32_VirtualQuery) { RET(k32_virtual_query(ARG(0), PTR(1))); }
 HLE(k32_FlushInstructionCache) { soul_flush_code_cache(); RET(1); }
 HLE(k32_IsBadReadPtr) { RET(ARG(0) == 0); }
 
@@ -1733,8 +1777,8 @@ static void lcmap(X86State *st, int argbase) {
     uint16_t *d = (uint16_t *)G2H(dst);
     for (int i = 0; i < n; i++) {
         wint_t c = src[i];
-        if (flags & 0x100) c = towlower(c);
-        if (flags & 0x200) c = towupper(c);
+        if (flags & 0x100) c = uc_lower(c);
+        if (flags & 0x200) c = uc_upper(c);
         d[i] = (uint16_t)c;
     }
     RET(n);
@@ -1746,7 +1790,7 @@ static int cmp_w(const uint16_t *a, int na, const uint16_t *b, int nb, int icase
     if (nb < 0) nb = (int)wstrlen(b);
     for (int i = 0; i < na && i < nb; i++) {
         wint_t x = a[i], y = b[i];
-        if (icase) { x = towlower(x); y = towlower(y); }
+        if (icase) { x = uc_lower(x); y = uc_lower(y); }
         if (x != y) return x < y ? 1 : 3;
     }
     return na == nb ? 2 : na < nb ? 1 : 3;
@@ -2026,7 +2070,9 @@ const HleEntry hle_kernel32_table[] = {
     { "SleepConditionVariableSRW", k32_SleepConditionVariableSRW, NULL }, { "InitOnceExecuteOnce", k32_InitOnceExecuteOnce, NULL },
     { "InitOnceBeginInitialize", k32_InitOnceBeginInitialize, NULL }, { "InitOnceComplete", k32_InitOnceComplete, NULL },
     { "CreateEventA", k32_CreateEventA, NULL }, { "CreateEventW", k32_CreateEventW, NULL }, { "CreateEventExW", k32_CreateEventExW, NULL },
-    { "SetEvent", k32_SetEvent, NULL }, { "ResetEvent", k32_ResetEvent, NULL }, { "CreateMutexA", k32_CreateMutexA, NULL }, { "CreateMutexW", k32_CreateMutexW, NULL },
+    { "SetEvent", k32_SetEvent, NULL }, { "ResetEvent", k32_ResetEvent, NULL }, { "OpenEventA", k32_OpenEventA, NULL }, { "OpenEventW", k32_OpenEventW, NULL }, { "OpenMutexA", k32_OpenMutexA, NULL },
+    { "OpenMutexW", k32_OpenMutexW, NULL }, { "OpenSemaphoreA", k32_OpenSemaphoreA, NULL }, { "OpenSemaphoreW", k32_OpenSemaphoreW, NULL },
+    { "CreateMutexA", k32_CreateMutexA, NULL }, { "CreateMutexW", k32_CreateMutexW, NULL },
     { "CreateMutexExW", k32_CreateMutexExW, NULL }, { "ReleaseMutex", k32_ReleaseMutex, NULL }, { "CreateSemaphoreA", k32_CreateSemaphoreA, NULL },
     { "CreateSemaphoreW", k32_CreateSemaphoreW, NULL }, { "CreateSemaphoreExW", k32_CreateSemaphoreExW, NULL }, { "ReleaseSemaphore", k32_ReleaseSemaphore, NULL },
     { "WaitForSingleObject", k32_WaitForSingleObject, NULL }, { "WaitForSingleObjectEx", k32_WaitForSingleObjectEx, NULL },

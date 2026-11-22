@@ -703,6 +703,47 @@ static const ResEntry *res_lookup(const uint8_t *rsrc, const ResDir *dir, uint64
     return NULL;
 }
 
+// Guest address of the IMAGE_RESOURCE_DATA_ENTRY of a resource (an HRSRC), 0 if missing.
+uint64_t pe_resource_entry(uint64_t module_base, uint64_t type, uint64_t name, int wide) {
+    SoulProcess *p = g_proc;
+    if (!module_base && p->main_module) module_base = p->main_module->base;
+    PEModule *m = NULL;
+    for (PEModule *it = p->modules; it; it = it->next) if (it->base == module_base) m = it;
+    if (!m) return 0;
+    const uint8_t *img = (const uint8_t *)G2H(m->base);
+    uint32_t rva = img_dirs(img)[DIR_RESOURCE].VirtualAddress;
+    if (!rva) return 0;
+    const uint8_t *rsrc = img + rva;
+    type = res_key(type, wide);
+    name = res_key(name, wide);
+    const ResEntry *t = res_lookup(rsrc, (const ResDir *)rsrc, type, wide);
+    if (!t || !(t->OffsetToData & 0x80000000u)) return 0;
+    const ResDir *d2 = (const ResDir *)(rsrc + (t->OffsetToData & 0x7FFFFFFF));
+    const ResEntry *n = res_lookup(rsrc, d2, name, wide);
+    if (!n) return 0;
+    const ResData *leaf;
+    if (!(n->OffsetToData & 0x80000000u)) leaf = (const ResData *)(rsrc + n->OffsetToData);
+    else {
+        const ResDir *d3 = (const ResDir *)(rsrc + (n->OffsetToData & 0x7FFFFFFF));
+        const ResEntry *l = res_find(rsrc, d3, -1);
+        if (!l || (l->OffsetToData & 0x80000000u)) return 0;
+        leaf = (const ResData *)(rsrc + l->OffsetToData);
+    }
+    return H2G(leaf);
+}
+// Data of a resource entry (HRSRC) of the module at module_base.
+uint64_t pe_resource_data(uint64_t module_base, uint64_t entry, uint32_t *size) {
+    if (!entry) return 0;
+    SoulProcess *p = g_proc;
+    if (!module_base) {
+        for (PEModule *it = p->modules; it; it = it->next) if (entry >= it->base && entry < it->base + it->size) module_base = it->base;
+        if (!module_base && p->main_module) module_base = p->main_module->base;
+    }
+    const ResData *leaf = G2H(entry);
+    if (size) *size = leaf->Size;
+    return module_base + leaf->OffsetToData;
+}
+
 const void *pe_resource(uint64_t module_base, uint64_t type, uint64_t name, int wide, uint32_t *size) {
     SoulProcess *p = g_proc;
     if (!module_base && p->main_module) module_base = p->main_module->base;
