@@ -1670,6 +1670,7 @@ HLE(u_PostMessage) {
     RET(1);
 }
 HLE(u_PostThreadMessage) { queue_add(0, (uint32_t)ARG(1), ARG(2), ARG(3), (uint32_t)ARG(0), 0); RET(1); }
+void win_post_thread(uint32_t tid, uint32_t msg, uint64_t wp, uint64_t lp) { queue_add(0, msg, wp, lp, tid, 0); }
 HLE(u_PostQuitMessage) { g_gui.quit_posted = 1; g_gui.quit_code = ARGI(0); g_gui.quit_tid = cur_tid(); gil_notify(); RET(0); }
 HLE(u_InSendMessage) { RET(0); }
 HLE(u_ReplyMessage) { RET(0); }

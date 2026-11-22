@@ -1930,7 +1930,6 @@ static void format_message(X86State *st, int wide) {
 }
 HLE(k32_FormatMessageA) { format_message(st, 0); }
 HLE(k32_FormatMessageW) { format_message(st, 1); }
-HLE(k32_Beep) { con_write(1, "\a", 1); RET(1); }
 static void sysdir(X86State *st, int wide, const char *d) { RET(put_str(ARG(0), (uint32_t)ARG(1), d, wide)); }
 HLE(k32_GetSystemDirectoryA) { sysdir(st, 0, "C:\\windows\\system32"); }
 HLE(k32_GetSystemDirectoryW) { sysdir(st, 1, "C:\\windows\\system32"); }
@@ -2112,7 +2111,7 @@ const HleEntry hle_kernel32_table[] = {
     { "lstrlenA", k32_lstrlenA, NULL }, { "lstrlenW", k32_lstrlenW, NULL }, { "lstrlen", k32_lstrlenA, NULL }, { "lstrcpyA", k32_lstrcpyA, NULL },
     { "lstrcpyW", k32_lstrcpyW, NULL }, { "lstrcpynA", k32_lstrcpynA, NULL }, { "lstrcpynW", k32_lstrcpynW, NULL }, { "lstrcatA", k32_lstrcatA, NULL },
     { "lstrcatW", k32_lstrcatW, NULL }, { "lstrcmpA", k32_lstrcmpA, NULL }, { "lstrcmpiA", k32_lstrcmpiA, NULL }, { "lstrcmpW", k32_lstrcmpW, NULL },
-    { "lstrcmpiW", k32_lstrcmpiW, NULL }, { "FormatMessageA", k32_FormatMessageA, NULL }, { "FormatMessageW", k32_FormatMessageW, NULL }, { "Beep", k32_Beep, NULL },
+    { "lstrcmpiW", k32_lstrcmpiW, NULL }, { "FormatMessageA", k32_FormatMessageA, NULL }, { "FormatMessageW", k32_FormatMessageW, NULL },
     { "GetSystemDirectoryA", k32_GetSystemDirectoryA, NULL }, { "GetSystemDirectoryW", k32_GetSystemDirectoryW, NULL },
     { "GetWindowsDirectoryA", k32_GetWindowsDirectoryA, NULL }, { "GetWindowsDirectoryW", k32_GetWindowsDirectoryW, NULL },
     { "GetSystemWindowsDirectoryW", k32_GetWindowsDirectoryW, NULL }, { "GetComputerNameA", k32_GetComputerNameA, NULL },

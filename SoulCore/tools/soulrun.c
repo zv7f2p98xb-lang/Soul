@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static SoulProcess *g_p;
@@ -25,6 +26,40 @@ static void *stdin_pump(void *arg) {
     ssize_t n;
     while ((n = read(0, buf, sizeof buf)) > 0) soul_process_send_input(g_p, buf, (size_t)n);
     soul_process_close_input(g_p);
+    return NULL;
+}
+
+// ---- sound: --audio FILE.wav records what the programs play (16-bit stereo, 44.1 kHz) ---------------------
+static const char *g_audio_path;
+static FILE *g_audio;
+static volatile int g_audio_stop;
+static uint32_t g_audio_frames;
+static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + t.tv_nsec / 1e9; }
+static void wav_header(FILE *f, uint32_t frames) {
+    uint32_t data = frames * 4, riff = 36 + data, fmt = 16, rate = SOUL_AUDIO_RATE, bps = rate * 4;
+    uint16_t pcm = 1, ch = 2, align = 4, bits = 16;
+    fseek(f, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, f); fwrite(&riff, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f); fwrite(&fmt, 4, 1, f);
+    fwrite(&pcm, 2, 1, f); fwrite(&ch, 2, 1, f); fwrite(&rate, 4, 1, f); fwrite(&bps, 4, 1, f); fwrite(&align, 2, 1, f); fwrite(&bits, 2, 1, f);
+    fwrite("data", 1, 4, f); fwrite(&data, 4, 1, f);
+}
+static void *audio_main(void *arg) { // pulls the mix in real time like an audio device
+    (void)arg;
+    static float buf[2 * 4410];
+    static int16_t pcm[2 * 4410];
+    double last = now_s();
+    while (!g_audio_stop) {
+        usleep(5000);
+        double now = now_s();
+        int frames = (int)((now - last) * SOUL_AUDIO_RATE);
+        if (frames <= 0) continue;
+        if (frames > 4410) frames = 4410;
+        last += (double)frames / SOUL_AUDIO_RATE;
+        soul_audio_render(buf, frames);
+        for (int k = 0; k < 2 * frames; k++) pcm[k] = (int16_t)(buf[k] * 32767.0f);
+        fwrite(pcm, 4, (size_t)frames, g_audio);
+        g_audio_frames += (uint32_t)frames;
+    }
     return NULL;
 }
 
@@ -224,11 +259,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--quiet")) g_quiet_log = 1;
         else if (!strcmp(argv[i], "--drive") && i + 1 < argc) drive = argv[++i];
         else if (!strcmp(argv[i], "--gui-script") && i + 1 < argc) g_script = argv[++i];
+        else if (!strcmp(argv[i], "--audio") && i + 1 < argc) g_audio_path = argv[++i];
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &screen_w, &screen_h) != 2) return 2; }
         else { fprintf(stderr, "bilinmeyen seçenek %s\n", argv[i]); return 2; }
     }
     if (i >= argc) {
-        fprintf(stderr, "kullanım: soulrun [--no-jit] [-v] [--stats] [--drive DIR] [--gui-script FILE] [--screen WxH] program.exe [argümanlar...]\n");
+        fprintf(stderr, "kullanım: soulrun [--no-jit] [-v] [--stats] [--drive DIR] [--gui-script FILE] [--screen WxH] [--audio FILE.wav] program.exe [argümanlar...]\n");
         return 2;
     }
     const char *exe = argv[i++];
@@ -261,7 +297,14 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (screen_w) soul_gui_set_screen(g_p, screen_w, screen_h);
-    pthread_t t, script;
+    pthread_t t, script, audio;
+    if (g_audio_path) {
+        g_audio = fopen(g_audio_path, "wb");
+        if (!g_audio) { fprintf(stderr, "[soulrun] %s yazılamıyor\n", g_audio_path); return 1; }
+        wav_header(g_audio, 0);
+        soul_audio_set_host(1);
+        pthread_create(&audio, NULL, audio_main, NULL);
+    }
     pthread_create(&t, NULL, stdin_pump, NULL);
     pthread_detach(t);
     if (g_script) pthread_create(&script, NULL, script_main, NULL);
@@ -269,6 +312,13 @@ int main(int argc, char **argv) {
     if (g_script) {
         pthread_join(script, NULL);
         if (g_script_failed) { fprintf(stderr, "[script] BAŞARISIZ\n"); code = 99; }
+    }
+    if (g_audio) {
+        g_audio_stop = 1;
+        pthread_join(audio, NULL);
+        soul_audio_set_host(0);
+        wav_header(g_audio, g_audio_frames);
+        fclose(g_audio);
     }
     if (stats) {
         SoulStats s;

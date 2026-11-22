@@ -1,0 +1,47 @@
+devices=1
+caps=0 channels=2 name=1
+query ok=0
+query mp3=32
+open=0
+prepare=0 prepare=0 prepare=0 
+write unprepared=34
+queued=1
+unprepare while playing=33
+all done=1 took>=250ms=1
+position bytes=13230
+position samples=6615
+volume=8000ffff
+close=0
+callbacks open=1 done=3 close=1
+event wait=0 done=1
+reset done=1
+window open=0 done messages=1
+PlaySound memory=1 waited=1
+PlaySound file async=1 returned at once=1
+nostop while playing=0
+stop=1
+sndPlaySound=1
+missing file nodefault=0
+system sound=1
+Beep=1 waited=1
+MessageBeep=1
+enum: primary device named
+enum devices=1
+create=00000000
+cooperative=00000000
+primary=00000000 setformat=00000000
+secondary=00000000
+buffer bytes=17640
+lock=00000000 n1=17640 n2=0
+wrapped lock n1=100 n2=100 second=1
+notify interface=00000000
+positions=00000000
+3d listener=no
+volume=-600
+play=00000000
+status playing=1 looping=1
+notifications middle=1 start=1 took>=500ms=1
+cursors inside=1
+stopped=1
+duplicate=00000000
+done

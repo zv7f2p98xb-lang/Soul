@@ -53,10 +53,10 @@ int hle_is_system_dll(const char *dll) {
 
 static const HleEntry *find_entry(const char *name) {
     // processes and COM first: they replace older stand-ins in the other tables
-    const HleEntry *tables[] = { hle_process_table, hle_com_table, hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table,
+    const HleEntry *tables[] = { hle_process_table, hle_com_table, hle_audio_table, hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table,
                                  hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table, hle_shell_table,
                                  hle_oleaut_table, hle_shlwapi_table, hle_winsock_table, hle_inet_table };
-    for (int t = 0; t < 16; t++)
+    for (size_t t = 0; t < sizeof tables / sizeof *tables; t++)
         for (const HleEntry *e = tables[t]; e->name; e++)
             if (strcmp(e->name, name) == 0) return e;
     return NULL;
@@ -776,6 +776,7 @@ void hle_shutdown(SoulProcess *p) {
     free(g_hs.env);
     vm_free_all();
     gdi_process_exit(p->pid);
+    audio_process_exit(p->pid);
     if (p->hle_state == g_hsp) p->hle_state = NULL;
     p->retired_api += g_hs.api_calls;
     free(g_hsp);

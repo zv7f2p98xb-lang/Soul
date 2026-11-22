@@ -86,7 +86,6 @@ HLE(u32_CharPrevA) { const char *s = CSTR(0), *p = CSTR(1); RET(p > s ? p - 1 : 
 HLE(u32_IsCharAlphaA) { RET(isalpha((unsigned char)ARG(0)) != 0); }
 HLE(u32_IsCharAlphaW) { RET(iswalpha((wint_t)(uint16_t)ARG(0)) != 0); }
 HLE(u32_IsCharAlphaNumericW) { RET(iswalnum((wint_t)(uint16_t)ARG(0)) != 0); }
-HLE_STUB_RET(u32_MessageBeep, 1)
 HLE_STUB_RET(u32_GetProcessWindowStation, 0x20)
 HLE(u32_GetUserObjectInformationW) {
     // claim an interactive window station so CRTs show message boxes
@@ -272,7 +271,6 @@ HLE_STUB_RET(ver_VerQueryValue, 0)
 // winmm
 HLE(mm_timeGetTime) { RET((uint32_t)(soul_now() * 1000.0)); }
 HLE_STUB_RET(mm_timeBeginPeriod, 0)
-HLE_STUB_RET(mm_PlaySound, 1)
 
 const HleEntry hle_misc_table[] = {
     { "_ismbblead", crt_ismbblead, NULL }, { "_ismbbtrail", crt_ismbblead, NULL },
@@ -283,7 +281,6 @@ const HleEntry hle_misc_table[] = {
     { "CharPrevA", u32_CharPrevA, NULL }, { "IsCharAlphaA", u32_IsCharAlphaA, NULL }, { "IsCharAlphaW", u32_IsCharAlphaW, NULL },
     { "IsCharAlphaNumericW", u32_IsCharAlphaNumericW, NULL }, 
     
-    { "MessageBeep", u32_MessageBeep, NULL },
     { "GetProcessWindowStation", u32_GetProcessWindowStation, NULL }, { "GetUserObjectInformationW", u32_GetUserObjectInformationW, NULL },
     { "SetProcessDPIAware", u32_SetProcessDPIAware, NULL }, { "SetProcessDpiAwarenessContext", u32_SetProcessDpiAwarenessContext, NULL },
     { "GetDpiForSystem", u32_GetDpiForSystem, NULL },
@@ -306,6 +303,6 @@ const HleEntry hle_misc_table[] = {
     { "GetFileVersionInfoA", ver_GetFileVersionInfo, NULL }, { "GetFileVersionInfoW", ver_GetFileVersionInfo, NULL },
     { "VerQueryValueA", ver_VerQueryValue, NULL }, { "VerQueryValueW", ver_VerQueryValue, NULL },
     { "timeGetTime", mm_timeGetTime, NULL }, { "timeBeginPeriod", mm_timeBeginPeriod, NULL }, { "timeEndPeriod", mm_timeBeginPeriod, NULL },
-    { "PlaySoundA", mm_PlaySound, NULL }, { "PlaySoundW", mm_PlaySound, NULL },
+   
     { NULL, NULL, NULL }
 };

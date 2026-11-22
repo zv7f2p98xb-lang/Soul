@@ -196,6 +196,7 @@ final class EngineSession: ObservableObject, Identifiable {
         }
         process = proc
         phase = .running
+        AudioOutput.shared.acquire()
         gui.session = self
         let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.size ?? CGSize(width: 1180, height: 820)
         soul_gui_set_screen(proc, Int32(max(1024, screen.width - 24)), Int32(max(700, screen.height - 150)))
@@ -227,6 +228,7 @@ final class EngineSession: ObservableObject, Identifiable {
 
     private func finish(code: Int32, error: String, stats final: SoulStats) {
         flushOutput()
+        AudioOutput.shared.release()
         let ended = program
         Task { @MainActor in ProgramLibrary.shared.programEnded(ended) } // an installer may have added programs
         gui.stop()

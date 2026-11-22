@@ -142,6 +142,15 @@ int soul_gui_has_windows(SoulProcess *p);
 int soul_gui_idle(SoulProcess *p);               // 1 when no input, posted message or repaint is pending (tests)
 int soul_gui_popup_active(SoulProcess *p);
 
+// ---- sound --------------------------------------------------------------
+// Programs' sounds (waveOut, PlaySound, Beep, DirectSound) are mixed to 44.1 kHz stereo float.
+// The host's audio render thread pulls the mix; returns 1 when something was playing.
+int soul_audio_render(float *interleaved_lr, int frames);
+// attached = 1 while the host pulls the mix; otherwise Soul plays it out in real time into nothing
+// so programs that wait for their sounds to finish keep running.
+void soul_audio_set_host(int attached);
+#define SOUL_AUDIO_RATE 44100
+
 // ---- JIT memory -------------------------------------------------------
 typedef enum {
     SOUL_JIT_AUTO = 0,   // iOS 26+: TXM protocol, older: classic debugger mapping

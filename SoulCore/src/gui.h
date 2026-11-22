@@ -330,6 +330,7 @@ GuiState *gui(void);
 void gui_reset(void);
 void gui_shutdown(void);
 void gui_process_exit(uint32_t pid);   // destroys the windows and classes of an ended process
+void win_post_thread(uint32_t tid, uint32_t msg, uint64_t wp, uint64_t lp);
 void gdi_process_exit(uint32_t pid);   // frees the GDI objects of an ended process
 uint64_t gdi_bitmap_from_argb(const uint32_t *px, int w, int h);
 void gui_lock(void);

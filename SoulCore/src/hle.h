@@ -28,6 +28,8 @@ extern const HleEntry hle_oleaut_table[];
 extern const HleEntry hle_shlwapi_table[];
 extern const HleEntry hle_winsock_table[];
 extern const HleEntry hle_inet_table[];
+extern const HleEntry hle_audio_table[];
+void audio_process_exit(uint32_t pid); // audio.c: stops the sounds of an ended process
 // hle_process.c: opens a program, document or link like Explorer (> 32 = success)
 uint64_t shell_execute_file(const char *file, const char *params, const char *dir, SoulProcess **started);
 const char *hle_ordinal_name(const char *dll, int ordinal); // name of a system DLL export known only by number

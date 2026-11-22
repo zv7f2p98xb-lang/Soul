@@ -27,6 +27,8 @@ x86_64-w64-mingw32-gcc -O2 -o "$OUT/net.exe" net.c -lws2_32 || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/net32.exe" net.c -lws2_32 || exit 1
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/http.exe" http.c http_winhttp.c -lws2_32 -lwininet -lwinhttp -lurlmon || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/http32.exe" http.c http_winhttp.c -lws2_32 -lwininet -lwinhttp -lurlmon || exit 1
+x86_64-w64-mingw32-gcc -O2 -o "$OUT/audio.exe" audio.c -lwinmm -ldsound -ldxguid || exit 1
+i686-w64-mingw32-gcc -O2 -o "$OUT/audio32.exe" audio.c -lwinmm -ldsound -ldxguid || exit 1
 pass=0; fail=0
 check() {
   local name=$1; shift
@@ -54,5 +56,13 @@ check net net.exe
 check net net32.exe
 check http --drive . http.exe
 check http --drive . http32.exe
+check audio --audio audio.wav audio.exe
+check audio --audio audio32.wav audio32.exe
+# the recorded mix holds every test tone
+for wav in audio.wav audio32.wav; do
+  heard=$(python3 audio_check.py "$OUT/$wav" 2>&1)
+  if [ "$heard" == "$(printf 'heard: 330 440 550 660 880 990\nsound windows>=20: True')" ]; then pass=$((pass+1)); echo "PASS sound $wav";
+  else fail=$((fail+1)); echo "FAIL sound $wav"; echo "$heard"; fi
+done
 echo "passed=$pass failed=$fail"
 [ $fail -eq 0 ]
