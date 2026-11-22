@@ -10,7 +10,9 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "std
 LIBS = """kernel32 ntdll user32 gdi32 advapi32 shell32 ole32 oleaut32 shlwapi ws2_32 wsock32 winmm
 comctl32 comdlg32 version imm32 uxtheme dwmapi setupapi bcrypt crypt32 psapi dbghelp winhttp wininet
 iphlpapi secur32 userenv rpcrt4 d3d9 d3d11 dxgi opengl32 glu32 xinput1_3 xinput1_4 xinput9_1_0 dsound
-dinput8 hid powrprof mpr netapi32 wtsapi32 normaliz cfgmgr32 msimg32 winspool urlmon""".split()
+dinput8 hid powrprof mpr netapi32 wtsapi32 normaliz cfgmgr32 msimg32 winspool urlmon gdiplus shcore
+rstrtmgr ddraw dinput d3d8 dwrite d2d1 windowscodecs msi cabinet wintrust imagehlp oledlg olepro32 msacm32
+msvfw32 avifil32 credui dnsapi ncrypt mswsock wldap32 shfolder dbgeng sensapi wer""".split()
 
 table = {}
 for lib in LIBS:

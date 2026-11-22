@@ -1147,6 +1147,30 @@ HLE(u_AreDpiAwarenessContextsEqual) { RET(ARG(0) == ARG(1)); }
 HLE(u_GetWindowDpiAwarenessContext) { RET((uint64_t)-2); }
 HLE(u_GetDpi96) { RET(96); }
 
+// ---- Interlocked* (exported by 32-bit kernel32; the GIL makes them atomic) -----------------------------
+
+HLE(k32_InterlockedIncrement) { uint32_t v = (uint32_t)mem_rd(ARG(0), 4) + 1; mem_wr(ARG(0), 4, v); RET((uint64_t)(int64_t)(int32_t)v); }
+HLE(k32_InterlockedDecrement) { uint32_t v = (uint32_t)mem_rd(ARG(0), 4) - 1; mem_wr(ARG(0), 4, v); RET((uint64_t)(int64_t)(int32_t)v); }
+HLE(k32_InterlockedExchange) { uint32_t o = (uint32_t)mem_rd(ARG(0), 4); mem_wr(ARG(0), 4, (uint32_t)ARG(1)); RET(o); }
+HLE(k32_InterlockedExchangeAdd) { uint32_t o = (uint32_t)mem_rd(ARG(0), 4); mem_wr(ARG(0), 4, o + (uint32_t)ARG(1)); RET(o); }
+HLE(k32_InterlockedCompareExchange) { // (dest, exchange, comparand)
+    uint32_t o = (uint32_t)mem_rd(ARG(0), 4);
+    if (o == (uint32_t)ARG(2)) mem_wr(ARG(0), 4, (uint32_t)ARG(1));
+    RET(o);
+}
+HLE(k32_InterlockedCompareExchange64) { // (dest, exchange, comparand): 64-bit values (two stack slots each in 32-bit programs)
+    uint64_t ex = g_mode32 ? (ARG(1) | (ARG(2) << 32)) : ARG(1), cmp = g_mode32 ? (ARG(3) | (hle_arg(st, 4) << 32)) : ARG(2);
+    uint64_t o = mem_rd(ARG(0), 8);
+    if (o == cmp) mem_wr(ARG(0), 8, ex);
+    RET(o);
+}
+
+// ---- gdiplus (not available yet): startup fails cleanly ---------------------------------------------------
+
+HLE(gp_GdiplusStartup) { if (ARG(0)) wr_ptr(ARG(0), 0); RET(6); } // NotImplemented
+HLE(gp_GdiplusShutdown) { RET(0); }
+HLE(k32_SetHandleCount) { RET(ARG(0)); }
+
 // ---- resources -------------------------------------------------------------------------------------
 
 #define ERROR_RESOURCE_TYPE_NOT_FOUND 1813
@@ -1255,6 +1279,9 @@ const HleEntry hle_shell_table[] = {
     { "SetThreadLocale", k32_SetThreadLocale, NULL }, { "GetThreadLocale", k32_GetThreadLocale, NULL },
     { "SetSearchPathMode", k32_SetSearchPathMode, NULL }, { "SetProcessDEPPolicy", k32_SetProcessDEPPolicy, NULL },
     { "GetProcessDEPPolicy", k32_GetProcessDEPPolicy, NULL },
+    { "InterlockedIncrement", k32_InterlockedIncrement, NULL }, { "InterlockedDecrement", k32_InterlockedDecrement, NULL },
+    { "InterlockedExchange", k32_InterlockedExchange, NULL }, { "InterlockedExchangeAdd", k32_InterlockedExchangeAdd, NULL },
+    { "InterlockedCompareExchange", k32_InterlockedCompareExchange, NULL }, { "InterlockedCompareExchange64", k32_InterlockedCompareExchange64, NULL },
     { "GlobalAddAtomA", k32_GlobalAddAtomA, NULL }, { "GlobalAddAtomW", k32_GlobalAddAtomW, NULL },
     { "AddAtomA", k32_GlobalAddAtomA, NULL }, { "AddAtomW", k32_GlobalAddAtomW, NULL },
     { "GlobalFindAtomA", k32_GlobalFindAtomA, NULL }, { "GlobalFindAtomW", k32_GlobalFindAtomW, NULL },
@@ -1271,6 +1298,8 @@ const HleEntry hle_shell_table[] = {
     { "LoadResource", k32_LoadResource, NULL }, { "LockResource", k32_LockResource, NULL }, { "SizeofResource", k32_SizeofResource, NULL },
     { "FreeResource", k32_FreeResource, NULL },
     { "NetWkstaGetInfo", net_NetWkstaGetInfo, NULL },
+    { "GdiplusStartup", gp_GdiplusStartup, NULL }, { "GdiplusShutdown", gp_GdiplusShutdown, NULL },
+    { "SetHandleCount", k32_SetHandleCount, NULL },
     { "GetTokenInformation", adv_GetTokenInformation, NULL }, { "InitializeSecurityDescriptor", adv_InitializeSecurityDescriptor, NULL },
     { "SetSecurityDescriptorDacl", adv_True, NULL }, { "SetSecurityDescriptorOwner", adv_True, NULL }, { "SetSecurityDescriptorGroup", adv_True, NULL },
     { "SetSecurityDescriptorSacl", adv_True, NULL }, { "GetSecurityDescriptorDacl", adv_GetSecurityDescriptorDacl, NULL },

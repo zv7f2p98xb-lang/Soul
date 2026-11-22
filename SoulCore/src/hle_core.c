@@ -55,8 +55,8 @@ static const HleEntry *find_entry(const char *name) {
     // processes and COM first: they replace older stand-ins in the other tables
     const HleEntry *tables[] = { hle_process_table, hle_com_table, hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table,
                                  hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table, hle_shell_table,
-                                 hle_oleaut_table };
-    for (int t = 0; t < 13; t++)
+                                 hle_oleaut_table, hle_shlwapi_table };
+    for (int t = 0; t < 14; t++)
         for (const HleEntry *e = tables[t]; e->name; e++)
             if (strcmp(e->name, name) == 0) return e;
     return NULL;
@@ -65,7 +65,8 @@ static const HleEntry *find_entry(const char *name) {
 // Stack bytes a 32-bit system function removes on return (0 = cdecl or unknown).
 // stdcall functions the generated table (MinGW import libraries) does not know
 static const StdcallArgs k_extra_stdcall[] = {
-    { "EventSetInformation", 20 }, { "GetDpiForMonitor", 16 }, { "GetDpiForShellUIComponent", 4 }, { "GetProcessDpiAwareness", 8 },
+    { "EventSetInformation", 20 }, { "InterlockedIncrement", 4 }, { "InterlockedDecrement", 4 }, { "InterlockedExchange", 8 },
+    { "InterlockedExchangeAdd", 8 }, { "InterlockedCompareExchange", 12 }, { "InterlockedCompareExchange64", 20 }, { "GetDpiForMonitor", 16 }, { "GetDpiForShellUIComponent", 4 }, { "GetProcessDpiAwareness", 8 },
     { "GetScaleFactorForMonitor", 8 }, { "GetTempPath2W", 8 }, { "OpenThemeDataForDpi", 12 }, { "ProcessPrng", 8 },
     { "SetProcessDpiAwareness", 4 }, { "WaitOnAddress", 16 }, { "WakeByAddressAll", 4 }, { "WakeByAddressSingle", 4 },
     { NULL, 0 }
