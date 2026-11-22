@@ -29,6 +29,21 @@ extern const HleEntry hle_shlwapi_table[];
 extern const HleEntry hle_winsock_table[];
 extern const HleEntry hle_inet_table[];
 extern const HleEntry hle_audio_table[];
+extern const HleEntry hle_msi_table[];     // msi_install.c
+extern const HleEntry hle_gdiplus_table[]; // gdiplus.c
+extern const HleEntry hle_xaudio2_table[]; // xaudio2.c
+// xaudio2.c: creates an XAudio2 / X3DAudio COM object for CoCreateInstance; REGDB_E_CLASSNOTREG (0x80040154) = not ours
+uint32_t xaudio2_com_create(X86State *st, uint64_t clsid, uint64_t riid, uint64_t ppv);
+// hle_com.c: writes a .lnk file (UTF-8 strings, Windows paths for target/workdir/icon, NULL = empty; show_cmd SW_*). 0 = ok
+int soul_lnk_write(const char *host_path, const char *target_win, const char *args, const char *workdir_win, const char *desc, const char *icon_win, int icon_index, int show_cmd);
+// registry.c: host-side registry access for Soul's own C engines (GIL held). root = 0x80000000..0x80000003.
+// Return Win32 error codes (0, ERROR_FILE_NOT_FOUND 2, ERROR_MORE_DATA 234). REG_SZ/REG_EXPAND_SZ data are UTF-8,
+// REG_MULTI_SZ is UTF-8 strings separated by NULs plus a final extra NUL. get: *size in = capacity, out = bytes needed/written.
+int reg_host_set(uint32_t root, const char *subkey, const char *name, uint32_t type, const void *data, uint32_t size);
+int reg_host_get(uint32_t root, const char *subkey, const char *name, uint32_t *type, void *data, uint32_t *size);
+int reg_host_delete_value(uint32_t root, const char *subkey, const char *name);
+int reg_host_delete_tree(uint32_t root, const char *subkey);
+int reg_host_key_exists(uint32_t root, const char *subkey);
 void audio_process_exit(uint32_t pid); // audio.c: stops the sounds of an ended process
 // hle_process.c: opens a program, document or link like Explorer (> 32 = success)
 uint64_t shell_execute_file(const char *file, const char *params, const char *dir, SoulProcess **started);

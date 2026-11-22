@@ -1167,8 +1167,6 @@ HLE(k32_InterlockedCompareExchange64) { // (dest, exchange, comparand): 64-bit v
 
 // ---- gdiplus (not available yet): startup fails cleanly ---------------------------------------------------
 
-HLE(gp_GdiplusStartup) { if (ARG(0)) wr_ptr(ARG(0), 0); RET(6); } // NotImplemented
-HLE(gp_GdiplusShutdown) { RET(0); }
 HLE(k32_SetHandleCount) { RET(ARG(0)); }
 
 // ---- resources -------------------------------------------------------------------------------------
@@ -1317,7 +1315,6 @@ const HleEntry hle_shell_table[] = {
     { "LoadResource", k32_LoadResource, NULL }, { "LockResource", k32_LockResource, NULL }, { "SizeofResource", k32_SizeofResource, NULL },
     { "FreeResource", k32_FreeResource, NULL },
     { "NetWkstaGetInfo", net_NetWkstaGetInfo, NULL },
-    { "GdiplusStartup", gp_GdiplusStartup, NULL }, { "GdiplusShutdown", gp_GdiplusShutdown, NULL },
     { "SetHandleCount", k32_SetHandleCount, NULL },
     { "GetTokenInformation", adv_GetTokenInformation, NULL }, { "InitializeSecurityDescriptor", adv_InitializeSecurityDescriptor, NULL },
     { "SetSecurityDescriptorDacl", adv_True, NULL }, { "SetSecurityDescriptorOwner", adv_True, NULL }, { "SetSecurityDescriptorGroup", adv_True, NULL },

@@ -31,6 +31,7 @@ static const char *const k_system_dlls[] = {
     "msimg32", "winspool", "urlmon", "wintrust", "imagehlp", "shcore", "oledlg", "olepro32", "msacm32", "msvfw32",
     "avifil32", "credui", "dnsapi", "ncrypt", "sspicli", "profapi", "kernel.appcore", "msasn1", "mswsock", "wldap32",
     "dwrite", "d2d1", "windowscodecs", "gdiplus", "ddraw", "dinput", "cabinet", "msi", "mscoree", "uiautomationcore",
+    "xaudio2_7", "xaudio2_8", "xaudio2_9", "xaudio2_9redist", "x3daudio1_7", "x3daudio1_9",
     "rstrtmgr", "msctf", "sxs", "wer", "faultrep", "dbgcore", "netapi32", "urlmon", "winhttp", "wininet", NULL
 };
 
@@ -53,7 +54,7 @@ int hle_is_system_dll(const char *dll) {
 
 static const HleEntry *find_entry(const char *name) {
     // processes and COM first: they replace older stand-ins in the other tables
-    const HleEntry *tables[] = { hle_process_table, hle_com_table, hle_audio_table, hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table,
+    const HleEntry *tables[] = { hle_process_table, hle_com_table, hle_audio_table, hle_msi_table, hle_gdiplus_table, hle_xaudio2_table, hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table,
                                  hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table, hle_shell_table,
                                  hle_oleaut_table, hle_shlwapi_table, hle_winsock_table, hle_inet_table };
     for (size_t t = 0; t < sizeof tables / sizeof *tables; t++)
@@ -68,7 +69,7 @@ static const StdcallArgs k_extra_stdcall[] = {
     { "EventSetInformation", 20 }, { "InterlockedIncrement", 4 }, { "InterlockedDecrement", 4 }, { "InterlockedExchange", 8 },
     { "InterlockedExchangeAdd", 8 }, { "InterlockedCompareExchange", 12 }, { "InterlockedCompareExchange64", 20 }, { "GetDpiForMonitor", 16 }, { "GetDpiForShellUIComponent", 4 }, { "GetProcessDpiAwareness", 8 },
     { "GetScaleFactorForMonitor", 8 }, { "GetTempPath2W", 8 }, { "OpenThemeDataForDpi", 12 }, { "ProcessPrng", 8 },
-    { "SetProcessDpiAwareness", 4 }, { "WaitOnAddress", 16 }, { "WakeByAddressAll", 4 }, { "WakeByAddressSingle", 4 },
+    { "SetProcessDpiAwareness", 4 }, { "WaitOnAddress", 16 }, { "WakeByAddressAll", 4 }, { "WakeByAddressSingle", 4 }, { "XAudio2Create", 12 },
     { NULL, 0 }
 };
 static uint16_t stdcall_bytes(const char *name) {

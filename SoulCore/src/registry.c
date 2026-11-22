@@ -427,29 +427,29 @@ static void sh_set_value(X86State *st, int wide) {
 }
 HLE(r_SHSetValueA) { sh_set_value(st, 0); }
 HLE(r_SHSetValueW) { sh_set_value(st, 1); }
-static void delete_value(X86State *st, int wide) {
-    RKey *k = key_of(ARG(0));
-    if (!k) { RET(ERROR_INVALID_HANDLE); return; }
-    char *name = astr(ARG(1), wide);
+static uint32_t key_delete_value(RKey *k, const char *name) {
     RVal *v = val_find(k, name);
-    free(name);
-    if (!v) { RET(ERROR_FILE_NOT_FOUND); return; }
+    if (!v) return ERROR_FILE_NOT_FOUND;
     int i = (int)(v - k->vals);
     free(v->name); free(v->data);
     memmove(k->vals + i, k->vals + i + 1, sizeof(RVal) * (size_t)(k->nvals - i - 1));
     k->nvals--;
     g_dirty = 1;
-    RET(0);
+    return 0;
+}
+static void delete_value(X86State *st, int wide) {
+    RKey *k = key_of(ARG(0));
+    if (!k) { RET(ERROR_INVALID_HANDLE); return; }
+    char *name = astr(ARG(1), wide);
+    uint32_t r = key_delete_value(k, name);
+    free(name);
+    RET(r);
 }
 HLE(r_RegDeleteValueA) { delete_value(st, 0); }
 HLE(r_RegDeleteValueW) { delete_value(st, 1); }
-static uint32_t delete_key(uint64_t hkey, uint64_t subkey, int wide, int tree) {
-    RKey *k = key_of(hkey);
-    if (!k) return ERROR_INVALID_HANDLE;
-    char *sub = astr(subkey, wide);
+static uint32_t key_delete(RKey *k, const char *sub, int tree) {
     RKey *r = walk(k, sub, 0);
     int whole = !sub || !*sub;
-    free(sub);
     if (!r) return ERROR_FILE_NOT_FOUND;
     if (tree && whole) { // RegDeleteTree(hkey, NULL) deletes the contents only
         while (r->nkids) key_free(r->kids[--r->nkids]);
@@ -464,6 +464,14 @@ static uint32_t delete_key(uint64_t hkey, uint64_t subkey, int wide, int tree) {
     key_free(r);
     g_dirty = 1;
     return 0;
+}
+static uint32_t delete_key(uint64_t hkey, uint64_t subkey, int wide, int tree) {
+    RKey *k = key_of(hkey);
+    if (!k) return ERROR_INVALID_HANDLE;
+    char *sub = astr(subkey, wide);
+    uint32_t r = key_delete(k, sub, tree);
+    free(sub);
+    return r;
 }
 HLE(r_RegDeleteKeyA) { RET(delete_key(ARG(0), ARG(1), 0, 0)); }
 HLE(r_RegDeleteKeyW) { RET(delete_key(ARG(0), ARG(1), 1, 0)); }
@@ -537,6 +545,53 @@ HLE(r_RegOpenCurrentUser) { if (ARG(1)) wr_ptr(ARG(1), 0xFFFFFFFF80000001ull); R
 HLE(r_RegConnectRegistry) { if (hle_arg(st, 2)) wr_ptr(hle_arg(st, 2), ARG(1)); RET(0); }
 HLE_STUB_RET(r_RegNotifyChangeKeyValue, 0)
 HLE_STUB_RET(r_RegSetKeySecurity, 0)
+
+// ---- host-side API for Soul's own C engines (GIL held) -----------------------------------------
+// Strings are UTF-8; they are stored exactly like the ANSI Reg* calls do (UTF-16 inside).
+int reg_host_set(uint32_t root, const char *subkey, const char *name, uint32_t type, const void *data, uint32_t size) {
+    RKey *r = key_of(root);
+    if (!r) return ERROR_FILE_NOT_FOUND;
+    r = walk(r, subkey, 1);
+    if (!r) return ERROR_FILE_NOT_FOUND;
+    if (is_str(type) && type != REG_MULTI_SZ) size = data ? (uint32_t)strlen((const char *)data) + 1 : 0;
+    if (is_str(type)) {
+        uint32_t n;
+        uint8_t *c = to_stored(type, data, size, &n);
+        val_set(r, name, type, c, n);
+        free(c);
+    } else val_set(r, name, type, data, data ? size : 0);
+    return 0;
+}
+int reg_host_get(uint32_t root, const char *subkey, const char *name, uint32_t *type, void *data, uint32_t *size) {
+    RKey *r = key_of(root);
+    r = r ? walk(r, subkey, 0) : NULL;
+    RVal *v = r ? val_find(r, name) : NULL;
+    if (!v) return ERROR_FILE_NOT_FOUND;
+    uint32_t n;
+    uint8_t *d = from_stored(v, &n);
+    if (type) *type = v->type;
+    int rc = 0;
+    if (data && size) {
+        if (*size < n) rc = ERROR_MORE_DATA;
+        else memcpy(data, d, n);
+    }
+    if (size) *size = n;
+    free(d);
+    return rc;
+}
+int reg_host_delete_value(uint32_t root, const char *subkey, const char *name) {
+    RKey *r = key_of(root);
+    r = r ? walk(r, subkey, 0) : NULL;
+    return r ? (int)key_delete_value(r, name) : ERROR_FILE_NOT_FOUND;
+}
+int reg_host_delete_tree(uint32_t root, const char *subkey) {
+    RKey *r = key_of(root);
+    return r ? (int)key_delete(r, subkey, 1) : ERROR_FILE_NOT_FOUND;
+}
+int reg_host_key_exists(uint32_t root, const char *subkey) {
+    RKey *r = key_of(root);
+    return r && walk(r, subkey, 0) ? 1 : 0;
+}
 
 const HleEntry hle_registry_table[] = {
     { "RegOpenKeyExA", r_RegOpenKeyExA, NULL }, { "RegOpenKeyExW", r_RegOpenKeyExW, NULL }, { "RegOpenKeyA", r_RegOpenKeyA, NULL },

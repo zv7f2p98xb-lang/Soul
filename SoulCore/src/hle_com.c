@@ -174,6 +174,19 @@ static int lnk_write(const Lnk *l, const char *host) {
     return 0;
 }
 
+int soul_lnk_write(const char *host_path, const char *target_win, const char *args, const char *workdir_win, const char *desc, const char *icon_win, int icon_index, int show_cmd) {
+    Lnk l;
+    memset(&l, 0, sizeof l);
+    snprintf(l.target, sizeof l.target, "%s", target_win ? target_win : "");
+    snprintf(l.args, sizeof l.args, "%s", args ? args : "");
+    snprintf(l.workdir, sizeof l.workdir, "%s", workdir_win ? workdir_win : "");
+    snprintf(l.desc, sizeof l.desc, "%s", desc ? desc : "");
+    snprintf(l.icon, sizeof l.icon, "%s", icon_win ? icon_win : "");
+    l.icon_index = icon_index;
+    l.show = show_cmd;
+    return lnk_write(&l, host_path);
+}
+
 static void lnk_str(const uint8_t *d, size_t len, size_t *o, int uni, char *out, size_t cap) {
     out[0] = 0;
     if (*o + 2 > len) return;
@@ -435,12 +448,30 @@ static uint32_t create_instance(uint64_t clsid, uint64_t outer, uint64_t riid, u
     }
     return REGDB_E_CLASSNOTREG;
 }
-HLE(ole_CoCreateInstance) { RET(create_instance(ARG(0), ARG(1), ARG(3), hle_arg(st, 4))); }
+HLE(ole_CoCreateInstance) {
+    uint32_t xr = xaudio2_com_create(st, ARG(0), ARG(3), hle_arg(st, 4));
+    if (xr != REGDB_E_CLASSNOTREG) { RET(xr); return; }
+    RET(create_instance(ARG(0), ARG(1), ARG(3), hle_arg(st, 4)));
+}
 HLE(ole_CoCreateInstanceEx) { // (clsid, outer, ctx, server, count, MULTI_QI[]) — MULTI_QI: pIID, pItf, hr
     uint64_t mq = hle_arg(st, 5);
     uint32_t n = (uint32_t)hle_arg(st, 4);
     const char *L = "PP4";
     uint32_t first = E_NOINTERFACE;
+    if (n > 0 && mq) {
+        uint64_t slot0 = mq + gs_off(L, 1);
+        uint32_t xr = xaudio2_com_create(st, ARG(0), gs_get(mq, L, 0), slot0);
+        if (xr != REGDB_E_CLASSNOTREG) {
+            gs_set(mq, L, 2, xr);
+            for (uint32_t i = 1; i < n; i++) { // further interfaces are not supported
+                uint64_t e = mq + (uint64_t)i * gs_size(L);
+                wr_ptr(e + gs_off(L, 1), 0);
+                gs_set(e, L, 2, E_NOINTERFACE);
+            }
+            RET(xr);
+            return;
+        }
+    }
     for (uint32_t i = 0; i < n; i++) {
         uint64_t e = mq + (uint64_t)i * gs_size(L);
         uint64_t slot = e + gs_off(L, 1);
