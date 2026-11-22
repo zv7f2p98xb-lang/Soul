@@ -10,8 +10,11 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-static HleState g_hs;
-HleState *hs(void) { return &g_hs; }
+// Per-process state (handles, environment, console buffers); see proc.c.
+static HleState *g_hsp;
+SOUL_PROCESS_VAR(g_hsp)
+#define g_hs (*g_hsp)
+HleState *hs(void) { return g_hsp; }
 X86State *hle_state_of(void) { return g_proc ? g_proc->main_state : NULL; }
 
 // ---- registry --------------------------------------------------------------
@@ -48,8 +51,10 @@ int hle_is_system_dll(const char *dll) {
 }
 
 static const HleEntry *find_entry(const char *name) {
-    const HleEntry *tables[] = { hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table, hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table, hle_shell_table };
-    for (int t = 0; t < 10; t++)
+    // processes and COM first: they replace older stand-ins in the other tables
+    const HleEntry *tables[] = { hle_process_table, hle_com_table, hle_kernel32_table, hle_crt_table, hle_user32_table, hle_controls_table,
+                                 hle_comctl_table, hle_gdi32_table, hle_opengl_table, hle_registry_table, hle_misc_table, hle_shell_table };
+    for (int t = 0; t < 12; t++)
         for (const HleEntry *e = tables[t]; e->name; e++)
             if (strcmp(e->name, name) == 0) return e;
     return NULL;
@@ -337,7 +342,7 @@ uint16_t *u2w_gdup(const char *s) {
 // ---- console ---------------------------------------------------------------
 
 static void out_flush_stream(int idx) {
-    if (g_hs.outlen[idx]) {
+    if (g_hsp && g_hs.outlen[idx]) {
         soul_out(idx + 1, g_hs.outbuf[idx], g_hs.outlen[idx]);
         g_hs.outlen[idx] = 0;
     }
@@ -349,7 +354,14 @@ void con_flush(void) {
 }
 
 void con_write(int stream, const char *data, size_t len) {
+    if (!g_hsp) return;
     int idx = (stream == 2) ? 1 : 0;
+    // standard output redirected by the parent process (e.g. into a pipe)
+    HObj *rd = h_get(g_hs.std_handles[idx + 1]);
+    if (rd && rd->type == H_FILE && rd->fd >= 0) {
+        while (len) { ssize_t w = write(rd->fd, data, len); if (w <= 0) break; data += w; len -= (size_t)w; }
+        return;
+    }
     if (idx == 1) out_flush_stream(0); // keep ordering between stdout and stderr
     else out_flush_stream(1);
     while (len) {
@@ -543,6 +555,7 @@ int wild_match(const char *pat, const char *s) {
 
 typedef struct VmRegion { uint64_t base, size; struct VmRegion *next; } VmRegion;
 static VmRegion *g_regions;
+SOUL_PROCESS_VAR(g_regions)
 
 // Regions are kept as guest addresses; vm_alloc returns a host pointer.
 void *vm_alloc(uint64_t addr, size_t size, int *existed) {
@@ -638,20 +651,27 @@ static void env_add(const char *kv) {
     g_hs.env[g_hs.env_count] = NULL;
 }
 
-void hle_init(SoulProcess *p) {
-    // keep nothing from a previous run (hle_shutdown released the environment)
-    free(g_hs.env);
-    memset(&g_hs, 0, sizeof g_hs);
-    p->hle_state = &g_hs;
+void hle_init(SoulProcess *p, char **env) {
+    g_hsp = calloc(1, sizeof(HleState));
+    p->hle_state = g_hsp;
     HObj *o;
-    g_hs.std_handles[0] = h_alloc(H_CONIN, &o);
-    g_hs.std_handles[1] = h_alloc(H_CONOUT, &o);
-    g_hs.std_handles[2] = h_alloc(H_CONERR, &o);
+    static const HType con[3] = { H_CONIN, H_CONOUT, H_CONERR };
+    for (int i = 0; i < 3; i++) {
+        if (p->std_fd[i] >= 0) { // inherited from the parent (STARTF_USESTDHANDLES)
+            g_hs.std_handles[i] = h_alloc(H_FILE, &o);
+            o->fd = p->std_fd[i];
+            p->std_fd[i] = -1;
+        } else g_hs.std_handles[i] = h_alloc(con[i], &o);
+    }
     g_hs.process_heap = g_mode32 ? 0x00ABCD00ull : 0x00000000ABCD0000ull;
     g_hs.con_attr = 7;
     g_hs.tls_next = 0;
     snprintf(g_hs.con_title, sizeof g_hs.con_title, "%s", p->exe_win);
 
+    if (env) { // the parent's environment (or the one CreateProcess was given)
+        for (int i = 0; env[i]; i++) env_add(env[i]);
+        return;
+    }
     env_add("ALLUSERSPROFILE=C:\\ProgramData");
     env_add("APPDATA=C:\\users\\soul\\AppData\\Roaming");
     env_add("COMPUTERNAME=IPAD");
@@ -681,7 +701,9 @@ void hle_init(SoulProcess *p) {
     env_add("USERNAME=soul");
     env_add("USERPROFILE=C:\\users\\soul");
     env_add("windir=C:\\windows");
+}
 
+void hle_init_system(SoulProcess *p) {
     // ensure the standard directory layout exists inside the container
     const char *dirs[] = { "windows", "windows/system32", "users", "users/soul", "users/soul/Temp",
                            "users/soul/AppData", "users/soul/AppData/Roaming", "users/soul/AppData/Local",
@@ -697,8 +719,9 @@ void hle_init(SoulProcess *p) {
     reg_init(p);
 }
 
+
 void hle_shutdown(SoulProcess *p) {
-    (void)p;
+    if (!g_hsp) return;
     con_flush();
     for (int i = 0; i < MAX_HANDLES; i++) {
         HObj *o = &g_hs.handles[i];
@@ -707,14 +730,19 @@ void hle_shutdown(SoulProcess *p) {
         if (o->dir) closedir(o->dir);
         if (o->type == H_MAPPING && o->ptr) g_free(o->ptr);
     }
-    memset(g_hs.handles, 0, sizeof g_hs.handles);
     k32_shutdown();
     for (int i = 0; i < g_hs.env_count; i++) g_free(g_hs.env[i]);
     free(g_hs.env);
-    g_hs.env = NULL;
-    g_hs.env_count = 0;
+    vm_free_all();
+    gdi_process_exit(p->pid);
+    if (p->hle_state == g_hsp) p->hle_state = NULL;
+    p->retired_api += g_hs.api_calls;
+    free(g_hsp);
+    g_hsp = NULL;
+}
+
+void hle_shutdown_system(void) {
     gui_shutdown();
     gl_reset();
     reg_shutdown();
-    vm_free_all();
 }

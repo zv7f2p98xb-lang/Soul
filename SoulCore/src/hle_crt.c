@@ -85,6 +85,16 @@ static char g_strtok_save_dummy;
 static char *g_strtok_save;
 static uint16_t *g_wcstok_save;
 static double g_clock_start;
+SOUL_PROCESS_VAR(g_cg)
+SOUL_PROCESS_VAR(g_args_built)
+SOUL_PROCESS_VAR(g_files)
+SOUL_PROCESS_VAR(g_rand_state)
+SOUL_PROCESS_VAR(g_atexit)
+SOUL_PROCESS_VAR(g_atexit_n)
+SOUL_PROCESS_VAR(g_atexit_cap)
+SOUL_PROCESS_VAR(g_strtok_save)
+SOUL_PROCESS_VAR(g_wcstok_save)
+SOUL_PROCESS_VAR(g_clock_start)
 
 void crt_reset(void) {
     for (int i = 3; i < MAX_FILES; i++) if (g_files[i].used && g_files[i].hf) fclose(g_files[i].hf);

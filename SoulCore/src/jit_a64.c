@@ -1398,13 +1398,17 @@ static BlockFn compile(JitCache *jc, uint64_t rip, X86State *st) {
     return (BlockFn)(void *)(jc->rx + off);
 }
 
-JitCache *jit_create(SoulProcess *p) {
+JitCache *jit_create(SoulProcess *p) { return jit_create_range(p, 0, jitmem_size()); }
+
+// A cache that translates into [off, off + size) of the code buffer: every process of a session
+// gets its own slice, so switching processes keeps the translations.
+JitCache *jit_create_range(SoulProcess *p, size_t off, size_t size) {
     if (!jitmem_ready()) return NULL;
     JitCache *jc = calloc(1, sizeof *jc);
     jc->p = p;
-    jc->rw = jitmem_rw();
-    jc->rx = jitmem_rx();
-    jc->size = jitmem_size();
+    jc->rw = (uint8_t *)jitmem_rw() + off;
+    jc->rx = (uint8_t *)jitmem_rx() + off;
+    jc->size = size;
     jc->table_mask = (1u << 16) - 1;
     jc->table = calloc(jc->table_mask + 1, sizeof(Block *));
     jc->pool_cap = 1u << 18;
@@ -1423,6 +1427,13 @@ void jit_destroy(JitCache *jc) {
 }
 
 void jit_flush(JitCache *jc) { if (jc) cache_reset(jc); }
+void jit_set_range(JitCache *jc, size_t off, size_t size) {
+    if (!jc) return;
+    cache_reset(jc);
+    jc->rw = (uint8_t *)jitmem_rw() + off;
+    jc->rx = (uint8_t *)jitmem_rx() + off;
+    jc->size = size;
+}
 
 int jit_run(JitCache *jc, X86State *st) {
     uint64_t rip = st->rip;
@@ -1458,6 +1469,8 @@ void jit_stats(JitCache *jc, SoulStats *s) {
 #else // non-ARM64 hosts: interpreter only
 
 JitCache *jit_create(SoulProcess *p) { (void)p; return NULL; }
+JitCache *jit_create_range(SoulProcess *p, size_t off, size_t size) { (void)p; (void)off; (void)size; return NULL; }
+void jit_set_range(JitCache *j, size_t off, size_t size) { (void)j; (void)off; (void)size; }
 void jit_destroy(JitCache *j) { (void)j; }
 void jit_flush(JitCache *j) { (void)j; }
 int jit_run(JitCache *j, X86State *st) { (void)j; (void)st; return 0; }

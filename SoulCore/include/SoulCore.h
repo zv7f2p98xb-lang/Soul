@@ -155,6 +155,17 @@ int soul_pe_extract_icon(const char *path, unsigned char **out, size_t *outlen);
 void soul_free(void *ptr);
 const char *soul_version(void);
 
+// Windows shortcut (.lnk) files, e.g. the Start Menu entries installers create.
+typedef struct SoulLnkInfo {
+    char target[1024];      // Windows path of the program or document ("C:\\Program Files\\App\\app.exe")
+    char arguments[1024];
+    char workdir[1024];
+    char description[512];
+    char icon[1024];        // icon file (Windows path), may be empty
+    int icon_index;
+} SoulLnkInfo;
+int soul_lnk_read(const char *host_path, SoulLnkInfo *out); // 0 on success
+
 #ifdef __cplusplus
 }
 #endif

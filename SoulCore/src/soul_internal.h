@@ -58,6 +58,12 @@ typedef struct HleThunk {
 
 struct SoulProcess {
     SoulLaunchOptions opts;
+    uint32_t pid, parent_pid;
+    struct SoulProcess *next_proc; // session list
+    uint8_t *pvars;           // private variables while another process is active (proc.c)
+    int std_fd[3];            // inherited standard handles (host descriptors, -1 = console)
+    int released, host_started, jit_slice;
+    uint64_t retired_api;     // API calls of the process's HLE state once it was released
     char exe_host[1024];
     char exe_win[520];
     char drive_c[1024];
@@ -115,7 +121,29 @@ struct SoulProcess {
     int ticker_running;
 };
 
-extern SoulProcess *g_proc;
+extern SoulProcess *g_proc; // the active process: the one whose thread holds the GIL
+
+// proc.c: per-process copies of global variables (see the file comment)
+void proc_var_register(void *addr, size_t size);
+#define SOUL_PROCESS_VAR(v) __attribute__((constructor)) static void soul_pv_##v(void) { proc_var_register(&(v), sizeof(v)); }
+uint8_t *proc_vars_new(void);
+void proc_activate(SoulProcess *p);
+void proc_vars_reset(void);
+
+// Processes started by guest programs (CreateProcess, ShellExecute)
+typedef struct SoulSpawn {
+    const char *exe_host, *exe_win, *cmdline, *cwd_win;
+    char **env;          // NULL-terminated "NAME=value" list (UTF-8), NULL = the parent's
+    int suspended;
+    int std_fd[3];       // host descriptors the child owns, -1 = console
+} SoulSpawn;
+SoulProcess *soul_process_spawn(const SoulSpawn *s, char *err, size_t errlen);
+void soul_process_kill(SoulProcess *p, int code);
+SoulProcess *soul_process_by_pid(uint32_t pid);
+SoulProcess *soul_session(void);      // the process the UI started
+SoulProcess *soul_process_list(void); // every process of the session
+uint32_t soul_new_tid(void);
+void gui_process_exit(uint32_t pid); // user32.c
 
 // runtime.c
 SoulThread *soul_cur_thread(void);
@@ -138,7 +166,9 @@ void soul_flush_code_cache(void);
 double soul_now(void);
 
 // hle_core.c
-void hle_init(SoulProcess *p);
+void hle_init_system(SoulProcess *root);  // shared state: windows, GDI, registry
+void hle_shutdown_system(void);
+void hle_init(SoulProcess *p, char **env); // per process (env: inherited environment or NULL)
 void hle_shutdown(SoulProcess *p);
 uint64_t hle_resolve_import(SoulProcess *p, const char *dll, const char *name, int ordinal);
 uint64_t hle_get_proc(SoulProcess *p, const char *dll, const char *name); // 0 if not implemented
@@ -245,6 +275,8 @@ void jitmem_begin_write(void);
 void jitmem_end_write(void);
 
 JitCache *jit_create(SoulProcess *p);
+JitCache *jit_create_range(SoulProcess *p, size_t off, size_t size);
+void jit_set_range(JitCache *j, size_t off, size_t size);
 void jit_destroy(JitCache *j);
 void jit_flush(JitCache *j);
 // Executes JIT code at st->rip if possible. Returns 1 if anything ran, 0 if caller must interpret.

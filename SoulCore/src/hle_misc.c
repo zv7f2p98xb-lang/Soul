@@ -222,27 +222,37 @@ HLE(sh_CommandLineToArgvW) {
     free(s);
     RET(blk);
 }
-// Links (http, https, mailto) open in the iPad's browser / mail app; other targets are not supported.
-static uint64_t shell_open(const char *target) {
-    if (!target) return 2;
-    if (!strncasecmp(target, "http://", 7) || !strncasecmp(target, "https://", 8) || !strncasecmp(target, "mailto:", 7)) {
-        if (g_proc->opts.open_url) g_proc->opts.open_url(g_proc->opts.ctx, target);
-        else soul_log("[Soul] Bağlantı: %s\n", target);
-        return 42;
-    }
-    soul_log("[api] ShellExecute: '%s' açılamıyor (yalnızca web bağlantıları desteklenir)\n", target);
-    return 31; // SE_ERR_NOASSOC
+// Programs start as new processes; links open in the iPad's browser; documents are shown by the
+// iPad (Quick Look).
+static char *opt_str(uint64_t p, int wide) { return !p ? NULL : wide ? w2u_dup((const uint16_t *)G2H(p)) : strdup((const char *)G2H(p)); }
+static void shell_execute(X86State *st, int wide) {
+    char *file = opt_str(ARG(2), wide), *params = opt_str(ARG(3), wide), *dir = opt_str(hle_arg(st, 4), wide);
+    SoulProcess *p;
+    uint64_t r = shell_execute_file(file, params, dir, &p);
+    free(file); free(params); free(dir);
+    RET(r);
 }
-HLE(sh_ShellExecuteA) { RET(shell_open((const char *)PTR(2))); }
-HLE(sh_ShellExecuteW) { char *t = ARG(2) ? w2u_dup(WSTR(2)) : NULL; RET(shell_open(t)); free(t); }
+HLE(sh_ShellExecuteA) { shell_execute(st, 0); }
+HLE(sh_ShellExecuteW) { shell_execute(st, 1); }
+#define L_SEI "44PPPPP4PPPP4PP" // cbSize fMask hwnd verb file params dir nShow hInstApp idlist class hkeyClass hotkey hIcon hProcess
 static void shell_execute_ex(X86State *st, int wide) {
-    // SHELLEXECUTEINFO: cbSize, fMask, hwnd, lpVerb, lpFile, ... hInstApp
     uint64_t info = ARG(0);
-    uint64_t file = rd_ptr(info + (g_mode32 ? 16 : 24));
-    char *t = !file ? NULL : wide ? w2u_dup((const uint16_t *)G2H(file)) : strdup((const char *)G2H(file));
-    uint64_t r = shell_open(t);
-    free(t);
-    wr_ptr(info + (g_mode32 ? 32 : 56), r); // hInstApp
+    uint32_t mask = (uint32_t)gs_get(info, L_SEI, 1);
+    char *file = opt_str(gs_get(info, L_SEI, 4), wide), *params = opt_str(gs_get(info, L_SEI, 5), wide), *dir = opt_str(gs_get(info, L_SEI, 6), wide);
+    if (!file && (mask & 4) && gs_get(info, L_SEI, 9)) { // SEE_MASK_IDLIST
+        uint64_t id = gs_get(info, L_SEI, 9);
+        if (mem_rd(id, 2) >= 7 && !memcmp(G2H(id + 2), "SOUL", 4)) file = strdup((const char *)G2H(id + 6));
+    }
+    SoulProcess *p = NULL;
+    uint64_t r = shell_execute_file(file, params, dir, &p);
+    free(file); free(params); free(dir);
+    gs_set(info, L_SEI, 8, r);
+    if (mask & 0x40) { // SEE_MASK_NOCLOSEPROCESS
+        uint64_t h = 0;
+        if (p) { HObj *o; h = h_alloc(H_PROCESS, &o); if (o) o->ptr = p; }
+        gs_set(info, L_SEI, 14, h);
+    }
+    if (r <= 32) set_last_error(st, r == 2 ? ERROR_FILE_NOT_FOUND : ERROR_ACCESS_DENIED);
     RET(r > 32);
 }
 HLE(sh_ShellExecuteExA) { shell_execute_ex(st, 0); }

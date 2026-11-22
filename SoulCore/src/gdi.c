@@ -19,6 +19,7 @@ uint64_t gdi_alloc(int type, GdiObj **out) {
         if (g_gdi[i].type == GO_FREE) {
             memset(&g_gdi[i], 0, sizeof g_gdi[i]);
             g_gdi[i].type = type;
+            g_gdi[i].pid = g_proc ? g_proc->pid : 0;
             if (out) *out = &g_gdi[i];
             return GDI_HANDLE_BASE + (uint64_t)i * 4;
         }
@@ -89,7 +90,14 @@ uint64_t gdi_make_font(int height, int weight, const char *face) { return make_f
 // DIB section bits live in guest memory: release them while the process (and its 4 GB window) exists.
 void gdi_release_guest_bits(void) {
     for (int i = 0; i < GDI_MAX; i++)
-        if (g_gdi[i].type == GO_BITMAP && g_gdi[i].owns_bits == 2) { g_free(g_gdi[i].surf.bits); g_gdi[i].surf.bits = NULL; g_gdi[i].owns_bits = 0; }
+        if (g_gdi[i].type == GO_BITMAP && g_gdi[i].owns_bits == 2) { g_gdi[i].surf.bits = NULL; g_gdi[i].owns_bits = 0; } // went away with the guest memory
+}
+void gdi_process_exit(uint32_t pid) {
+    for (int i = 1; i < GDI_MAX; i++) {
+        GdiObj *o = &g_gdi[i];
+        if (o->type == GO_FREE || o->stock || o->pid != pid) continue;
+        gdi_free(GDI_HANDLE_BASE + (uint64_t)i * 4);
+    }
 }
 void gdi_reset_objects(void) {
     for (int i = 0; i < GDI_MAX; i++) {

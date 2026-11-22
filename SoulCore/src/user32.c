@@ -200,15 +200,20 @@ static void fb_alloc(Win *w, int keep) {
 
 // ---- classes --------------------------------------------------------------------------------------
 
+// Classes are per process (RegisterClass); system classes (pid 0) are visible to every process.
+static int class_visible(const WinClass *c) { return c->used && (c->pid == 0 || (g_proc && c->pid == g_proc->pid)); }
 static WinClass *class_find(uint64_t name, int wide) {
     if (name < 0x10000) {
-        for (int i = 0; i < 256; i++) if (g_gui.classes[i].used && g_gui.classes[i].atom == (uint16_t)name) return &g_gui.classes[i];
+        for (int i = 0; i < 256; i++) if (class_visible(&g_gui.classes[i]) && g_gui.classes[i].atom == (uint16_t)name) return &g_gui.classes[i];
         return NULL;
     }
     char *s = gstr(name, wide);
     WinClass *found = NULL;
+    // the program's own classes win over system classes of the same name
     for (int i = 0; i < 256 && !found; i++)
-        if (g_gui.classes[i].used && strcasecmp(g_gui.classes[i].name, s) == 0) found = &g_gui.classes[i];
+        if (class_visible(&g_gui.classes[i]) && g_gui.classes[i].pid && strcasecmp(g_gui.classes[i].name, s) == 0) found = &g_gui.classes[i];
+    for (int i = 0; i < 256 && !found; i++)
+        if (class_visible(&g_gui.classes[i]) && strcasecmp(g_gui.classes[i].name, s) == 0) found = &g_gui.classes[i];
     free(s);
     return found;
 }
@@ -218,6 +223,7 @@ static WinClass *class_add(const char *name) {
             WinClass *c = &g_gui.classes[i];
             memset(c, 0, sizeof *c);
             c->used = 1;
+            c->pid = g_proc ? g_proc->pid : 0;
             c->atom = (uint16_t)(0xC000 + i);
             snprintf(c->name, sizeof c->name, "%s", name);
             return c;
@@ -227,6 +233,7 @@ static WinClass *class_add(const char *name) {
 }
 static void builtin_class(const char *name, int ctl, uint32_t style, uint64_t brush, int extra) {
     WinClass *c = class_add(name);
+    c->pid = 0;
     c->builtin = ctl;
     c->style = style;
     c->brush = brush;
@@ -235,7 +242,7 @@ static void builtin_class(const char *name, int ctl, uint32_t style, uint64_t br
 }
 int ctl_class_for(const char *name) {
     WinClass *c = NULL;
-    for (int i = 0; i < 256 && !c; i++) if (g_gui.classes[i].used && strcasecmp(g_gui.classes[i].name, name) == 0) c = &g_gui.classes[i];
+    for (int i = 0; i < 256 && !c; i++) if (class_visible(&g_gui.classes[i]) && strcasecmp(g_gui.classes[i].name, name) == 0) c = &g_gui.classes[i];
     return c ? c->builtin : 0;
 }
 
@@ -341,19 +348,22 @@ static void builtin_thunk(X86State *st) { // CallWindowProc / guest call into a 
     if (ctl == CTL_DIALOG) RET(dlg_proc(st, w, (uint32_t)ARG(1), ARG(2), ARG(3), g_gui.cur_unicode));
     else RET(ctl_proc(st, w, ctl, (uint32_t)ARG(1), ARG(2), ARG(3), g_gui.cur_unicode));
 }
+// Thunks of the built-in window procedures: addresses in the active process's address space.
+static uint64_t g_builtin_procs[32];
+SOUL_PROCESS_VAR(g_builtin_procs)
 uint64_t builtin_proc_addr(int ctl) {
     if (ctl <= 0 || ctl >= 32) return 0;
-    if (!g_gui.builtin_procs[ctl]) {
+    if (!g_builtin_procs[ctl]) {
         char name[32];
         snprintf(name, sizeof name, "SoulCtlProc%d", ctl);
         uint32_t id = hle_thunk_for(g_proc, builtin_thunk, "user32", name);
         g_proc->thunks[id].argbytes = g_mode32 ? 16 : 0; // a WNDPROC: stdcall (hwnd, msg, wParam, lParam)
-        g_gui.builtin_procs[ctl] = g_proc->thunk_base + (uint64_t)id * SOUL_THUNK_STRIDE;
+        g_builtin_procs[ctl] = g_proc->thunk_base + (uint64_t)id * SOUL_THUNK_STRIDE;
     }
-    return g_gui.builtin_procs[ctl];
+    return g_builtin_procs[ctl];
 }
 static int builtin_of(uint64_t proc) {
-    for (int i = 1; i < 32; i++) if (g_gui.builtin_procs[i] && g_gui.builtin_procs[i] == proc) return i;
+    for (int i = 1; i < 32; i++) if (g_builtin_procs[i] && g_builtin_procs[i] == proc) return i;
     return 0;
 }
 
@@ -418,9 +428,110 @@ uint64_t win_call_proc(X86State *st, Win *w, uint64_t proc, uint32_t msg, uint64
     return call_proc(st, w, proc, msg, wp, lp, unicode);
 }
 
+// ---- messages between processes -------------------------------------------------------------------
+// A window procedure runs in its own process: messages sent to another process's window are
+// queued for the thread that owns it, which handles them in its next GetMessage / PeekMessage
+// (or MsgWaitForMultipleObjects) while the sender waits. Pointer parameters of the messages
+// that carry them across processes on Windows (text, WM_COPYDATA) are copied.
+
+#define WM_COPYDATA 0x004A
+typedef struct XSend {
+    uint64_t hwnd;
+    uint32_t msg;
+    uint64_t wp, lp;
+    int unicode, sync;
+    uint32_t tid;
+    int taken, done, abandoned;
+    uint64_t result;
+    char *text;            // WM_SETTEXT input / WM_GETTEXT output (UTF-8)
+    uint8_t *data;         // WM_COPYDATA payload
+    uint32_t data_len;
+    uint64_t data_tag;
+    struct XSend *next;
+} XSend;
+static XSend *g_xsend;
+void xsend_dispatch(X86State *st);
+static int g_send_sync; // set while an explicit SendMessage call runs
+
+static void xsend_unlink(XSend *x) {
+    for (XSend **pp = &g_xsend; *pp; pp = &(*pp)->next) if (*pp == x) { *pp = x->next; break; }
+    free(x->text); free(x->data); free(x);
+}
+static int carries_pointer(uint32_t msg) {
+    switch (msg) {
+    case 0x0024: case 0x0046: case 0x0047: case 0x004E: case 0x002B: case 0x002C: case 0x0081: case 0x0083: case 0x0001:
+    case 0x0214: case 0x0216: case 0x0005 + 0x10000: return 1; // MINMAXINFO, WINDOWPOS, NOTIFY, DRAWITEM, MEASUREITEM, NCCREATE, NCCALCSIZE, CREATE, SIZING, MOVING
+    default: return 0;
+    }
+}
+uint64_t win_send_ex(X86State *st, uint64_t hwnd, uint32_t msg, uint64_t wp, uint64_t lp, int unicode);
+static uint64_t cross_send(X86State *st, Win *w, uint32_t msg, uint64_t wp, uint64_t lp, int unicode, int sync) {
+    if (carries_pointer(msg)) return 0;
+    XSend *x = calloc(1, sizeof *x);
+    x->hwnd = w->hwnd; x->msg = msg; x->wp = wp; x->lp = lp; x->unicode = unicode; x->tid = w->tid; x->sync = sync;
+    if (msg == WM_SETTEXT && lp) x->text = gstr(lp, unicode);
+    if (msg == WM_COPYDATA && lp) {
+        const char *L = "P4P"; // COPYDATASTRUCT: dwData cbData lpData
+        x->data_tag = gs_get(lp, L, 0);
+        x->data_len = (uint32_t)gs_get(lp, L, 1);
+        uint64_t src = gs_get(lp, L, 2);
+        x->data = malloc(x->data_len ? x->data_len : 1);
+        if (src && x->data_len) memcpy(x->data, G2H(src), x->data_len);
+    }
+    x->next = g_xsend;
+    g_xsend = x;
+    gil_notify();
+    if (!sync) return 0;
+    uint64_t hw = w->hwnd;
+    double deadline = soul_now() + 10.0;
+    while (!x->done) {
+        xsend_dispatch(st);
+        if (x->done || !win_get(hw) || g_proc->terminate || soul_now() > deadline) break;
+        gil_wait(20);
+    }
+    uint64_t r = 0;
+    if (x->done) {
+        r = x->result;
+        if (msg == WM_GETTEXT && lp && wp) r = put_str(lp, (size_t)wp, x->text ? x->text : "", unicode);
+        xsend_unlink(x);
+    } else if (x->taken) x->abandoned = 1; // the receiver frees it
+    else xsend_unlink(x);
+    return r;
+}
+// Handles messages other processes sent to windows of the calling thread.
+void xsend_dispatch(X86State *st) {
+    uint32_t tid = cur_tid();
+    for (;;) {
+        XSend *x = NULL;
+        for (XSend *c = g_xsend; c; c = c->next) if (!c->taken && c->tid == tid) { x = c; break; }
+        if (!x) return;
+        x->taken = 1;
+        void *tmp = NULL, *tmp2 = NULL;
+        uint64_t lp = x->lp;
+        if (x->msg == WM_SETTEXT && x->text) { tmp = x->unicode ? (void *)u2w_gdup(x->text) : (void *)g_strdup(x->text); lp = H2G(tmp); }
+        else if (x->msg == WM_GETTEXT) { tmp = g_calloc(1, (size_t)x->wp * 2 + 4); lp = H2G(tmp); }
+        else if (x->msg == WM_COPYDATA) {
+            const char *L = "P4P";
+            tmp = g_calloc(1, gs_size(L));
+            tmp2 = g_malloc(x->data_len ? x->data_len : 1);
+            if (x->data_len) memcpy(tmp2, x->data, x->data_len);
+            gs_set(H2G(tmp), L, 0, x->data_tag); gs_set(H2G(tmp), L, 1, x->data_len); gs_set(H2G(tmp), L, 2, H2G(tmp2));
+            lp = H2G(tmp);
+        }
+        uint64_t r = win_get(x->hwnd) ? win_send_ex(st, x->hwnd, x->msg, x->wp, lp, x->unicode) : 0;
+        if (x->msg == WM_GETTEXT && tmp) { free(x->text); x->text = x->unicode ? w2u_dup(tmp) : strdup(tmp); }
+        g_free(tmp); g_free(tmp2);
+        x->result = r;
+        x->done = 1;
+        if (!x->sync || x->abandoned) xsend_unlink(x);
+        gil_notify();
+    }
+}
+
 uint64_t win_send_ex(X86State *st, uint64_t hwnd, uint32_t msg, uint64_t wp, uint64_t lp, int unicode) {
     Win *w = win_get(hwnd);
     if (!w) return 0;
+    if (g_proc && w->pid && w->pid != g_proc->pid) return cross_send(st, w, msg, wp, lp, unicode, g_send_sync);
     if (w->ctl == CTL_DIALOG && w->wndproc == builtin_proc_addr(CTL_DIALOG)) return call_proc(st, w, w->wndproc, msg, wp, lp, unicode);
     return call_proc(st, w, w->wndproc, msg, wp, lp, unicode);
 }
@@ -521,6 +632,7 @@ uint64_t win_create(X86State *st, uint32_t exstyle, uint64_t cls_arg, uint64_t n
     w->message_only = message_only;
     w->enabled = !(style & WS_DISABLED);
     w->tid = cur_tid();
+    w->pid = g_proc ? g_proc->pid : 0;
     w->ctl = c->builtin;
     w->limit = 30000;
     w->cur_sel = -1;
@@ -919,8 +1031,9 @@ HLE(u_EnumThreadWindows) { int stop = 0; enum_rec(st, 0, ARG(1), ARG(2), 0, &sto
 static void find_window(X86State *st, int wide, int ex) {
     uint64_t parent = ex ? ARG(0) : 0, after = ex ? ARG(1) : 0;
     uint64_t cls = ARG(ex ? 2 : 0), title = ARG(ex ? 3 : 1);
-    WinClass *c = cls ? class_find(cls, wide) : NULL;
-    if (cls && !c) { RET(0); return; }
+    // windows of every process count: match the class by name (or atom), not by registration
+    char *cname = cls >= 0x10000 ? gstr(cls, wide) : NULL;
+    uint16_t catom = cls && cls < 0x10000 ? (uint16_t)cls : 0;
     char *t = gstr(title, wide);
     Win **list;
     int n = children_of(parent == DESKTOP_HWND ? 0 : parent, &list);
@@ -928,11 +1041,13 @@ static void find_window(X86State *st, int wide, int ex) {
     int started = after == 0;
     for (int i = 0; i < n && !r; i++) {
         if (!started) { if (list[i]->hwnd == after) started = 1; continue; }
-        if (c && list[i]->cls != c) continue;
+        WinClass *wc = list[i]->cls;
+        if (cname && (!wc || strcasecmp(wc->name, cname) != 0)) continue;
+        if (catom && (!wc || wc->atom != catom)) continue;
         if (t && strcmp(list[i]->text, t) != 0) continue;
         r = list[i]->hwnd;
     }
-    free(list); free(t);
+    free(list); free(t); free(cname);
     RET(r);
 }
 HLE(u_FindWindowA) { find_window(st, 0, 0); }
@@ -948,7 +1063,9 @@ static void set_window_text(X86State *st, int wide) {
 HLE(u_SetWindowTextA) { set_window_text(st, 0); }
 HLE(u_SetWindowTextW) { set_window_text(st, 1); }
 static void get_window_text(X86State *st, int wide) {
-    if (!win_get(ARG(0)) || ARGI(2) <= 0) { RET(0); return; }
+    Win *w = win_get(ARG(0));
+    if (!w || ARGI(2) <= 0) { RET(0); return; }
+    if (w->pid && g_proc && w->pid != g_proc->pid) { RET(put_str(ARG(1), (size_t)ARGI(2), w->text, wide)); return; } // another process: no message
     if (wide) ((uint16_t *)PTR(1))[0] = 0; else ((char *)PTR(1))[0] = 0;
     RET(win_send_ex(st, ARG(0), WM_GETTEXT, (uint64_t)ARGI(2), ARG(1), wide));
 }
@@ -1437,12 +1554,26 @@ static void send_message(X86State *st, int wide) {
         RET(0);
         return;
     }
-    RET(win_send_ex(st, h, (uint32_t)ARG(1), ARG(2), ARG(3), wide));
+    int saved = g_send_sync;
+    g_send_sync = 1;
+    uint64_t r = win_send_ex(st, h, (uint32_t)ARG(1), ARG(2), ARG(3), wide);
+    g_send_sync = saved;
+    RET(r);
+}
+static uint64_t send_timeout(X86State *st, int wide) {
+    int saved = g_send_sync;
+    g_send_sync = ARG(0) != HWND_BROADCAST;
+    uint64_t r = 0;
+    if (ARG(0) == HWND_BROADCAST) {
+        for (int i = 0; i < WIN_MAX; i++) if (g_gui.wins[i].used && !g_gui.wins[i].parent) win_send_ex(st, g_gui.wins[i].hwnd, (uint32_t)ARG(1), ARG(2), ARG(3), wide);
+    } else r = win_send_ex(st, ARG(0), (uint32_t)ARG(1), ARG(2), ARG(3), wide);
+    g_send_sync = saved;
+    return r;
 }
 HLE(u_SendMessageA) { send_message(st, 0); }
 HLE(u_SendMessageW) { send_message(st, 1); }
-HLE(u_SendMessageTimeoutA) { uint64_t r = win_send_ex(st, ARG(0), (uint32_t)ARG(1), ARG(2), ARG(3), 0); if (hle_arg(st, 6)) wr_ptr(hle_arg(st, 6), r); RET(1); }
-HLE(u_SendMessageTimeoutW) { uint64_t r = win_send_ex(st, ARG(0), (uint32_t)ARG(1), ARG(2), ARG(3), 1); if (hle_arg(st, 6)) wr_ptr(hle_arg(st, 6), r); RET(1); }
+HLE(u_SendMessageTimeoutA) { uint64_t r = send_timeout(st, 0); if (hle_arg(st, 6)) wr_ptr(hle_arg(st, 6), r); RET(1); }
+HLE(u_SendMessageTimeoutW) { uint64_t r = send_timeout(st, 1); if (hle_arg(st, 6)) wr_ptr(hle_arg(st, 6), r); RET(1); }
 HLE(u_PostMessage) {
     uint64_t h = ARG(0);
     if (h == HWND_BROADCAST) {
@@ -1736,9 +1867,9 @@ static Win *find_paint(uint32_t tid, uint64_t filter) {
 // Returns 1 for a message, 2 for WM_QUIT, 0 for none.
 static int peek(X86State *st, uint64_t out, uint64_t filter, uint32_t mn, uint32_t mx, uint32_t flags) {
     GuiState *g = &g_gui;
+    if (g_xsend) xsend_dispatch(st);
     uint32_t tid = cur_tid();
     int remove = flags & 1;
-    (void)st;
     for (int i = 0; i < g->qlen; i++) {
         QMsg *q = &g->queue[i];
         if (q->tid != tid || !msg_matches(filter, mn, mx, q->hwnd, q->msg)) continue;
@@ -1791,6 +1922,7 @@ static int64_t next_timer_ms(void) {
 }
 static int has_messages(uint32_t tid) {
     for (int i = 0; i < g_gui.qlen; i++) if (g_gui.queue[i].tid == tid) return 1;
+    for (XSend *x = g_xsend; x; x = x->next) if (!x->taken && x->tid == tid) return 1;
     return g_gui.input_len > 0 || (g_gui.quit_posted && g_gui.quit_tid == tid) || find_paint(tid, 0) != NULL;
 }
 // Blocks until something may have arrived. Returns 1 if the process is ending.
@@ -2687,6 +2819,66 @@ void gui_reset(void) {
     g_wm_next = 0xC100;
 }
 
+// A process ended: its windows, classes, timers and queued messages go away without any
+// message being sent to it (like Windows does for a process that has exited).
+void gui_process_exit(uint32_t pid) {
+    GuiState *g = &g_gui;
+    if (!g->mu_init || !pid) return;
+    int any = 0;
+    for (int i = 0; i < WIN_MAX; i++) {
+        Win *w = &g->wins[i];
+        if (!w->used || w->pid != pid) continue;
+        any = 1;
+        uint64_t hwnd = w->hwnd;
+        kill_window_timers(hwnd);
+        int j = 0;
+        for (int k = 0; k < g->qlen; k++) if (g->queue[k].hwnd != hwnd) g->queue[j++] = g->queue[k];
+        g->qlen = j;
+        if (g->focus == hwnd) g->focus = 0;
+        if (g->capture == hwnd) g->capture = 0;
+        if (g->caret_hwnd == hwnd) g->caret_hwnd = 0;
+        if (g->active == hwnd) g->active = 0;
+        if (g->popup_hwnd == hwnd) { g->popup_done = 1; g->popup_result = 0; }
+        gui_lock();
+        uint32_t *px = w->pixels;
+        char *text = w->text;
+        w->used = 0;
+        w->pixels = NULL;
+        w->text = NULL;
+        gui_unlock();
+        free(px);
+        free(text);
+        free(w->extra); w->extra = NULL;
+        for (int k = 0; k < w->item_count; k++) free(w->items[k]);
+        free(w->items); w->items = NULL;
+        free(w->item_data); w->item_data = NULL;
+        w->item_count = 0;
+        if (w->cdata && w->cdata_free) w->cdata_free(w->cdata);
+        w->cdata = NULL;
+    }
+    for (int i = 0; i < 256; i++) {
+        WinClass *c = &g->classes[i];
+        if (!c->used || c->pid != pid) continue;
+        if (c->menu_name >= 0x10000 && g_proc && g_proc->pid == pid) g_free(G2H(c->menu_name));
+        c->used = 0;
+    }
+    for (XSend **pp = &g_xsend; *pp;) {
+        Win *w = win_get((*pp)->hwnd);
+        if (!w && !(*pp)->sync) { XSend *x = *pp; *pp = x->next; free(x->text); free(x->data); free(x); }
+        else pp = &(*pp)->next;
+    }
+    if (any) {
+        // bring the front-most remaining window forward
+        Win *best = NULL;
+        for (int i = 0; i < WIN_MAX; i++) {
+            Win *o = &g->wins[i];
+            if (o->used && !o->parent && o->visible && !o->message_only && (!best || o->zstamp > best->zstamp)) best = o;
+        }
+        if (!g->active && best) g->active = best->hwnd;
+        bump();
+    }
+}
+
 void gui_shutdown(void) {
     GuiState *g = &g_gui;
     if (!g->mu_init) return;
@@ -2723,22 +2915,17 @@ static void push_input(GuiInput ev) {
     if (g->input_len == g->input_cap) { g->input_cap = g->input_cap ? g->input_cap * 2 : 64; g->input = realloc(g->input, sizeof(GuiInput) * (size_t)g->input_cap); }
     g->input[g->input_len++] = ev;
     gui_unlock();
-    if (g_proc) {
-        pthread_mutex_lock(&g_proc->ev_mu);
-        g_proc->ev_gen++;
-        pthread_cond_broadcast(&g_proc->ev_cv);
-        pthread_mutex_unlock(&g_proc->ev_mu);
-    }
+    gil_notify();
 }
 
 void soul_gui_event(SoulProcess *p, uint64_t hwnd, int type, int x, int y, int data, uint32_t ch, const char *text) {
-    if (!p || p != g_proc || !g_gui.mu_init) return;
+    if (!p || p != soul_session() || !g_gui.mu_init) return;
     GuiInput ev = { hwnd, type, x, y, data, ch, text ? strdup(text) : NULL };
     push_input(ev);
 }
 
 int soul_gui_windows(SoulProcess *p, SoulWindowInfo *out, int max) {
-    if (!p || p != g_proc || !g_gui.mu_init) return 0;
+    if (!p || p != soul_session() || !g_gui.mu_init) return 0;
     GuiState *g = &g_gui;
     int n = 0;
     gui_lock();
@@ -2789,7 +2976,7 @@ int soul_gui_windows(SoulProcess *p, SoulWindowInfo *out, int max) {
 }
 
 int soul_gui_copy(SoulProcess *p, uint64_t hwnd, void *dst, size_t stride, int width, int height, uint64_t *version) {
-    if (!p || p != g_proc || !g_gui.mu_init) return 0;
+    if (!p || p != soul_session() || !g_gui.mu_init) return 0;
     int copied = 0;
     gui_lock();
     Win *w = win_get(hwnd);
@@ -2825,7 +3012,7 @@ static int flatten_menu(uint64_t h, int depth, SoulMenuEntry *out, int n, int ma
     return n;
 }
 int soul_gui_menu(SoulProcess *p, uint64_t hwnd, SoulMenuEntry *out, int max) {
-    if (!p || p != g_proc || !g_gui.mu_init) return 0;
+    if (!p || p != soul_session() || !g_gui.mu_init) return 0;
     gui_lock();
     Win *w = win_get(hwnd);
     int n = w && w->menu ? flatten_menu(w->menu, 0, out, 0, max) : 0;
@@ -2834,7 +3021,7 @@ int soul_gui_menu(SoulProcess *p, uint64_t hwnd, SoulMenuEntry *out, int max) {
 }
 int soul_gui_popup(SoulProcess *p, SoulPopupInfo *info, SoulMenuEntry *out, int max) {
     memset(info, 0, sizeof *info);
-    if (!p || p != g_proc || !g_gui.mu_init) return 0;
+    if (!p || p != soul_session() || !g_gui.mu_init) return 0;
     GuiState *g = &g_gui;
     int n = 0;
     gui_lock();
@@ -2864,21 +3051,21 @@ int soul_gui_popup(SoulProcess *p, SoulPopupInfo *info, SoulMenuEntry *out, int 
     gui_unlock();
     return n;
 }
-int soul_gui_popup_active(SoulProcess *p) { return p && p == g_proc && g_gui.popup_active; }
+int soul_gui_popup_active(SoulProcess *p) { return p && p == soul_session() && g_gui.popup_active; }
 int soul_gui_idle(SoulProcess *p) {
-    if (!p || p != g_proc || !g_gui.mu_init) return 1;
+    if (!p || p != soul_session() || !g_gui.mu_init) return 1;
     GuiState *g = &g_gui;
     if (g->input_len || g->qlen) return 0;
     for (int i = 0; i < WIN_MAX; i++) if (g->wins[i].used && g->wins[i].invalid && win_shown(&g->wins[i])) return 0;
     return 1;
 }
-uint64_t soul_gui_generation(SoulProcess *p) { return p && p == g_proc ? g_gui.generation : 0; }
+uint64_t soul_gui_generation(SoulProcess *p) { return p && p == soul_session() ? g_gui.generation : 0; }
 void soul_gui_set_screen(SoulProcess *p, int w, int h) {
     (void)p;
     if (w >= 320 && h >= 240) { g_gui.screen_w = w; g_gui.screen_h = h; }
 }
 int soul_gui_has_windows(SoulProcess *p) {
-    if (!p || p != g_proc || !g_gui.mu_init) return 0;
+    if (!p || p != soul_session() || !g_gui.mu_init) return 0;
     for (int i = 0; i < WIN_MAX; i++) if (g_gui.wins[i].used && !g_gui.wins[i].parent && !g_gui.wins[i].message_only) return 1;
     return 0;
 }

@@ -24,6 +24,12 @@ static uint8_t *g_used;                     // one byte per granule
 static void *g_reservation;
 static size_t g_reservation_size;
 static uint64_t g_hint;
+SOUL_PROCESS_VAR(g_gbase)
+SOUL_PROCESS_VAR(g_mode32)
+SOUL_PROCESS_VAR(g_used)
+SOUL_PROCESS_VAR(g_reservation)
+SOUL_PROCESS_VAR(g_reservation_size)
+SOUL_PROCESS_VAR(g_hint)
 
 int gwin_init(void) {
     if (g_reservation) return 1;
@@ -102,6 +108,9 @@ typedef struct HHdr { uint32_t magic, cls; uint64_t size; } HHdr; // 16 bytes, k
 #define NCLS 12                                                // 16 B .. 32 KB
 static void *g_free_list[NCLS];
 static uint8_t *g_arena, *g_arena_end;
+SOUL_PROCESS_VAR(g_free_list)
+SOUL_PROCESS_VAR(g_arena)
+SOUL_PROCESS_VAR(g_arena_end)
 
 static int cls_for(size_t n) { int c = 0; size_t s = 16; while (s < n && c < NCLS) { s <<= 1; c++; } return c; }
 static size_t cls_size(int c) { return (size_t)16 << c; }

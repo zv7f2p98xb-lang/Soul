@@ -22,6 +22,10 @@ extern const HleEntry hle_crt_table[];
 extern const HleEntry hle_misc_table[];
 extern const HleEntry hle_registry_table[];
 extern const HleEntry hle_shell_table[];
+extern const HleEntry hle_process_table[];
+extern const HleEntry hle_com_table[];
+// hle_process.c: opens a program, document or link like Explorer (> 32 = success)
+uint64_t shell_execute_file(const char *file, const char *params, const char *dir, SoulProcess **started);
 const char *hle_ordinal_name(const char *dll, int ordinal); // name of a system DLL export known only by number
 void reg_init(SoulProcess *p);
 void reg_shutdown(void);

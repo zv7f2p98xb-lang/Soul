@@ -40,6 +40,7 @@ enum { DC_WINDOW = 1, DC_MEMORY, DC_SCREEN };
 typedef struct GdiObj {
     int type;
     int stock;
+    uint32_t pid;     // process that created it (freed when that process ends)
     // brush / pen
     int style;
     int width;
@@ -103,6 +104,7 @@ typedef struct WinClass {
     int used;
     int builtin;                  // CTL_* for system classes
     uint16_t atom;
+    uint32_t pid;                 // registering process (0 = system class, visible to all)
 } WinClass;
 
 typedef struct MenuItem {
@@ -144,6 +146,7 @@ typedef struct Win {
     uint8_t *extra;
     int extra_size;
     uint32_t tid;
+    uint32_t pid;                 // owning process
     uint64_t font;                // WM_SETFONT
     // built-in controls
     int ctl;                      // CTL_* below
@@ -323,6 +326,8 @@ typedef struct GuiState {
 GuiState *gui(void);
 void gui_reset(void);
 void gui_shutdown(void);
+void gui_process_exit(uint32_t pid);   // destroys the windows and classes of an ended process
+void gdi_process_exit(uint32_t pid);   // frees the GDI objects of an ended process
 void gui_lock(void);
 void gui_unlock(void);
 uint64_t builtin_proc_addr(int ctl);

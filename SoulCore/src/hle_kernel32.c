@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -69,6 +70,20 @@ static int handle_is_console(uint64_t h, int *stream) {
     return 0;
 }
 
+// Pipes between processes: wait for data / room without holding the global lock, so the
+// program on the other end can run.
+static int is_fifo(int fd) { struct stat sb; return fstat(fd, &sb) == 0 && S_ISFIFO(sb.st_mode); }
+static void pipe_wait(int fd, short ev) {
+    for (;;) {
+        struct pollfd pf = { fd, ev, 0 };
+        if (poll(&pf, 1, 0) != 0 || g_proc->terminate) return;
+        SoulThread *t = soul_cur_thread();
+        gil_unlock(t);
+        poll(&pf, 1, 50);
+        gil_lock(t);
+    }
+}
+
 HLE(k32_WriteFile) {
     uint64_t h = ARG(0), buf = ARG(1), n = (uint32_t)ARG(2), written = ARG(3);
     HObj *o = h_get(h);
@@ -81,6 +96,17 @@ HLE(k32_WriteFile) {
         w = (int64_t)n;
     } else if (o->type == H_FILE) {
         if (o->append) lseek(o->fd, 0, SEEK_END);
+        if (is_fifo(o->fd)) {
+            size_t done = 0;
+            while (done < n) {
+                pipe_wait(o->fd, POLLOUT);
+                ssize_t k = write(o->fd, (const uint8_t *)G2H(buf) + done, n - done > 512 ? 512 : n - done);
+                if (k <= 0) break;
+                done += (size_t)k;
+            }
+            if (done == 0 && n) { if (written) mem_wr(written, 4, 0); FAIL(ERROR_BROKEN_PIPE); }
+            w = (int64_t)done;
+        } else
         w = write(o->fd, (const void *)G2H(buf), n);
         if (w < 0) { if (written) mem_wr(written, 4, 0); FAIL(errno_to_win(errno)); }
     } else FAIL(ERROR_INVALID_HANDLE);
@@ -102,8 +128,11 @@ HLE(k32_ReadFile) {
     } else if (o->type == H_NULLDEV) {
         r = 0;
     } else if (o->type == H_FILE) {
+        int fifo = is_fifo(o->fd);
+        if (fifo) pipe_wait(o->fd, POLLIN);
         r = read(o->fd, G2H(buf), n);
         if (r < 0) { if (rd) mem_wr(rd, 4, 0); FAIL(errno_to_win(errno)); }
+        if (fifo && r == 0 && n) { if (rd) mem_wr(rd, 4, 0); FAIL(ERROR_BROKEN_PIPE); } // every writer closed its end
     } else FAIL(ERROR_INVALID_HANDLE);
     if (rd) mem_wr(rd, 4, (uint64_t)r);
     RET(1);
@@ -606,6 +635,10 @@ static uint64_t g_unhandled_filter; // SetUnhandledExceptionFilter (32-bit SEH)
 // Per-process kernel32 state: fake system modules and cached command lines.
 static char *g_cmdline_a;
 static uint16_t *g_cmdline_w;
+SOUL_PROCESS_VAR(g_cmdline_a)
+SOUL_PROCESS_VAR(g_cmdline_w)
+SOUL_PROCESS_VAR(g_fake_mods)
+SOUL_PROCESS_VAR(g_unhandled_filter)
 void k32_shutdown(void) {
     g_unhandled_filter = 0;
     while (g_fake_mods) { FakeMod *n = g_fake_mods->next; g_pages_free(g_fake_mods->mem, 4096); free(g_fake_mods); g_fake_mods = n; }
@@ -1363,6 +1396,7 @@ static int obj_ready(HObj *o) {
     case H_MUTEX: return o->owner == 0 || o->owner == cur_tid();
     case H_SEMAPHORE: return o->count > 0;
     case H_THREAD: return o->ptr && ((SoulThread *)o->ptr)->finished;
+    case H_PROCESS: return o->ptr && ((SoulProcess *)o->ptr)->exited;
     case H_CONIN: return con_has_input();
     default: return 1;
     }
@@ -1377,7 +1411,7 @@ static void obj_consume(HObj *o) {
 }
 static int can_be_signalled_later(HObj *o) {
     // with a single guest thread only console input (from the UI) can still arrive
-    return g_proc->threads != NULL || o->type == H_CONIN;
+    return g_proc->threads != NULL || o->type == H_CONIN || o->type == H_PROCESS;
 }
 
 static uint32_t wait_objects(X86State *st, uint32_t n, const uint64_t *hs_, int all, uint32_t ms) {
@@ -1422,6 +1456,20 @@ HLE(k32_DuplicateHandle) {
         uint64_t nh = h_alloc(H_THREAD, &o);
         o->ptr = soul_cur_thread();
         h = nh;
+    } else {
+        HObj *src = h_get(h), *o;
+        if (src && (src->type == H_FILE || src->type == H_PROCESS)) { // a real copy (pipes are duplicated this way)
+            HObj copy = *src;
+            uint64_t nh = h_alloc(src->type, &o);
+            if (o) {
+                int keep_fd = o->fd;
+                *o = copy;
+                o->fd = copy.fd >= 0 ? dup(copy.fd) : keep_fd;
+                o->dir = NULL;
+                if ((uint32_t)hle_arg(st, 6) & 1) h_free(h); // DUPLICATE_CLOSE_SOURCE
+                h = nh;
+            }
+        }
     }
     if (ARG(3)) wr_ptr(ARG(3), h);
     RET(1);

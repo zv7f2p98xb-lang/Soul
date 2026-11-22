@@ -350,6 +350,7 @@ static int find_case_insensitive(const char *dir, const char *name, char *out, s
 
 // Directory added with SetDllDirectory (Windows path, empty = none).
 char g_dll_dir[600];
+SOUL_PROCESS_VAR(g_dll_dir)
 
 static int find_in_win_dir(SoulProcess *p, const char *windir, const char *name, char *found, size_t cap, char *winp, size_t wcap) {
     char host[1200];

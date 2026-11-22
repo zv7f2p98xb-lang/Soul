@@ -20,6 +20,9 @@ i686-w64-mingw32-g++ -O2 -static -o "$OUT/cpp32.exe" cpp.cpp || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/registry32.exe" registry.c || exit 1
 i686-w64-mingw32-gcc -O0 -o "$OUT/x87ops32.exe" x87ops.c || exit 1
 i686-w64-mingw32-g++ -O2 -static -o "$OUT/exceptions32.exe" exceptions.cpp || exit 1   # x87 register forms (reference: real hardware)
+# several processes (each build starts the other one too)
+x86_64-w64-mingw32-gcc -O2 -o "$OUT/multiproc.exe" multiproc.c -lole32 -luuid || exit 1
+i686-w64-mingw32-gcc -O2 -o "$OUT/multiproc32.exe" multiproc.c -lole32 -luuid || exit 1
 pass=0; fail=0
 check() {
   local name=$1; shift
@@ -41,5 +44,7 @@ check registry-write registry32.exe yaz
 check registry-read registry32.exe
 check x87ops x87ops32.exe
 check exceptions exceptions32.exe
+check multiproc --drive . multiproc.exe
+check multiproc32 --drive . multiproc32.exe
 echo "passed=$pass failed=$fail"
 [ $fail -eq 0 ]
