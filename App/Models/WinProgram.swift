@@ -15,6 +15,12 @@ struct WinProgram: Identifiable, Codable, Hashable {
     var isGUI: Bool = false
     var is64Bit: Bool = true
     var importsSummary: String = ""
+    /// Set for setup programs ("Inno Setup", "NSIS", ...): running one installs other programs.
+    var installerKind: String? = nil
+    /// The program was found through a shortcut an installer created.
+    var installedBySetup: Bool? = nil
+
+    var isInstaller: Bool { installerKind != nil }
 
     var hostURL: URL { SoulPaths.driveC.appendingPathComponent(relativePath) }
     var folderURL: URL { hostURL.deletingLastPathComponent() }
@@ -24,8 +30,8 @@ struct WinProgram: Identifiable, Codable, Hashable {
 
     var compatibilityNote: String? {
         let imports = importsSummary.lowercased()
-        if ["d3d9", "d3d10", "d3d11", "d3d12", "dxgi", "opengl32", "vulkan"].contains(where: { imports.contains($0) }) {
-            return "Bu program DirectX/OpenGL kullanıyor; 3B grafik henüz desteklenmiyor. Pencere ve GDI çizimleri çalışır."
+        if ["d3d9", "d3d10", "d3d11", "d3d12", "dxgi", "vulkan"].contains(where: { imports.contains($0) }) {
+            return "Bu program DirectX kullanıyor; Direct3D henüz desteklenmiyor (OpenGL, pencere ve GDI çizimleri çalışır)."
         }
         if imports.contains("mscoree") { return ".NET programları henüz desteklenmiyor." }
         return nil

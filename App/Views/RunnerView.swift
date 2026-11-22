@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import QuickLook
 
 struct RunnerView: View {
     @EnvironmentObject private var sessions: SessionManager
@@ -24,11 +25,15 @@ struct SessionScreen: View {
     @ObservedObject var gui: GuiModel
 
     var body: some View {
-        if session.program.isGUI || gui.everHadWindow {
-            GuiScreen(session: session, gui: gui)
-        } else {
-            ConsoleScreen(session: session)
+        Group {
+            if session.program.isGUI || gui.everHadWindow {
+                GuiScreen(session: session, gui: gui)
+            } else {
+                ConsoleScreen(session: session)
+            }
         }
+        // documents the program opens (read-me files, help pages) are shown with Quick Look
+        .quickLookPreview($session.previewURL)
     }
 }
 

@@ -16,7 +16,8 @@ struct LibraryView: View {
         guard !search.isEmpty else { return list }
         return list.filter { $0.name.localizedCaseInsensitiveContains(search) || $0.relativePath.localizedCaseInsensitiveContains(search) }
     }
-    private var userPrograms: [WinProgram] { filtered.filter { !$0.isSample } }
+    private var userPrograms: [WinProgram] { filtered.filter { !$0.isSample && !$0.isInstaller } }
+    private var installers: [WinProgram] { filtered.filter { $0.isInstaller } }
     private var samples: [WinProgram] { filtered.filter { $0.isSample } }
 
     var body: some View {
@@ -25,6 +26,7 @@ struct LibraryView: View {
                 if !jit.isAvailable && !jit.isPreparing { JITBanner() }
                 if library.programs.filter({ !$0.isSample }).isEmpty && search.isEmpty { EmptyLibraryCard { showImporter = true } }
                 if !userPrograms.isEmpty { section(title: "Programlarım", items: userPrograms) }
+                if !installers.isEmpty { section(title: "Kurulum Dosyaları", items: installers) }
                 if !samples.isEmpty { section(title: "Örnek Programlar", items: samples) }
             }
             .padding()
@@ -75,7 +77,7 @@ struct LibraryView: View {
                 ProgramCard(program: program)
                     .onTapGesture { detail = program }
                     .contextMenu {
-                        Button { sessions.launch(program) } label: { Label("Çalıştır", systemImage: "play.fill") }
+                        Button { sessions.launch(program) } label: { Label(program.isInstaller ? "Kur" : "Çalıştır", systemImage: program.isInstaller ? "square.and.arrow.down" : "play.fill") }
                         Button { detail = program } label: { Label("Ayrıntılar", systemImage: "info.circle") }
                         Button { openInFiles(program.folderURL) } label: { Label("Klasörü göster", systemImage: "folder") }
                         Divider()
@@ -104,14 +106,14 @@ struct ProgramCard: View {
                 ProgramIcon(program: program, size: 48)
                 Spacer()
                 Button { sessions.launch(program) } label: {
-                    Image(systemName: "play.fill")
+                    Image(systemName: program.isInstaller ? "square.and.arrow.down.fill" : "play.fill")
                         .font(.system(size: 14, weight: .bold))
                         .frame(width: 34, height: 34)
                         .background(Color.accentColor, in: Circle())
                         .foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Çalıştır")
+                .accessibilityLabel(program.isInstaller ? "Kur" : "Çalıştır")
             }
             Text(program.name).font(.headline).lineLimit(1)
             Text(program.summary).font(.caption).foregroundStyle(.secondary).lineLimit(2, reservesSpace: true)
@@ -119,6 +121,8 @@ struct ProgramCard: View {
                 Badge(text: program.is64Bit ? "x64" : "x86", color: program.is64Bit ? .blue : .teal)
                 Badge(text: program.isGUI ? "GUI" : "Konsol", color: program.isGUI ? .orange : .teal)
                 if program.isSample { Badge(text: "Örnek", color: .purple) }
+                if program.isInstaller { Badge(text: "Kurulum", color: .green) }
+                if program.installedBySetup == true { Badge(text: "Kuruldu", color: .green) }
             }
         }
         .padding(14)
@@ -188,7 +192,7 @@ struct EmptyLibraryCard: View {
         VStack(spacing: 12) {
             Image(systemName: "shippingbox.and.arrow.backward.fill").font(.system(size: 44)).foregroundStyle(.tint)
             Text("Bilgisayar programlarını buraya ekleyin").font(.title3.weight(.semibold))
-            Text("Bir .exe dosyasını veya program klasörünü seçin ya da Dosyalar uygulamasından sürükleyip bırakın. Programlar C:\\Program Files altına kurulur.")
+            Text("Bir .exe dosyasını, kurulum dosyasını (setup.exe) veya program klasörünü seçin ya da Dosyalar uygulamasından sürükleyip bırakın. Kurulum sihirbazları çalışır; kurulan programlar kitaplığa kendiliğinden eklenir.")
                 .multilineTextAlignment(.center).foregroundStyle(.secondary)
             Button(action: action) { Label("Program Ekle", systemImage: "plus") }.buttonStyle(.borderedProminent)
         }

@@ -39,8 +39,17 @@ private let soulMessageBoxCallback: SoulMessageBoxFn = { ctx, title, text, type 
                                       type: type)
 }
 
-private let soulOpenURLCallback: SoulOpenURLFn = { _, url in
-    guard let url, let link = URL(string: String(cString: url)) else { return }
+private let soulOpenURLCallback: SoulOpenURLFn = { ctx, url in
+    guard let url else { return }
+    let text = String(cString: url)
+    // documents a program opens (ShellExecute) are shown with Quick Look; links go to the browser
+    if text.hasPrefix("file://"), let ctx {
+        let file = URL(fileURLWithPath: String(text.dropFirst(7)))
+        let session = Unmanaged<EngineSession>.fromOpaque(ctx).takeUnretainedValue()
+        DispatchQueue.main.async { session.previewURL = file }
+        return
+    }
+    guard let link = URL(string: text) else { return }
     DispatchQueue.main.async { UIApplication.shared.open(link) }
 }
 
@@ -64,6 +73,8 @@ final class EngineSession: ObservableObject, Identifiable {
     @Published private(set) var stats = SoulStats()
     @Published private(set) var jitEnabled = false
     @Published var messageBox: MessageBoxRequest?
+    /// A document the program asked Explorer to open (ShellExecute); shown with Quick Look.
+    @Published var previewURL: URL?
     /// Windows of a graphical (GUI) program.
     let gui = GuiModel()
     /// Used by automated test runs: MessageBoxes are answered with the first choice.
@@ -163,6 +174,8 @@ final class EngineSession: ObservableObject, Identifiable {
 
     private func finish(code: Int32, error: String, stats final: SoulStats) {
         flushOutput()
+        let ended = program
+        Task { @MainActor in ProgramLibrary.shared.programEnded(ended) } // an installer may have added programs
         gui.stop()
         statsTimer?.invalidate()
         statsTimer = nil

@@ -28,10 +28,15 @@ struct ProgramDetailView: View {
                         sessions.launch(p)
                         dismiss()
                     } label: {
-                        Label("Çalıştır", systemImage: "play.fill").frame(maxWidth: .infinity)
+                        Label(program.isInstaller ? "Kur" : "Çalıştır", systemImage: program.isInstaller ? "square.and.arrow.down.fill" : "play.fill")
+                            .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+                    if program.isInstaller {
+                        Label("Kurulum sihirbazı açılır; kurulan programlar bittiğinde kitaplığa otomatik eklenir.", systemImage: "info.circle")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 if let note = program.compatibilityNote {
                     Section { Label(note, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
@@ -50,7 +55,8 @@ struct ProgramDetailView: View {
                 Section("Bilgiler") {
                     LabeledContent("Windows yolu", value: program.windowsPath)
                     LabeledContent("Mimari", value: program.is64Bit ? "x86-64 (AMD64)" : "x86 (32-bit)")
-                    LabeledContent("Tür", value: program.isGUI ? "Grafik arayüz (GUI)" : "Konsol")
+                    LabeledContent("Tür", value: program.isInstaller ? "Kurulum programı (\(program.installerKind ?? ""))" : program.isGUI ? "Grafik arayüz (GUI)" : "Konsol")
+                    if program.installedBySetup == true { LabeledContent("Kaynak", value: "Kurulum ile yüklendi") }
                     LabeledContent("Eklenme", value: program.addedAt.formatted(date: .abbreviated, time: .shortened))
                     if let last = program.lastRun {
                         LabeledContent("Son çalıştırma", value: last.formatted(date: .abbreviated, time: .shortened))

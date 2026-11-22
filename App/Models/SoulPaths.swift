@@ -19,12 +19,38 @@ enum SoulPaths {
     static var system32: URL { driveC.appendingPathComponent("windows/system32", isDirectory: true) }
     static var icons: URL { root.appendingPathComponent("Icons", isDirectory: true) }
     static var libraryFile: URL { root.appendingPathComponent("library.json") }
+    /// Setup programs the user adds are kept here (C:\users\soul\Downloads).
+    static var downloads: URL { driveC.appendingPathComponent("users/soul/Downloads", isDirectory: true) }
+    /// Folders where installers put their shortcuts (Start Menu and desktops).
+    static var shortcutFolders: [URL] {
+        ["ProgramData/Microsoft/Windows/Start Menu/Programs",
+         "users/soul/AppData/Roaming/Microsoft/Windows/Start Menu/Programs",
+         "users/soul/Desktop", "users/Public/Desktop"].map { driveC.appendingPathComponent($0, isDirectory: true) }
+    }
+
+    /// "C:\Program Files\App\app.exe" -> the file in drive_c (names compared case-insensitively,
+    /// like Windows does). nil when it does not exist.
+    static func hostURL(forWindowsPath win: String) -> URL? {
+        var path = win.replacingOccurrences(of: "/", with: "\\")
+        if path.count >= 2, path[path.index(after: path.startIndex)] == ":" { path = String(path.dropFirst(2)) }
+        let parts = path.split(separator: "\\").map(String.init).filter { !$0.isEmpty && $0 != "." }
+        var current = driveC
+        let fm = FileManager.default
+        for part in parts {
+            let direct = current.appendingPathComponent(part)
+            if fm.fileExists(atPath: direct.path) { current = direct; continue }
+            guard let names = try? fm.contentsOfDirectory(atPath: current.path),
+                  let match = names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame }) else { return nil }
+            current = current.appendingPathComponent(match)
+        }
+        return current
+    }
 
     static func ensure() {
         let fm = FileManager.default
         for dir in [root, driveC, programFiles, system32, icons,
                     driveC.appendingPathComponent("users/soul/Documents", isDirectory: true),
-                    driveC.appendingPathComponent("users/soul/Temp", isDirectory: true)] {
+                    driveC.appendingPathComponent("users/soul/Temp", isDirectory: true), downloads] {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
     }

@@ -18,6 +18,7 @@ final class ProgramLibrary: ObservableObject {
         SoulPaths.ensure()
         load()
         installSamplesIfNeeded()
+        _ = scanShortcuts()
     }
 
     // MARK: persistence
@@ -130,8 +131,18 @@ final class ProgramLibrary: ObservableObject {
             return findExecutables(in: dest).compactMap { makeProgram(at: $0) }
         }
         let ext = source.pathExtension.lowercased()
+        if ext == "msi" {
+            throw NSError(domain: "Soul", code: 3, userInfo: [NSLocalizedDescriptionKey: "MSI (Windows Installer) paketleri henüz desteklenmiyor. Programın .exe kurulum dosyasını deneyin."])
+        }
         guard ext == "exe" else {
             throw NSError(domain: "Soul", code: 2, userInfo: [NSLocalizedDescriptionKey: "Yalnızca .exe dosyaları veya program klasörleri kurulabilir. ZIP arşivlerini önce Dosyalar uygulamasında açın."])
+        }
+        // A setup program is kept in C:\users\soul\Downloads; what it installs goes to Program Files.
+        if installerKind(at: source) != nil {
+            let dest = SoulPaths.downloads.appendingPathComponent(source.lastPathComponent)
+            try? fm.removeItem(at: dest)
+            try fm.copyItem(at: source, to: dest)
+            return [makeProgram(at: dest)].compactMap { $0 }
         }
         let base = source.deletingPathExtension().lastPathComponent
         let dir = SoulPaths.uniqueDirectory(in: SoulPaths.programFiles, name: base)
@@ -175,6 +186,8 @@ final class ProgramLibrary: ObservableObject {
         p.importsSummary = withUnsafeBytes(of: info.imports) { raw in
             String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
         }
+        if !sample { p.installerKind = installerKind(at: url) }
+        if p.isInstaller && summary.isEmpty { p.summary = "Kurulum programı (\(p.installerKind ?? "")) — kurulan programlar kitaplığa eklenir" }
         if p.summary.isEmpty {
             let arch = p.is64Bit ? "x64" : "x86, 32-bit"
             p.summary = p.compatibilityNote ?? (info.valid == 0 ? "Bilgisayar programı" : info.is_gui != 0 ? "Pencereli bilgisayar programı (\(arch))" : "Konsol programı (\(arch))")
@@ -191,6 +204,68 @@ final class ProgramLibrary: ObservableObject {
             let data = Data(bytes: buf, count: len)
             soul_free(buf)
             try? data.write(to: p.iconURL)
+        }
+    }
+
+    // MARK: installers
+
+    /// Recognizes setup programs by their name or by the installer engine inside the file.
+    nonisolated static func installerKind(at url: URL) -> String? {
+        let name = url.deletingPathExtension().lastPathComponent.lowercased()
+        if name.hasPrefix("unins") || name.hasPrefix("uninst") { return nil }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let head = (try? handle.read(upToCount: 8 << 20)) ?? Data()
+        let signatures: [(String, String)] = [("Inno Setup Setup Data", "Inno Setup"), ("Nullsoft Install System", "NSIS"),
+                                              ("NullsoftInst", "NSIS"), ("InstallShield", "InstallShield"), (".wixburn", "WiX"),
+                                              (";!@Install@!UTF-8!", "7-Zip SFX"), ("Setup Factory", "Setup Factory"),
+                                              ("WiseMain", "Wise"), ("InstallAware", "InstallAware")]
+        for (sig, kind) in signatures where head.range(of: Data(sig.utf8)) != nil { return kind }
+        if name.contains("setup") || name.contains("install") { return "Kurulum" }
+        return nil
+    }
+
+    /// Adds the programs installers created shortcuts for (Start Menu, desktop). Returns the new ones.
+    @discardableResult
+    func scanShortcuts() -> [WinProgram] {
+        let fm = FileManager.default
+        var added: [WinProgram] = []
+        for folder in SoulPaths.shortcutFolders {
+            guard let en = fm.enumerator(at: folder, includingPropertiesForKeys: nil) else { continue }
+            for case let url as URL in en where url.pathExtension.lowercased() == "lnk" {
+                var info = SoulLnkInfo()
+                guard url.path.withCString({ soul_lnk_read($0, &info) }) == 0 else { continue }
+                let target = withUnsafeBytes(of: info.target) { raw in String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self) }
+                guard target.lowercased().hasSuffix(".exe"), let host = SoulPaths.hostURL(forWindowsPath: target),
+                      let rel = SoulPaths.relativeToDriveC(host) else { continue }
+                let exeName = host.deletingPathExtension().lastPathComponent.lowercased()
+                if exeName.hasPrefix("unins") || exeName.hasPrefix("uninst") { continue }
+                if programs.contains(where: { $0.relativePath.caseInsensitiveCompare(rel) == .orderedSame }) || added.contains(where: { $0.relativePath == rel }) { continue }
+                let title = url.deletingPathExtension().lastPathComponent
+                let args = withUnsafeBytes(of: info.arguments) { raw in String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self) }
+                guard var p = Self.makeProgram(relativePath: rel, name: title, args: args) else { continue }
+                p.installedBySetup = true
+                p.installerKind = nil
+                added.append(p)
+            }
+        }
+        for p in added { register(p) }
+        if !added.isEmpty { save() }
+        return added
+    }
+
+    /// Called when a program ends: an installer may have added programs.
+    func programEnded(_ program: WinProgram) {
+        let added = scanShortcuts()
+        if !added.isEmpty {
+            let names = added.map(\.name).joined(separator: ", ")
+            banner = added.count == 1 ? "Kuruldu: \(names) kitaplığa eklendi." : "Kuruldu: \(names) kitaplığa eklendi."
+        } else if program.isInstaller {
+            // installers without shortcuts: look for new programs in Program Files
+            let before = Set(programs.map(\.relativePath))
+            rescan()
+            let new = programs.filter { !before.contains($0.relativePath) }
+            banner = new.isEmpty ? "Kurulum bitti." : "Kuruldu: \(new.map(\.name).joined(separator: ", ")) kitaplığa eklendi."
         }
     }
 
