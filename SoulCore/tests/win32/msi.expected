@@ -1,0 +1,83 @@
+msi test
+== sample.msi ==
+state before: -1
+install: 0
+ui: initialize=yes actionstart=yes progress=yes errors=0
+readme.txt: Merhaba Soul!|Bu bir deneme metin dosyasidir.
+blob.bin size: 100000
+data\ek.txt: Ic dizindeki dosya
+reg Yol: C:\Program Files (x86)\Soul Örnek\
+reg Sayi: dword 42
+reg Kisayol: dword 1
+shortcut: 1
+state after: 5
+name: 0 'Soul Örnek Uygulama' len=19
+version: 0 '1.2.3'
+publisher: 0 'Soul Yazilim'
+small buffer: 234 need=5
+unknown property: 1608
+enum found: 1
+uninstall key: 1
+uninstall DisplayName: Soul Örnek Uygulama
+uninstall UninstallString: MsiExec.exe /X{5777B2F1-FBEE-4B87-9C3D-79BC72E3C3E8}
+uninstall WindowsInstaller: dword 1
+component path: 3 C:\Program Files (x86)\Soul Örnek\readme.txt
+feature state: 3
+open database: 0
+open view: 0
+execute: 0
+  file ekTxt ek.txt size=19 fields=3
+  file readmeTxt readme.txt size=46 fields=3
+  file blobBin blob.bin size=100000 fields=3
+column 2: FileName
+column 3 type: i4
+ProductName: Soul Örnek Uygulama
+bad query: 1615
+summary 0 template: Intel;1033 (type 30)
+summary author: Soul Yazilim
+open package: 0
+session ProductName: Soul Örnek Uygulama
+ProgramFilesFolder: C:\Program Files (x86)\
+VersionNT: 603
+cond MYPROP="abc": 1
+cond false: 0
+cond syntax: 3
+format: bir -> abc -> 2
+uninstall: 0
+readme exists: 0
+data dir exists: 0
+install dir exists: 0
+menu dir exists: 0
+reg Yol: (yok)
+reg Sayi: (yok)
+reg Kisayol: (yok)
+uninstall key: 0
+uninstall DisplayName: (anahtar yok)
+state: -1
+uninstall again: 1605
+== ca.msi ==
+  ui error: Windows surumu cok eski.
+install with failing launch condition: 1603 errors=1 state=-1
+install: 0 errors=0
+hello.txt exists: 1
+tool.exe exists: 1
+yes.txt exists: 1
+nope.txt exists: 0
+ca_imm.txt: in=hello out=dll:hello sched=0
+ca_def.txt: data=dll:hello sched=1
+ca_exe.txt: exe:hello
+state: 5
+uninstall: 0
+hello.txt exists: 0
+tool.exe exists: 0
+yes.txt exists: 0
+nope.txt exists: 0
+ca_imm.txt exists: 0
+install dir exists: 0
+state: -1
+== msiexec ==
+msiexec /i /qn: 0 readme exists: 1 state: 5
+msiexec /x /qn: 0 readme exists: 0 state: -1
+msiexec /i INSTALLDIR: 0 readme exists: 1
+msiexec /x package: 0 readme exists: 0 dir exists: 0
+msiexec /x again: 1605

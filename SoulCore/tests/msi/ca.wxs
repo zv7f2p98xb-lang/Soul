@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Soul CA Test" Language="1033" Codepage="1252" Version="2.0.0"
+           Manufacturer="Soul Yazilim" UpgradeCode="7C1F7A6B-4D2E-4E6C-8B8F-2A3B4C5D6E7F">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" Description="Soul ozel eylem testi" />
+    <Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" />
+    <Binary Id="CaDll" SourceFile="ca/msi_ca.dll" />
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLDIR" Name="SoulCA">
+          <Component Id="CompMain" Guid="22222222-3333-4444-5555-666666666601">
+            <File Id="helloTxt" Name="hello.txt" Source="ca/hello.txt" KeyPath="yes" />
+            <File Id="toolExe" Name="tool.exe" Source="ca/tool.exe" />
+          </Component>
+          <Component Id="CompNo" Guid="22222222-3333-4444-5555-666666666602">
+            <File Id="nopeTxt" Name="nope.txt" Source="ca/nope.txt" KeyPath="yes" />
+          </Component>
+          <Component Id="CompYes" Guid="22222222-3333-4444-5555-666666666603">
+            <File Id="yesTxt" Name="yes.txt" Source="ca/yes.txt" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="Main" Title="Main" Level="1">
+      <ComponentRef Id="CompMain" /><ComponentRef Id="CompNo" /><ComponentRef Id="CompYes" />
+    </Feature>
+    <Condition Message="Windows surumu cok eski.">VersionNT >= 500</Condition>
+    <CustomAction Id="SetIn" Property="CA_IN" Value="hello" />
+    <CustomAction Id="CaImm" BinaryKey="CaDll" DllEntry="CaImmediate" Execute="immediate" Return="check" />
+    <CustomAction Id="CaDeferred" BinaryKey="CaDll" DllEntry="CaDeferred" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="RunTool" Property="UNUSED" Value="x" />
+    <CustomAction Id="SetDefData" Property="CaDeferred" Value="[INSTALLDIR]|[CA_OUT]" />
+    <InstallExecuteSequence>
+      <Custom Action="SetIn" Sequence="750">NOT REMOVE</Custom>
+      <Custom Action="CaImm" Sequence="1110">NOT REMOVE</Custom>
+      <Custom Action="SetDefData" Sequence="1120">NOT REMOVE</Custom>
+      <Custom Action="CaDeferred" Sequence="4100">NOT REMOVE</Custom>
+      <Custom Action="RunTool" Sequence="6700">NOT REMOVE</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

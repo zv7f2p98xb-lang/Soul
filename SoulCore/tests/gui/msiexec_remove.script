@@ -1,0 +1,8 @@
+# Full UI of msiexec.exe /x: confirmation page -> Kaldır -> progress -> finish page -> Son.
+waitwin 1
+wait 300
+expect 0 Windows Installer
+click 335 249
+wait 1500
+click 335 249
+wait 500

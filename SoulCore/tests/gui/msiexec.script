@@ -1,0 +1,8 @@
+# Full UI of msiexec.exe: welcome page -> Kur -> progress -> finish page -> Son (installs tests/msi/sample.msi).
+waitwin 1
+wait 300
+expect 0 Windows Installer
+click 335 249
+wait 1500
+click 335 249
+wait 500
