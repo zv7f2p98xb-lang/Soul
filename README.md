@@ -54,6 +54,7 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86)
 ## Kullanım
 
 - **Program ekle (+):** bir `.exe` ya da program klasörü (DLL'leri/verileriyle) seçin, Dosyalar'dan sürükleyip bırakın ya da Dosyalar'da `.exe`'ye "Soul ile aç" deyin. Program `C:\Program Files\<Ad>\` altına kurulur.
+- **Kurulum dosyaları (setup.exe):** Inno Setup, NSIS ve benzeri kurulum programları tanınır, *Kurulum Dosyaları* bölümünde **Kur** düğmesiyle görünür. Kurulum sihirbazı normal bilgisayardaki gibi açılır (dil seçimi, lisans, klasör, bileşenler, ilerleme, bitiş); bittiğinde Başlat menüsü/masaüstü kısayolları taranır ve kurulan programlar kitaplığa **kendiliğinden eklenir**. Programların açtığı belgeler (beni oku, yardım sayfaları) Quick Look ile gösterilir.
 - **C: sürücüsü:** Dosyalar › iPad'imde › Soul › Soul › `drive_c`. Programların yazdığı dosyalar buradadır; buraya kopyaladığınız programları *C: sürücüsünü tara* ile kitaplığa ekleyebilirsiniz.
 - **Pencereli programlar:** program pencereleri bir masaüstünde gösterilir ve ekrana sığacak şekilde ölçeklenir. Dokunma sol tıktır (sürükleme = basılı tutup çekme), **uzun basış sağ tıktır**, iki parmakla kaydırma fare tekerleğidir; araç çubuğundaki *Sağ tık* modu tüm dokunuşları sağ tıka çevirir. iPad'e bağlı fare/izleme dörtgeni ve donanım klavyesi doğrudan çalışır (⌘ kısayolları Ctrl olarak gönderilir). Metin kutusuna dokununca ekran klavyesi açılır; *Klavye* düğmesiyle istendiğinde de açılabilir. Yeniden boyutlandırılabilir pencerelerde ⤢ düğmesi pencereyi ekran boyutuna getirir. Programın `printf` çıktısı *Konsol çıktısı* sayfasındadır.
 - **Konsol:** çıktı renkli gösterilir, alt satırdan programa klavye girdisi gönderilir; *Ctrl+Z* girdi sonudur. Üst çubukta çalışma süresi, MIPS, JIT oranı ve API çağrısı sayısı görünür.
@@ -65,12 +66,14 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86)
 |---|---|
 | 64-bit (x64) ve 32-bit (x86) programlar, ikisi de JIT ile (MinGW, MSVC/UCRT) | Direct3D 9/11/12, Vulkan, OpenGL 2+ gölgelendiricileri (GLSL) |
 | OpenGL 1.x 3B grafik (WGL, sabit işlevli çizim hattı, doku, ışık, sis, saydamlık) | 3B grafiğin Metal (GPU) arka ucu — şimdilik CPU'da çizilir |
-| Pencereli programlar: user32 pencereleri, GDI, denetimler, menüler, diyaloglar, Dosya Aç/Kaydet | Ortak denetimlerin çoğu (ağaç/liste görünümü, sekmeler, araç çubukları) |
-| Dosya/klasör API'leri, ortam değişkenleri, zaman | .NET programları, `.msi` kurulumları |
-| printf/scanf ailesi, C++ STL (statik libstdc++) | Alt süreç başlatma (`CreateProcess`, `system`) |
+| Pencereli programlar: user32 pencereleri, GDI, denetimler, menüler, diyaloglar, Dosya Aç/Kaydet; ortak denetimler (liste/ağaç görünümü, sekmeler, araç çubuğu, başlık, up-down, SysLink, görüntü listeleri), RichEdit (RTF) | GDI+ (gdiplus), Direct2D/DirectWrite |
+| Kurulum programları: Inno Setup (yükleyici + kurulum süreci), NSIS (eklentileriyle); kısayollar (IShellLink, .lnk), INI dosyaları, SHFileOperation | `.msi` (Windows Installer) kurulumları, InstallShield |
+| Birden çok süreç: `CreateProcess`, `ShellExecute(Ex)`, borular, süreçler arası `SendMessage`/`WM_COPYDATA`; 32-bit ve 64-bit programlar birbirini başlatabilir | .NET programları |
+| Dosya/klasör API'leri, ortam değişkenleri, zaman; Delphi (VCL) ve MFC programları | |
+| printf/scanf ailesi, C++ STL (statik libstdc++) | |
 | setjmp/longjmp, TLS, programla gelen x64/x86 DLL'ler; 32-bit programlarda C++ istisnaları ve SEH (fs:[0] zinciri, RaiseException, RtlUnwind, sıfıra bölme yakalama — Delphi/MSVC tarzı) | 64-bit programlarda C++ istisnaları (SEH unwind tabloları), AVX |
 | MessageBox, renkli konsol (SetConsoleTextAttribute) | Ağ (Winsock), ses |
-| Kalıcı kayıt defteri (programların ayarları korunur), web bağlantıları Safari'de açılır | Kurulum sihirbazları (Inno Setup/NSIS alt süreç başlatır), başka program başlatma |
+| Kalıcı kayıt defteri (programların ayarları korunur), web bağlantıları Safari'de açılır | |
 | CreateThread, kritik bölge, SRW, koşul değişkeni, olay/mutex/semafor | Gerçek paralel çalışma (iş parçacıkları sırayla çalışır) |
 
 Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 → Metal) yığınını kullanır; Soul aynı temel fikri (JIT + API taklidi + grafik çeviri katmanı) sıfırdan, küçük bir çekirdekle uygular.
@@ -93,7 +96,11 @@ Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 �
 
 OpenGL ön yüzü (`opengl.c`) matris yığınlarını, `glBegin/glEnd` ve köşe dizilerini, köşe başına ışıklandırmayı, sisi, çoklu dokuyu, görüntüleme listelerini, `glPushAttrib`'i ve GLU (perspektif, `gluLookAt`, küre/silindir/disk, mipmap) işlevlerini uygular; `SwapBuffers` kareyi pencereye aktarır ve ekran yenileme hızına (60 FPS) göre bekler. Çizim hattı, ön yüzlerden bağımsız bir arayüz (`sg_triangles/sg_lines/sg_points`) sunar; bu sayede Direct3D ön yüzü ve Metal (GPU) arka ucu aynı yapıya eklenebilir. Madeira'nın kullandığı DXMT ölçeğine (Direct3D 11 + gölgelendirici derleyicisi → Metal) ulaşmak çok aşamalı bir yol: sıradaki adımlar Direct3D 9 sabit işlevli ön yüz, Metal arka ucu ve gölgelendirici (DXBC/GLSL) çevirisi.
 
-Yol haritası: Direct3D 9 → Metal arka ucu → gölgelendirici çevirisi (Direct3D 11), ses (waveOut/XAudio2), ağ, ortak denetimler.
+Yol haritası: ağ (Winsock, WinINet/WinHTTP), ses (waveOut/XAudio2), GDI+, `.msi` kurulumları, Direct3D 9 → Metal arka ucu → gölgelendirici çevirisi (Direct3D 11), .NET.
+
+### Birden çok süreç
+
+Kurulum programları genelde başka programlar başlatır (Inno Setup'ın yükleyicisi `setup.tmp`'yi çalıştırır, kurulumlar bitince kurulan programı açar). Soul her Windows sürecine kendi adres alanını (32-bit programlar için ayrı 4 GB pencere), modüllerini, tutamaç tablosunu, ortamını ve C çalışma zamanı durumunu verir; pencereler, GDI nesneleri ve kayıt defteri Windows'taki gibi ortaktır. Tüm süreçlerin iş parçacıkları tek bir kilitle sırayla çalışır; kilit başka bir sürecin iş parçacığına geçtiğinde o sürecin özel değişkenleri yerine konur (`proc.c`). Her sürecin JIT önbelleği ayrıdır; bir pencerenin yordamı daima kendi sürecinde çalışır (başka süreçten gelen `SendMessage` sahibi iş parçacığına kuyruklanır).
 
 ## Geliştirme
 
