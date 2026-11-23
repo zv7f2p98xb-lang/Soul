@@ -163,6 +163,8 @@ final class EngineSession: ObservableObject, Identifiable {
         let args = strdup(program.arguments)
         defer { free(exe); free(drive); free(win); free(args) }
 
+        _ = soul_gpu_enable(settings.gpuAcceleration ? 1 : 0)
+
         var opts = SoulLaunchOptions()
         opts.exe_path = UnsafePointer(exe)
         opts.drive_c = UnsafePointer(drive)

@@ -3,11 +3,14 @@
 #include "sgpu_program.h"
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static uint64_t g_pixels;
-uint64_t sg_pixels_drawn(void) { return g_pixels; }
+// The Metal backend (sgpu_metal.m, weak: absent on Linux) counts fragments of GPU draws through visibility results.
+uint64_t sg_metal_pixels_drawn(void) __attribute__((weak));
+uint64_t sg_pixels_drawn(void) { return g_pixels + (sg_metal_pixels_drawn ? sg_metal_pixels_drawn() : 0); }
 
 #define NATTR (4 + 2 * SG_UNITS + 1)
 #define MAXPOLY 20
@@ -857,6 +860,9 @@ void sg_sample(const SgTexture *t, const SgSampler *s, const float coord[4], con
 // ---- backend dispatch ---------------------------------------------------------------------------------------------
 
 const SgBackend *sg_mirror_backend(void) __attribute__((weak));
+const SgBackend *sg_metal_backend(void) __attribute__((weak));          // sgpu_metal.m (Apple platforms only)
+void sg_metal_release_all(void) __attribute__((weak));
+int sg_metal_status(char *buf, size_t len) __attribute__((weak));
 
 static const SgBackend *g_backend;
 static int g_backend_init;
@@ -865,6 +871,7 @@ static void backend_init(void) {
     g_backend_init = 1;
     const char *e = getenv("SOUL_GPU");
     if (e && !strcmp(e, "mirror") && sg_mirror_backend) g_backend = sg_mirror_backend();
+    else if (e && !strcmp(e, "metal") && sg_metal_backend) g_backend = sg_metal_backend();   // NULL without a Metal device
 }
 static inline const SgBackend *be(void) {
     if (__builtin_expect(!g_backend_init, 0)) backend_init();
@@ -873,6 +880,35 @@ static inline const SgBackend *be(void) {
 
 void sg_backend_set(const SgBackend *b) { g_backend_init = 1; g_backend = b; }
 const SgBackend *sg_backend_get(void) { return be(); }
+
+// ---- public switch for the app (SoulCore.h) ---------------------------------------------------------------------------
+static int g_gpu_unavailable;   // soul_gpu_enable(1) found no Metal device
+static int is_metal(const SgBackend *b) { return b && b->name && !strcmp(b->name, "metal"); }
+
+int soul_gpu_enable(int on) {
+    (void)be();                                   // applies SOUL_GPU first: an explicit environment choice wins
+    const char *e = getenv("SOUL_GPU");
+    if (!(e && *e)) {
+        if (on) {
+            if (!g_backend && sg_metal_backend) {
+                const SgBackend *m = sg_metal_backend();
+                if (m) sg_backend_set(m); else g_gpu_unavailable = 1;
+            } else if (!sg_metal_backend) g_gpu_unavailable = 1;
+        } else if (is_metal(g_backend)) {
+            if (sg_metal_release_all) sg_metal_release_all();   // GPU copies back to CPU memory
+            sg_backend_set(NULL);
+        }
+    }
+    return is_metal(g_backend) ? 1 : 0;
+}
+
+int soul_gpu_status(char *buf, size_t len) {
+    if (!buf || !len) return is_metal(be()) ? 1 : 0;
+    if (is_metal(be()) && sg_metal_status) return sg_metal_status(buf, len);
+    const char *msg = g_gpu_unavailable ? "CPU çizici kullanılıyor (Metal bu aygıtta yok)" : "CPU çizici kullanılıyor";
+    snprintf(buf, len, "%s", msg);
+    return 0;
+}
 
 static int bk_draw(const SgBackend *b, SgTarget *t, const SgState *s, int prim, const SgVertex *v, int n) {
     if (!t->color || n <= 0) return 1;   // nothing to do: same as the CPU path

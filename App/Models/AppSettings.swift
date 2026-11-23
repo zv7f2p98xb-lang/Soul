@@ -46,6 +46,10 @@ final class AppSettings: ObservableObject {
     @Published var forceDarkMode: Bool {
         didSet { defaults.set(forceDarkMode, forKey: "forceDarkMode") }
     }
+    /// Draw OpenGL / Direct3D 9 with Metal (applied when a program starts).
+    @Published var gpuAcceleration: Bool {
+        didSet { defaults.set(gpuAcceleration, forKey: "gpuAcceleration") }
+    }
 
     private init() {
         defaults.register(defaults: [
@@ -55,6 +59,7 @@ final class AppSettings: ObservableObject {
             "verboseLog": false,
             "consoleFontSize": 14.0,
             "forceDarkMode": false,
+            "gpuAcceleration": true,
         ])
         // Older builds switched permanently to the legacy method after a crash during
         // JIT setup; on TXM iPads that yields a JIT that faults. Reset once.
@@ -68,5 +73,6 @@ final class AppSettings: ObservableObject {
         verboseLog = defaults.bool(forKey: "verboseLog")
         consoleFontSize = defaults.double(forKey: "consoleFontSize")
         forceDarkMode = defaults.bool(forKey: "forceDarkMode")
+        gpuAcceleration = defaults.bool(forKey: "gpuAcceleration")
     }
 }

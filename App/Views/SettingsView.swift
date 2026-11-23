@@ -4,6 +4,15 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var library: ProgramLibrary
     @EnvironmentObject private var jit: JITManager
+    @State private var gpuStatus = ""
+    private let gpuTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    private static func readGPUStatus() -> String {
+        let capacity = 256
+        var buf = [CChar](repeating: 0, count: capacity)
+        _ = soul_gpu_status(&buf, capacity)
+        return String(cString: buf)
+    }
 
     var body: some View {
         Form {
@@ -20,6 +29,17 @@ struct SettingsView: View {
             } footer: {
                 Text(settings.jitMethod.detail + " Yöntem ve bellek değişiklikleri bir sonraki JIT başlatmasında geçerli olur.")
             }
+
+            Section {
+                Toggle("GPU hızlandırma (Metal)", isOn: $settings.gpuAcceleration)
+                LabeledContent("Durum", value: gpuStatus)
+            } header: {
+                Text("Grafik")
+            } footer: {
+                Text("OpenGL ve Direct3D 9 çizimlerini GPU'da yapar. Değişiklik bir sonraki program başlatılışında geçerli olur.")
+            }
+            .onAppear { gpuStatus = Self.readGPUStatus() }
+            .onReceive(gpuTimer) { _ in gpuStatus = Self.readGPUStatus() }
 
             Section("Konsol") {
                 HStack {

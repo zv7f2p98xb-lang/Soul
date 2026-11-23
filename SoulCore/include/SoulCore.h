@@ -203,6 +203,13 @@ int soul_lnk_read(const char *host_path, SoulLnkInfo *out); // 0 on success
 // Needs no running process; also called when a session starts.
 int soul_install_system_files(const char *drive_c_host_path);
 
+// GPU (Metal) acceleration of the 3D pipeline (OpenGL / Direct3D 9). Call before a session starts.
+// soul_gpu_enable(1): use Metal when the device has it (the SOUL_GPU environment variable, when set, wins);
+// soul_gpu_enable(0): back to the CPU renderer. Returns 1 when the Metal backend is active afterwards.
+int soul_gpu_enable(int on);
+// Human-readable one-liner (UTF-8, Turkish): backend, device and counters. Returns 1 when Metal is active.
+int soul_gpu_status(char *buf, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
