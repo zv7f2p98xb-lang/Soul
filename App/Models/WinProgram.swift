@@ -49,7 +49,9 @@ struct WinProgram: Identifiable, Codable, Hashable {
             return "Bu program DirectX 10/11/12 veya Vulkan kullanıyor; bunlar henüz desteklenmiyor (Direct3D 9, OpenGL, pencere ve GDI çizimleri çalışır)."
         }
         if imports.contains("d3d9") {
-            return "Direct3D 9 yazılımla çiziliyor; ağır oyunlar yavaş olabilir."
+            // With Metal acceleration on (the default) there is nothing to warn about; the CPU renderer is the fallback.
+            if AppSettings.shared.gpuAcceleration { return nil }
+            return "GPU hızlandırma (Metal) kapalı: Direct3D 9 yazılımla çiziliyor; ağır oyunlar yavaş olabilir. Ayarlar'dan açabilirsiniz."
         }
         if imports.contains("mscoree") { return ".NET programları henüz desteklenmiyor." }
         return nil

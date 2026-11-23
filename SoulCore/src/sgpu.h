@@ -17,6 +17,7 @@
 //    front_ccw = 0 (clockwise triangles are front faces) and cull_back/cull_front as needed;
 //    this holds for top-left origin viewports too (NDC y up always maps to screen y down).
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 #define SG_UNITS 2
@@ -293,3 +294,15 @@ uint64_t sg_program_key(const SgState *s);
 void sg_texture_build_mips(SgTexture *tex);   // 2D, cube (6 faces) and volume; touches the texture
 void sg_texture_free(SgTexture *tex);         // releases (backend) and frees storage, zeroes the struct
 uint64_t sg_pixels_drawn(void);
+
+// Backend-independent statistics of the draws handed to the active backend (all zero without one).
+typedef struct SgStats {
+    const char *backend;                     // name of the active backend, "cpu" when none
+    uint64_t draws, draws_gpu, draws_declined;     // draw calls offered / accepted / declined (CPU rasterised them)
+    uint64_t clears, clears_gpu, clears_declined;
+    uint64_t syncs;                          // sg_target_sync calls that reached the backend (readbacks for the CPU)
+    char reasons[200];                       // the backend's own decline reasons, e.g. "texture=3 alloc=1" ("" when none)
+} SgStats;
+void sg_stats_get(SgStats *out);
+int sg_stats_format(char *buf, size_t len);   // "gpu stats: backend=metal draws=N gpu=N declined=N clears=N syncs=N [reasons: ...]"
+

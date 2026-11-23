@@ -99,11 +99,18 @@ jobs:
         run: SoulCore/tests/win32/run_win32_tests.sh
       - name: GUI tests (CPU, exact pixels, macOS)
         run: SoulCore/tests/gui/run_gui_tests.sh
-      - name: GPU tests, SOUL_GPU=metal (tolerance +-2) and frame rates
+      - name: GPU tests, SOUL_GPU=metal (tolerance +-2); fails when the GPU drew nothing
         run: |
           set -o pipefail
-          SOUL_GPU=metal SOUL_PIXEL_TOLERANCE=2 GPU_BENCH_SECONDS=10 SoulCore/tests/gpu/run_gpu_tests.sh 2>&1 | tee gpu-metal.log
-          { echo '### GPU frame rates (Metal vs CPU)'; echo '```'; sed -n '/--- frame rates/,/^gpu tests/p' gpu-metal.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          GPU_BENCH=0 SOUL_GPU=metal SOUL_PIXEL_TOLERANCE=2 SoulCore/tests/gpu/run_gpu_tests.sh 2>&1 | tee gpu-metal.log
+          { echo '### GPU test draw statistics (Metal)'; echo '```'; grep -E '^(PASS|FAIL|     gpu stats|     declined|gpu draws)' gpu-metal.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: GPU frame rates, CPU vs Metal (JIT on)
+        env:
+          SOUL_NO_JIT: "0"     # benchmark with the JIT; the gating steps above stay on the interpreter
+        run: |
+          set -o pipefail
+          GPU_TESTS=0 SOUL_GPU=metal SOUL_PIXEL_TOLERANCE=2 GPU_BENCH=1 GPU_BENCH_SECONDS=10 SoulCore/tests/gpu/run_gpu_tests.sh 2>&1 | tee gpu-bench.log
+          { echo '### GPU frame rates (Metal vs CPU, JIT on)'; echo '```'; sed -n '/--- frame rates/,/^gpu draws/p' gpu-bench.log | grep -v '^gpu draws'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: GPU tests, SOUL_GPU=mirror (exact)
         run: SOUL_GPU=mirror SOUL_PIXEL_TOLERANCE=0 GPU_BENCH=0 SoulCore/tests/gpu/run_gpu_tests.sh
       - name: Mirror backend over the whole win32 + GUI suites
@@ -136,6 +143,7 @@ jobs:
           name: macos-gpu-results
           path: |
             gpu-metal.log
+            gpu-bench.log
             SoulCore/build/gputests/run/*.out
             SoulCore/build/gputests/run/*.err
             SoulCore/build/gputests/run/*.ppm

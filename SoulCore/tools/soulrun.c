@@ -259,9 +259,10 @@ static void *script_main(void *arg) {
 }
 
 int main(int argc, char **argv) {
-    int jit = 1, verbose = 0, stats = 0, screen_w = 0, screen_h = 0, gpu_info = 0;
+    int jit = 1, verbose = 0, stats = 0, screen_w = 0, screen_h = 0, gpu_info = 0, gpu_stats = 0;
     { const char *nj = getenv("SOUL_NO_JIT"); if (nj && *nj && strcmp(nj, "0")) jit = 0; }   // same as --no-jit (for test scripts that cannot pass runner options)
     if (getenv("SOUL_PIXEL_TOLERANCE")) g_pixel_tol = atoi(getenv("SOUL_PIXEL_TOLERANCE"));
+    { const char *gs = getenv("SOUL_GPU_STATS"); if (gs && *gs && strcmp(gs, "0")) gpu_stats = 1; }   // same as --gpu-stats
     const char *drive = NULL;
     int i = 1;
     for (; i < argc && argv[i][0] == '-'; i++) {
@@ -275,6 +276,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--gui-script") && i + 1 < argc) g_script = argv[++i];
         else if (!strcmp(argv[i], "--pixel-tolerance") && i + 1 < argc) g_pixel_tol = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gpu-info")) gpu_info = 1;
+        else if (!strcmp(argv[i], "--gpu-stats")) gpu_stats = 1;
         else if (!strcmp(argv[i], "--audio") && i + 1 < argc) g_audio_path = argv[++i];
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &screen_w, &screen_h) != 2) return 2; }
         else { fprintf(stderr, "bilinmeyen seçenek %s\n", argv[i]); return 2; }
@@ -285,7 +287,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (i >= argc) {
-        fprintf(stderr, "kullanım: soulrun [--no-jit] [--pixel-tolerance N] [--gpu-info] [-v] [--stats] [--drive DIR] [--gui-script FILE] [--screen WxH] [--audio FILE.wav] program.exe [argümanlar...]\n");
+        fprintf(stderr, "kullanım: soulrun [--no-jit] [--pixel-tolerance N] [--gpu-info] [--gpu-stats] [-v] [--stats] [--drive DIR] [--gui-script FILE] [--screen WxH] [--audio FILE.wav] program.exe [argümanlar...]\n");
         return 2;
     }
     const char *exe = argv[i++];
@@ -347,6 +349,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[soulrun] çıkış=%d süre=%.3fs jit_blok=%llu jit_komut=%llu yorum_komut=%llu api=%llu kod=%lluKB\n",
                 code, s.seconds, (unsigned long long)s.jit_blocks, (unsigned long long)s.jit_insns,
                 (unsigned long long)s.interp_insns, (unsigned long long)s.api_calls, (unsigned long long)(s.jit_code_bytes / 1024));
+    }
+    if (gpu_stats) { // one line: how many draws the sgpu backend took (see sgpu.h SgStats)
+        char gl[512];
+        sg_stats_format(gl, sizeof gl);
+        fprintf(stderr, "%s\n", gl);
     }
     if (g_interp_profile) {
         for (int k = 0; k < 15; k++) {

@@ -857,12 +857,15 @@ void sg_sample(const SgTexture *t, const SgSampler *s, const float coord[4], con
     for (int k = 0; k < 4; k++) out[k] = acc[k] / (float)ntap;
 }
 
+static SgStats g_stats;   // counters of the draws offered to a backend (backend/reasons are filled in by sg_stats_get)
+
 // ---- backend dispatch ---------------------------------------------------------------------------------------------
 
 const SgBackend *sg_mirror_backend(void) __attribute__((weak));
 const SgBackend *sg_metal_backend(void) __attribute__((weak));          // sgpu_metal.m (Apple platforms only)
 void sg_metal_release_all(void) __attribute__((weak));
 int sg_metal_status(char *buf, size_t len) __attribute__((weak));
+int sg_metal_decline_summary(char *buf, size_t len) __attribute__((weak));
 
 static const SgBackend *g_backend;
 static int g_backend_init;
@@ -905,17 +908,40 @@ int soul_gpu_enable(int on) {
 int soul_gpu_status(char *buf, size_t len) {
     if (!buf || !len) return is_metal(be()) ? 1 : 0;
     if (is_metal(be()) && sg_metal_status) return sg_metal_status(buf, len);
+    if (be() && be()->name) {
+        snprintf(buf, len, "%s · %llu çizim GPU'da, %llu CPU'ya düştü", be()->name,
+                 (unsigned long long)g_stats.draws_gpu, (unsigned long long)g_stats.draws_declined);
+        return 0;
+    }
     const char *msg = g_gpu_unavailable ? "CPU çizici kullanılıyor (Metal bu aygıtta yok)" : "CPU çizici kullanılıyor";
     snprintf(buf, len, "%s", msg);
     return 0;
 }
 
+void sg_stats_get(SgStats *out) {
+    *out = g_stats;
+    const SgBackend *b = be();
+    out->backend = b && b->name ? b->name : "cpu";
+    out->reasons[0] = 0;
+    if (b && is_metal(b) && sg_metal_decline_summary) sg_metal_decline_summary(out->reasons, sizeof out->reasons);
+}
+
+int sg_stats_format(char *buf, size_t len) {
+    SgStats s; sg_stats_get(&s);
+    return snprintf(buf, len, "gpu stats: backend=%s draws=%llu gpu=%llu declined=%llu clears=%llu syncs=%llu%s%s%s",
+                    s.backend, (unsigned long long)s.draws, (unsigned long long)s.draws_gpu, (unsigned long long)s.draws_declined,
+                    (unsigned long long)s.clears, (unsigned long long)s.syncs,
+                    s.reasons[0] ? " (declined: " : "", s.reasons, s.reasons[0] ? ")" : "");
+}
+
 static int bk_draw(const SgBackend *b, SgTarget *t, const SgState *s, int prim, const SgVertex *v, int n) {
     if (!t->color || n <= 0) return 1;   // nothing to do: same as the CPU path
-    if (b->draw && b->draw(b->self, t, s, prim, v, n) == 0) return 1;
+    g_stats.draws++;
+    if (b->draw && b->draw(b->self, t, s, prim, v, n) == 0) { g_stats.draws_gpu++; return 1; }
+    g_stats.draws_declined++;
     return 0;
 }
-static void bk_fallback_pre(const SgBackend *b, SgTarget *t) { if (b->sync_to_cpu) b->sync_to_cpu(b->self, t); }
+static void bk_fallback_pre(const SgBackend *b, SgTarget *t) { if (b->sync_to_cpu) { g_stats.syncs++; b->sync_to_cpu(b->self, t); } }
 static void bk_fallback_post(const SgBackend *b, SgTarget *t) { if (b->cpu_wrote) b->cpu_wrote(b->self, t, 0, 0, 0, 0); }
 
 void sg_triangles(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
@@ -939,11 +965,13 @@ void sg_points(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
 void sg_clear_ex(SgTarget *t, const SgState *s, int flags, uint32_t argb, float z, uint8_t stencil) {
     const SgBackend *b = be();
     if (!b) { sg_cpu_clear_ex(t, s, flags, argb, z, stencil); return; }
-    if (b->clear && b->clear(b->self, t, s, flags, argb, z, stencil) == 0) return;
+    g_stats.clears++;
+    if (b->clear && b->clear(b->self, t, s, flags, argb, z, stencil) == 0) { g_stats.clears_gpu++; return; }
+    g_stats.clears_declined++;
     bk_fallback_pre(b, t); sg_cpu_clear_ex(t, s, flags, argb, z, stencil); bk_fallback_post(b, t);
 }
 
-void sg_target_sync(SgTarget *t) { const SgBackend *b = be(); if (b && b->sync_to_cpu) b->sync_to_cpu(b->self, t); }
+void sg_target_sync(SgTarget *t) { const SgBackend *b = be(); if (b && b->sync_to_cpu) { g_stats.syncs++; b->sync_to_cpu(b->self, t); } }
 void sg_target_cpu_wrote(SgTarget *t, int x, int y, int w, int h) { const SgBackend *b = be(); if (b && b->cpu_wrote) b->cpu_wrote(b->self, t, x, y, w, h); }
 void sg_target_gone(const void *color, const void *depth, const void *stencil) {
     const SgBackend *b = be();

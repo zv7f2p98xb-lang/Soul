@@ -1079,6 +1079,17 @@ int sg_metal_status(char *buf, size_t len) {
     return 1;
 }
 
+// Short per-reason summary of the declined draws/clears for the soulrun --gpu-stats line, e.g. "texture=3 alloc=1".
+int sg_metal_decline_summary(char *buf, size_t len) {
+    if (!buf || !len) return 0;
+    buf[0] = 0;
+    size_t rl = 0;
+    for (int i = 0; i < DR_COUNT; i++)
+        if (g_st.declined[i] && rl + 40 < len)
+            rl += (size_t)snprintf(buf + rl, len - rl, "%s%s=%llu", rl ? " " : "", kReason[i], g_st.declined[i]);
+    return (int)rl;
+}
+
 uint64_t sg_metal_pixels_drawn(void) {
     if (!g_dev) return 0;
     @autoreleasepool {

@@ -2,7 +2,7 @@
 
 Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86) programları** Apple Silicon (M serisi) iPad'lerde — örneğin **iPad Air M3** — çalıştıran bir iPadOS uygulamasıdır. Programın x86 / x86-64 makine kodu çalışma anında **ARM64 koduna çevrilir (JIT)** ve doğrudan M çipinde çalışır; Windows API çağrıları ise iOS üzerinde yeniden yazılmış bir uyumluluk katmanı tarafından karşılanır.
 
-> Durum: **konsol ve pencereli (GUI) programlar çalışıyor** — C/C++ (MinGW, MSVC/UCRT) programları; dosya, klavye, renkli konsol, çoklu iş parçacığı, **Win32 pencereleri, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler ve diyaloglar** ve **OpenGL 1.x ile 3B grafik** (Soul'un kendi grafik çeviri katmanı). **32-bit (x86) programlar da çalışıyor** — konsol, pencereli ve OpenGL, JIT dahil (x87 FPU komutları da ARM64'e çevrilir). **Direct3D 9** programları da çalışıyor (yazılımla çizilir; Metal ile GPU hızlandırma sırada), Direct3D 10/11/12 **henüz yok** — ayrıntılar aşağıda.
+> Durum: **konsol ve pencereli (GUI) programlar çalışıyor** — C/C++ (MinGW, MSVC/UCRT) programları; dosya, klavye, renkli konsol, çoklu iş parçacığı, **Win32 pencereleri, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler ve diyaloglar** ve **OpenGL 1.x ile 3B grafik** (Soul'un kendi grafik çeviri katmanı). **32-bit (x86) programlar da çalışıyor** — konsol, pencereli ve OpenGL, JIT dahil (x87 FPU komutları da ARM64'e çevrilir). **Direct3D 9** programları da çalışıyor; OpenGL ve Direct3D 9 çizimleri **Metal ile GPU'da** yapılabilir (açılıp kapatılabilir, GPU'nun üstlenemediği çizimler CPU'ya düşer), Direct3D 10/11/12 **henüz yok** — ayrıntılar aşağıda.
 >
 > Ölçüm (CI'da Apple Silicon üzerinde iOS simülatörü, JIT açık): JIT Benchmark örneği **329 milyon x86 komutunu 0,18 sn'de** çalıştırdı (~1,8 milyar komut/sn), yorumlayıcıya göre ~20 kat hızlı.
 
@@ -66,8 +66,8 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86)
 | Çalışır | Henüz çalışmaz |
 |---|---|
 | 64-bit (x64) ve 32-bit (x86) programlar, ikisi de JIT ile (MinGW, MSVC/UCRT) | Direct3D 10/11/12, Vulkan, OpenGL 2+ gölgelendiricileri (GLSL) |
-| OpenGL 1.x 3B grafik (WGL, sabit işlevli çizim hattı, doku, ışık, sis, saydamlık) | 3B grafiğin Metal (GPU) arka ucu — şimdilik CPU'da çizilir |
-| Direct3D 9 (`d3d9.dll`, yazılımla çizilir): sabit işlevli hat (dönüşüm, ışık, sis, doku aşamaları), gölgelendiriciler (köşe/piksel SM 1.1–3.0), DXT dahil doku biçimleri, küp/hacim dokuları, hedefe çizim, şablon, kesme/sis/karıştırma durumları, sorgular, durum blokları | MSAA, çoklu hedefe çizim (MRT), D3DX (`d3dx9_xx.dll`'yi oyunlar kendileri getirir; Soul sağlamaz), Metal ile GPU hızlandırma — ağır oyunlar yavaş olabilir |
+| OpenGL 1.x 3B grafik (WGL, sabit işlevli çizim hattı, doku, ışık, sis, saydamlık); Metal ile GPU hızlandırma, CPU çizici yedek | GPU köşe gölgelendiricileri (köşe işleme şimdilik CPU'da) ve ekrana sıfır kopyalı sunum |
+| Direct3D 9 (`d3d9.dll`; Metal ile GPU hızlandırma, CPU çizici yedek): sabit işlevli hat (dönüşüm, ışık, sis, doku aşamaları), gölgelendiriciler (köşe/piksel SM 1.1–3.0), DXT dahil doku biçimleri, küp/hacim dokuları, hedefe çizim, şablon, kesme/sis/karıştırma durumları, sorgular, durum blokları | MSAA, çoklu hedefe çizim (MRT), D3DX (`d3dx9_xx.dll`'yi oyunlar kendileri getirir; Soul sağlamaz) |
 | Pencereli programlar: user32 pencereleri, GDI, denetimler, menüler, diyaloglar, Dosya Aç/Kaydet; ortak denetimler (liste/ağaç görünümü, sekmeler, araç çubuğu, başlık, up-down, SysLink, görüntü listeleri), RichEdit (RTF) | Direct2D/DirectWrite |
 | Kurulum programları: Inno Setup (yükleyici + kurulum süreci), NSIS (eklentileriyle); kısayollar (IShellLink, .lnk), INI dosyaları, SHFileOperation | InstallShield, MSI'ın kendi diyalog tabloları, betik (VBScript/JScript) özel eylemleri |
 | Birden çok süreç: `CreateProcess`, `ShellExecute(Ex)`, borular, süreçler arası `SendMessage`/`WM_COPYDATA`; 32-bit ve 64-bit programlar birbirini başlatabilir | .NET programları |
@@ -96,14 +96,18 @@ Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 �
  │ homojen uzayda kırpma, perspektif-doğru enterpolasyon,   │
  │ derinlik/alfa testi, mipmap'li doku, sis, karıştırma     │
  └──────────────────────────────────────────────────────────┘
-              │ CPU arka ucu (bugün)        │ Metal arka ucu (sırada)
+        arka uç arayüzü (SgBackend): çizim / temizleme / eşitleme
+              │ CPU arka ucu (yedek)        │ Metal arka ucu (sgpu_metal.m)
               ▼                              ▼
      pencere çerçeve arabelleği       iPad GPU'su (Apple Silicon)
+     (+ sgpu_mirror.c: test arka ucu, SOUL_GPU=mirror)
 ```
 
-OpenGL ön yüzü (`opengl.c`) matris yığınlarını, `glBegin/glEnd` ve köşe dizilerini, köşe başına ışıklandırmayı, sisi, çoklu dokuyu, görüntüleme listelerini, `glPushAttrib`'i ve GLU (perspektif, `gluLookAt`, küre/silindir/disk, mipmap) işlevlerini uygular; `SwapBuffers` kareyi pencereye aktarır ve ekran yenileme hızına (60 FPS) göre bekler. Çizim hattı, ön yüzlerden bağımsız bir arayüz (`sg_triangles/sg_lines/sg_points`) sunar; Direct3D 9 ön yüzü (`d3d9*.c`) aynı arayüzü kullanır: sabit işlevli köşe hattını ve doku aşamalarını kendisi uygular, gölgelendirici modellerini 1.1–3.0 (köşe ve piksel) bir bayt kodu yorumlayıcısında (`d3d9_shader*.c`) çalıştırır ve piksel işlevi geri çağrısıyla sgpu'ya bağlar. Madeira'nın kullandığı DXMT ölçeğine (Direct3D 11 + gölgelendirici derleyicisi → Metal) ulaşmak çok aşamalı bir yol: sıradaki adımlar Metal arka ucu ve gölgelendirici (DXBC/GLSL) çevirisi.
+OpenGL ön yüzü (`opengl.c`) matris yığınlarını, `glBegin/glEnd` ve köşe dizilerini, köşe başına ışıklandırmayı, sisi, çoklu dokuyu, görüntüleme listelerini, `glPushAttrib`'i ve GLU (perspektif, `gluLookAt`, küre/silindir/disk, mipmap) işlevlerini uygular; `SwapBuffers` kareyi pencereye aktarır ve ekran yenileme hızına (60 FPS) göre bekler. Çizim hattı, ön yüzlerden bağımsız bir arayüz (`sg_triangles/sg_lines/sg_points`) sunar; Direct3D 9 ön yüzü (`d3d9*.c`) aynı arayüzü kullanır: sabit işlevli köşe hattını ve doku aşamalarını kendisi uygular, gölgelendirici modellerini 1.1–3.0 (köşe ve piksel) bir bayt kodu yorumlayıcısında (`d3d9_shader*.c`) çalıştırır ve piksel işlevi geri çağrısıyla sgpu'ya bağlar. Madeira'nın kullandığı DXMT ölçeğine (Direct3D 11 + gölgelendirici derleyicisi → Metal) ulaşmak çok aşamalı bir yol: sıradaki adım Direct3D 11 → Metal.
 
-Yol haritası: Metal arka ucu, .NET, Direct3D 11 (gölgelendirici çevirisi).
+**GPU arka uçları.** `sgpu.c` her çizimi etkin arka uca sunar; arka uç kabul etmezse (`-1`) çizim, aynı sonucu veren CPU çiziciyle yapılır, bu yüzden Metal her zaman güvenli bir yedekle çalışır. Arka uçlar: **CPU** (varsayılan, tam kapsam), **Metal** (`sgpu_metal.m`, `SOUL_GPU=metal`; uygulamada *Ayarlar → GPU hızlandırma (Metal)*) ve hata ayıklama için **mirror** (`sgpu_mirror.c`, `SOUL_GPU=mirror`: çizimi ayrı bir kopyada CPU koduyla yapar ve her 7. çizimi bilerek reddeder; arka uç arayüzünü ve geri düşme yolunu sınar). Piksel aşamasını (sabit işlevli hat, doku aşamaları, Direct3D 9 piksel gölgelendiricileri) **sgsl** çevirici (`sgsl*.c`) Metal Shading Language'e çevirir. Köşe işleme şimdilik CPU'da yapılır. `soulrun --gpu-stats` (ya da `SOUL_GPU_STATS=1`) çıkışta kaç çizimin GPU'ya verildiğini, kaçının reddedildiğini (Metal için nedenleriyle) tek satırda yazar; uygulamadaki GPU durumu satırı aynı sayıları gösterir. CPU ve Metal kare hızları performans ölçümü olarak CI işinin özetinde yazdırılır (bu belgede sayı verilmez).
+
+Yol haritası: .NET (wine-mono), Direct3D 11 → Metal; daha sonra GPU köşe gölgelendiricileri ve ekrana sıfır kopyalı sunum.
 
 ### Birden çok süreç
 
@@ -123,6 +127,9 @@ SoulCore/tests/win32/run_win32_tests.sh     # Win32 API, C++, iş parçacığı,
 SoulCore/tests/unit/run_unit_tests.sh        # inflate, MSI/CAB (LZX dahil), sgpu ve gölgelendirici motoru birim testleri (ASan)
 SoulCore/tests/msi/run_msi_tests.sh         # Windows Installer: msi.dll, msiexec sihirbazı
 SoulCore/tests/gui/run_gui_tests.sh         # pencere/denetim/diyalog/OpenGL/Direct3D 9 testleri, 64 ve 32-bit (betikle tıklama, yazma, menü)
+SoulCore/tests/gpu/run_mirror_tests.sh      # mirror GPU arka ucuyla tüm win32 + GUI testleri (Linux'ta da çalışır; çıktı CPU ile birebir aynı olmalı)
+SOUL_GPU=mirror SoulCore/tests/gpu/run_gpu_tests.sh   # GPU testleri + çizim istatistiği; GPU hiç çizim kabul etmezse başarısız olur
+SOUL_GPU=metal  SoulCore/tests/gpu/run_gpu_tests.sh   # yalnız macOS: Metal arka ucu (±2 renk toleransı) ve CPU/Metal kare hızı tablosu
 
 # Pencereli bir programı betikle sürmek ve ekran görüntüsü almak
 SoulCore/build/native/soulrun --gui-script betik.txt program.exe   # komutlar: waitwin, click, drag, key, text, menu, dump, pixel ...
