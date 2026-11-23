@@ -23,6 +23,8 @@ $CC -O2 -s -mwindows -o "$OUT/Yilan.exe" yilan.c
 $CC -O2 -s -mwindows -o "$OUT/MayinTarlasi.exe" mayin.c
 # 3D (OpenGL through Soul's graphics layer)
 $CC -O2 -s -mwindows -o "$OUT/Kup3B.exe" kup3b.c -lopengl32 -lglu32 -lm
+# 3D (Direct3D 9 through Soul's d3d9 layer; shader bytecode in kup3b_d3d9_shaders.h)
+$CC -O2 -s -mwindows -o "$OUT/Kup3BD3D9.exe" kup3b_d3d9.c -ld3d9 -lgdi32 -luser32 -lm
 # 32-bit (x86) builds: same programs through the 32-bit mode of the JIT
 CC32=i686-w64-mingw32-gcc
 $CC32 -O2 -s -o "$OUT/Benchmark32.exe" benchmark.c

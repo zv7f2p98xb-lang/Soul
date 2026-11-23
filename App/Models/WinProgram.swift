@@ -45,8 +45,11 @@ struct WinProgram: Identifiable, Codable, Hashable {
 
     var compatibilityNote: String? {
         let imports = importsSummary.lowercased()
-        if ["d3d9", "d3d10", "d3d11", "d3d12", "dxgi", "vulkan"].contains(where: { imports.contains($0) }) {
-            return "Bu program DirectX kullanıyor; Direct3D henüz desteklenmiyor (OpenGL, pencere ve GDI çizimleri çalışır)."
+        if ["d3d10", "d3d11", "d3d12", "dxgi", "vulkan"].contains(where: { imports.contains($0) }) {
+            return "Bu program DirectX 10/11/12 veya Vulkan kullanıyor; bunlar henüz desteklenmiyor (Direct3D 9, OpenGL, pencere ve GDI çizimleri çalışır)."
+        }
+        if imports.contains("d3d9") {
+            return "Direct3D 9 yazılımla çiziliyor; ağır oyunlar yavaş olabilir."
         }
         if imports.contains("mscoree") { return ".NET programları henüz desteklenmiyor." }
         return nil

@@ -381,7 +381,9 @@ static void raster_tri(SgTarget *t, const SgState *s, const Sv *v0, const Sv *v1
     for (int i = 0; i < 3; i++) {
         const Sv *a = v[(i + 1) % 3], *b = v[(i + 2) % 3];
         A[i] = a->y - b->y; B[i] = b->x - a->x; C[i] = a->x * b->y - a->y * b->x;
-        tl[i] = (A[i] > 0) || (A[i] == 0 && B[i] < 0); // top-left rule
+        // screen y grows downwards; B > 0 on a horizontal edge means the interior lies below it (a top edge).
+        // Direct3D (top-left origin) includes top and left edges; the GL path keeps its historical bottom-left tie.
+        tl[i] = s->vp_top_left ? ((A[i] > 0) || (A[i] == 0 && B[i] > 0)) : ((A[i] > 0) || (A[i] == 0 && B[i] < 0));
     }
     float lod = tex_lod(s, v0, v1, v2);
     float zbias = s->polygon_offset + s->depth_bias;

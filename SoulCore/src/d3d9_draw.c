@@ -8,10 +8,6 @@
 // do on Windows. Depth is a float; every depth format maps to the sgpu float depth + 8-bit stencil.
 #include "d3d9_priv.h"
 
-// sgpu includes pixel centres lying exactly on a bottom edge (not a top edge); D3D9's top-left rule is the other way
-// round vertically, so geometry is moved up by a tiny fraction of a pixel, which makes exact alignments come out right.
-#define Y_EPS (1.0f / 128.0f)
-
 // ---- small math ------------------------------------------------------------------------------------------------------
 static inline float sat(float v) { return v > 0 ? (v < 1 ? v : 1) : 0; }
 static void m4_mul(float *r, const float *a, const float *b) { // row vectors: r = a * b
@@ -366,7 +362,7 @@ static void ff_vertex(const DrawCtx *c, const VIn *in, SgVertex *o) {
         float rhw = in->pos[3];
         float w = rhw != 0 ? 1.0f / rhw : 1.0f;
         // screen position (D3D pixel centres at integers) -> clip space of the sgpu viewport (+0.5)
-        float sx = in->pos[0] + (c->noshift ? 0.0f : 0.5f), sy = in->pos[1] + (c->noshift ? 0.0f : 0.5f - Y_EPS * 0.5f);
+        float sx = in->pos[0] + (c->noshift ? 0.0f : 0.5f), sy = in->pos[1] + (c->noshift ? 0.0f : 0.5f);
         float nx = (sx - c->vpx) / c->vpw * 2.0f - 1.0f, ny = 1.0f - (sy - c->vpy) / c->vph * 2.0f;
         clip[0] = nx * w; clip[1] = ny * w; clip[2] = in->pos[2] * w; clip[3] = w;
         if (in->has_col[0]) memcpy(diff, in->col[0], 16);
@@ -876,7 +872,7 @@ uint32_t d9_draw(D9Dev *dev, int ptype, int base_vertex, uint32_t min_vertex, ui
     SgState sgs;
     fill_state(c, &sgs, &tg);
     c->vpx = (float)S->vp.x; c->vpy = (float)S->vp.y; c->vpw = (float)(S->vp.w ? S->vp.w : 1); c->vph = (float)(S->vp.h ? S->vp.h : 1);
-    c->shift_x = 1.0f / c->vpw; c->shift_y = (1.0f - Y_EPS) / c->vph;
+    c->shift_x = 1.0f / c->vpw; c->shift_y = 1.0f / c->vph;
     c->vp_h = c->vph;
     c->ps_size = rsf(S, 154);
 

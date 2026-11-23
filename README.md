@@ -2,7 +2,7 @@
 
 Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86) programları** Apple Silicon (M serisi) iPad'lerde — örneğin **iPad Air M3** — çalıştıran bir iPadOS uygulamasıdır. Programın x86 / x86-64 makine kodu çalışma anında **ARM64 koduna çevrilir (JIT)** ve doğrudan M çipinde çalışır; Windows API çağrıları ise iOS üzerinde yeniden yazılmış bir uyumluluk katmanı tarafından karşılanır.
 
-> Durum: **konsol ve pencereli (GUI) programlar çalışıyor** — C/C++ (MinGW, MSVC/UCRT) programları; dosya, klavye, renkli konsol, çoklu iş parçacığı, **Win32 pencereleri, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler ve diyaloglar** ve **OpenGL 1.x ile 3B grafik** (Soul'un kendi grafik çeviri katmanı). **32-bit (x86) programlar da çalışıyor** — konsol, pencereli ve OpenGL, JIT dahil (x87 FPU komutları da ARM64'e çevrilir). Direct3D oyunları **henüz yok** — ayrıntılar aşağıda.
+> Durum: **konsol ve pencereli (GUI) programlar çalışıyor** — C/C++ (MinGW, MSVC/UCRT) programları; dosya, klavye, renkli konsol, çoklu iş parçacığı, **Win32 pencereleri, GDI çizimi, düğme/metin kutusu/liste denetimleri, menüler ve diyaloglar** ve **OpenGL 1.x ile 3B grafik** (Soul'un kendi grafik çeviri katmanı). **32-bit (x86) programlar da çalışıyor** — konsol, pencereli ve OpenGL, JIT dahil (x87 FPU komutları da ARM64'e çevrilir). **Direct3D 9** programları da çalışıyor (yazılımla çizilir; Metal ile GPU hızlandırma sırada), Direct3D 10/11/12 **henüz yok** — ayrıntılar aşağıda.
 >
 > Ölçüm (CI'da Apple Silicon üzerinde iOS simülatörü, JIT açık): JIT Benchmark örneği **329 milyon x86 komutunu 0,18 sn'de** çalıştırdı (~1,8 milyar komut/sn), yorumlayıcıya göre ~20 kat hızlı.
 
@@ -59,18 +59,19 @@ Soul, bilgisayarlar (Windows PC) için derlenmiş **64-bit (x64) ve 32-bit (x86)
 - **C: sürücüsü:** Dosyalar › iPad'imde › Soul › Soul › `drive_c`. Programların yazdığı dosyalar buradadır; buraya kopyaladığınız programları *C: sürücüsünü tara* ile kitaplığa ekleyebilirsiniz.
 - **Pencereli programlar:** program pencereleri bir masaüstünde gösterilir ve ekrana sığacak şekilde ölçeklenir. Dokunma sol tıktır (sürükleme = basılı tutup çekme), **uzun basış sağ tıktır**, iki parmakla kaydırma fare tekerleğidir; araç çubuğundaki *Sağ tık* modu tüm dokunuşları sağ tıka çevirir. iPad'e bağlı fare/izleme dörtgeni ve donanım klavyesi doğrudan çalışır (⌘ kısayolları Ctrl olarak gönderilir). Metin kutusuna dokununca ekran klavyesi açılır; *Klavye* düğmesiyle istendiğinde de açılabilir. Yeniden boyutlandırılabilir pencerelerde ⤢ düğmesi pencereyi ekran boyutuna getirir. Programın `printf` çıktısı *Konsol çıktısı* sayfasındadır.
 - **Konsol:** çıktı renkli gösterilir, alt satırdan programa klavye girdisi gönderilir; *Ctrl+Z* girdi sonudur. Üst çubukta çalışma süresi, MIPS, JIT oranı ve API çağrısı sayısı görünür.
-- **Örnekler:** 3B — Küp 3B (OpenGL); pencereli — Çizim, Saat, Hesap Makinesi (GUI), Not Defteri, Yılan, Mayın Tarlası; konsol — Merhaba, Hesap Makinesi, Sayı Tahmin, Mandelbrot, JIT Benchmark, Sistem Bilgisi, İş Parçacıkları, C++ Demo.
+- **Örnekler:** 3B — Küp 3B (OpenGL), Küp 3B (Direct3D 9); pencereli — Çizim, Saat, Hesap Makinesi (GUI), Not Defteri, Yılan, Mayın Tarlası; konsol — Merhaba, Hesap Makinesi, Sayı Tahmin, Mandelbrot, JIT Benchmark, Sistem Bilgisi, İş Parçacıkları, C++ Demo.
 
 ## Uyumluluk
 
 | Çalışır | Henüz çalışmaz |
 |---|---|
-| 64-bit (x64) ve 32-bit (x86) programlar, ikisi de JIT ile (MinGW, MSVC/UCRT) | Direct3D 9/11/12, Vulkan, OpenGL 2+ gölgelendiricileri (GLSL) |
+| 64-bit (x64) ve 32-bit (x86) programlar, ikisi de JIT ile (MinGW, MSVC/UCRT) | Direct3D 10/11/12, Vulkan, OpenGL 2+ gölgelendiricileri (GLSL) |
 | OpenGL 1.x 3B grafik (WGL, sabit işlevli çizim hattı, doku, ışık, sis, saydamlık) | 3B grafiğin Metal (GPU) arka ucu — şimdilik CPU'da çizilir |
+| Direct3D 9 (`d3d9.dll`, yazılımla çizilir): sabit işlevli hat (dönüşüm, ışık, sis, doku aşamaları), gölgelendiriciler (köşe/piksel SM 1.1–3.0), DXT dahil doku biçimleri, küp/hacim dokuları, hedefe çizim, şablon, kesme/sis/karıştırma durumları, sorgular, durum blokları | MSAA, çoklu hedefe çizim (MRT), D3DX (`d3dx9_xx.dll`'yi oyunlar kendileri getirir; Soul sağlamaz), Metal ile GPU hızlandırma — ağır oyunlar yavaş olabilir |
 | Pencereli programlar: user32 pencereleri, GDI, denetimler, menüler, diyaloglar, Dosya Aç/Kaydet; ortak denetimler (liste/ağaç görünümü, sekmeler, araç çubuğu, başlık, up-down, SysLink, görüntü listeleri), RichEdit (RTF) | Direct2D/DirectWrite |
-| Kurulum programları: Inno Setup (yükleyici + kurulum süreci), NSIS (eklentileriyle); kısayollar (IShellLink, .lnk), INI dosyaları, SHFileOperation | InstallShield, LZX ile sıkıştırılmış `.msi` kabinleri, MSI'ın kendi diyalog tabloları, betik (VBScript/JScript) özel eylemleri |
+| Kurulum programları: Inno Setup (yükleyici + kurulum süreci), NSIS (eklentileriyle); kısayollar (IShellLink, .lnk), INI dosyaları, SHFileOperation | InstallShield, MSI'ın kendi diyalog tabloları, betik (VBScript/JScript) özel eylemleri |
 | Birden çok süreç: `CreateProcess`, `ShellExecute(Ex)`, borular, süreçler arası `SendMessage`/`WM_COPYDATA`; 32-bit ve 64-bit programlar birbirini başlatabilir | .NET programları |
-| Windows Installer (`.msi`): Soul'un `msiexec` sihirbazı, sessiz kurulum (`/qn`), kaldırma (`/x`), özel eylemler (DLL ve EXE), `msi.dll` API'si, MSZIP/depolanmış kabinler | |
+| Windows Installer (`.msi`): Soul'un `msiexec` sihirbazı, sessiz kurulum (`/qn`), kaldırma (`/x`), özel eylemler (DLL ve EXE), `msi.dll` API'si, MSZIP, LZX ve depolanmış kabinler | |
 | GDI+ (gdiplus): çizim, fırça/kalem, metin, görüntüler (BMP/PNG/GIF/JPEG/ICO okuma), bellek akışları | GDI+ metafile'ları, JPEG/GIF/TIFF kaydetme |
 | XAudio2 / X3DAudio (2.7–2.9): kaynak sesleri, tamponlar, döngüler, frekans oranı, alt karışımlar — iPad hoparlöründen | xWMA, ses efektleri (şimdilik doğrudan geçer) |
 | Dosya/klasör API'leri, ortam değişkenleri, zaman; Delphi (VCL) ve MFC programları | |
@@ -87,7 +88,7 @@ Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 �
 ### Grafik çeviri katmanı
 
 ```
- OpenGL 1.x (opengl32/glu32/WGL)   Direct3D 9 / 11 (sırada)
+ OpenGL 1.x (opengl32/glu32/WGL)   Direct3D 9 (d3d9)  ·  Direct3D 11 (sırada)
               │                              │
               ▼                              ▼
  ┌──────────────────────────────────────────────────────────┐
@@ -100,9 +101,9 @@ Madeira gibi projeler Steam oyunları için Wine + FEX-Emu + DXMT (Direct3D 11 �
      pencere çerçeve arabelleği       iPad GPU'su (Apple Silicon)
 ```
 
-OpenGL ön yüzü (`opengl.c`) matris yığınlarını, `glBegin/glEnd` ve köşe dizilerini, köşe başına ışıklandırmayı, sisi, çoklu dokuyu, görüntüleme listelerini, `glPushAttrib`'i ve GLU (perspektif, `gluLookAt`, küre/silindir/disk, mipmap) işlevlerini uygular; `SwapBuffers` kareyi pencereye aktarır ve ekran yenileme hızına (60 FPS) göre bekler. Çizim hattı, ön yüzlerden bağımsız bir arayüz (`sg_triangles/sg_lines/sg_points`) sunar; bu sayede Direct3D ön yüzü ve Metal (GPU) arka ucu aynı yapıya eklenebilir. Madeira'nın kullandığı DXMT ölçeğine (Direct3D 11 + gölgelendirici derleyicisi → Metal) ulaşmak çok aşamalı bir yol: sıradaki adımlar Direct3D 9 sabit işlevli ön yüz, Metal arka ucu ve gölgelendirici (DXBC/GLSL) çevirisi.
+OpenGL ön yüzü (`opengl.c`) matris yığınlarını, `glBegin/glEnd` ve köşe dizilerini, köşe başına ışıklandırmayı, sisi, çoklu dokuyu, görüntüleme listelerini, `glPushAttrib`'i ve GLU (perspektif, `gluLookAt`, küre/silindir/disk, mipmap) işlevlerini uygular; `SwapBuffers` kareyi pencereye aktarır ve ekran yenileme hızına (60 FPS) göre bekler. Çizim hattı, ön yüzlerden bağımsız bir arayüz (`sg_triangles/sg_lines/sg_points`) sunar; Direct3D 9 ön yüzü (`d3d9*.c`) aynı arayüzü kullanır: sabit işlevli köşe hattını ve doku aşamalarını kendisi uygular, gölgelendirici modellerini 1.1–3.0 (köşe ve piksel) bir bayt kodu yorumlayıcısında (`d3d9_shader*.c`) çalıştırır ve piksel işlevi geri çağrısıyla sgpu'ya bağlar. Madeira'nın kullandığı DXMT ölçeğine (Direct3D 11 + gölgelendirici derleyicisi → Metal) ulaşmak çok aşamalı bir yol: sıradaki adımlar Metal arka ucu ve gölgelendirici (DXBC/GLSL) çevirisi.
 
-Yol haritası: LZX kabinleri (`.msi`), Direct3D 9 → Metal arka ucu → gölgelendirici çevirisi (Direct3D 11), .NET.
+Yol haritası: Metal arka ucu, .NET, Direct3D 11 (gölgelendirici çevirisi).
 
 ### Birden çok süreç
 
@@ -118,10 +119,10 @@ SoulCore/tests/run_tests.sh                 # yerel derlemeyle karşılaştırma
 # ARM64 JIT'i Linux'ta qemu ile test etmek
 make -C SoulCore arm64
 SoulCore/tests/run_tests.sh qemu-aarch64 build/arm64/soulrun
-SoulCore/tests/win32/run_win32_tests.sh     # Win32 API, C++, iş parçacığı, x87 testleri (64 ve 32-bit)
-SoulCore/tests/unit/run_unit_tests.sh        # inflate ve MSI/CAB okuyucu birim testleri (ASan)
+SoulCore/tests/win32/run_win32_tests.sh     # Win32 API, C++, iş parçacığı, x87, Direct3D 9 testleri (64 ve 32-bit)
+SoulCore/tests/unit/run_unit_tests.sh        # inflate, MSI/CAB (LZX dahil), sgpu ve gölgelendirici motoru birim testleri (ASan)
 SoulCore/tests/msi/run_msi_tests.sh         # Windows Installer: msi.dll, msiexec sihirbazı
-SoulCore/tests/gui/run_gui_tests.sh         # pencere/denetim/diyalog/OpenGL testleri, 64 ve 32-bit (betikle tıklama, yazma, menü)
+SoulCore/tests/gui/run_gui_tests.sh         # pencere/denetim/diyalog/OpenGL/Direct3D 9 testleri, 64 ve 32-bit (betikle tıklama, yazma, menü)
 
 # Pencereli bir programı betikle sürmek ve ekran görüntüsü almak
 SoulCore/build/native/soulrun --gui-script betik.txt program.exe   # komutlar: waitwin, click, drag, key, text, menu, dump, pixel ...

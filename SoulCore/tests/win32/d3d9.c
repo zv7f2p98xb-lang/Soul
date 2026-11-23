@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include "d3d9_shaders.h"
 
 static IDirect3D9 *d3d;
 static IDirect3DDevice9 *dev;
@@ -1140,6 +1141,364 @@ static void t_shaders(void) {
     IDirect3DPixelShader9_Release(p);
 }
 
+// ---- MultiplyTransform and shader scenes -----------------------------------------------------------------------------------------------
+static void mat_mul(D3DMATRIX *r, const D3DMATRIX *a, const D3DMATRIX *b) { // row vectors: r = a * b (a is applied first)
+    D3DMATRIX t;
+    const float *A = &a->_11, *B = &b->_11;
+    float *T = &t._11;
+    for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) { float s = 0; for (int k = 0; k < 4; k++) s += A[i * 4 + k] * B[k * 4 + j]; T[i * 4 + j] = s; }
+    *r = t;
+}
+static void mat_translate(D3DMATRIX *m, float x, float y, float z) { ident(m); m->_41 = x; m->_42 = y; m->_43 = z; }
+static void mat_scale(D3DMATRIX *m, float x, float y, float z) { ident(m); m->_11 = x; m->_22 = y; m->_33 = z; }
+static void mat_transpose(float *out, const D3DMATRIX *m) { const float *s = &m->_11; for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) out[j * 4 + i] = s[i * 4 + j]; }
+
+static void t_multiply_transform(void) {
+    reset_states();
+    D3DMATRIX w, s, r;
+    mat_translate(&w, 10, 0, 0);
+    mat_scale(&s, 2, 2, 2);
+    IDirect3DDevice9_SetTransform(dev, D3DTS_WORLD, &w);
+    HRESULT hr = IDirect3DDevice9_MultiplyTransform(dev, D3DTS_WORLD, &s);
+    memset(&r, 0, sizeof r);
+    IDirect3DDevice9_GetTransform(dev, D3DTS_WORLD, &r);
+    // pMatrix x State (row vectors: the scale is applied first, then the translation): the translation stays 10
+    check("MultiplyTransform order is pMatrix x State", hr == D3D_OK && r._41 == 10.0f && r._11 == 2.0f && r._22 == 2.0f && r._44 == 1.0f && r._14 == 0.0f);
+    // a second one with a non-commuting pair: rotation by 90 degrees about z (x -> y) applied first, then the scale and the translation
+    D3DMATRIX rot;
+    ident(&rot); rot._11 = 0; rot._12 = 1; rot._21 = -1; rot._22 = 0;
+    IDirect3DDevice9_MultiplyTransform(dev, D3DTS_WORLD, &rot);
+    IDirect3DDevice9_GetTransform(dev, D3DTS_WORLD, &r);
+    // rot x (scale x translate): rows (0,2,0,0), (-2,0,0,0), (0,0,2,0), (10,0,0,1); State x pMatrix would have put 10 into _42
+    check("MultiplyTransform second product", r._12 == 2.0f && r._21 == -2.0f && r._11 == 0.0f && r._22 == 0.0f && r._33 == 2.0f && r._41 == 10.0f && r._42 == 0.0f);
+    ident(&w);
+    IDirect3DDevice9_SetTransform(dev, D3DTS_WORLD, &w);
+}
+
+typedef struct { float x, y, z; DWORD c; float u, v; } VtxPCT;
+static const D3DVERTEXELEMENT9 el_pct[] = { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 }, { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 },
+                                            { 0, 16, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
+typedef struct { float x, y, z, nx, ny, nz, u, v; DWORD c; } VtxPNTC;
+static const D3DVERTEXELEMENT9 el_pntc[] = { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 }, { 0, 12, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_NORMAL, 0 },
+                                             { 0, 24, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 }, { 0, 32, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+static const D3DVERTEXELEMENT9 el_pos3[] = { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 }, D3DDECL_END() };
+
+static IDirect3DVertexShader9 *mkvs(const uint32_t *t) { IDirect3DVertexShader9 *s = NULL; if (FAILED(IDirect3DDevice9_CreateVertexShader(dev, (const DWORD *)t, &s))) s = NULL; return s; }
+static IDirect3DPixelShader9 *mkps(const uint32_t *t) { IDirect3DPixelShader9 *s = NULL; if (FAILED(IDirect3DDevice9_CreatePixelShader(dev, (const DWORD *)t, &s))) s = NULL; return s; }
+static IDirect3DVertexDeclaration9 *mkdecl(const D3DVERTEXELEMENT9 *e) { IDirect3DVertexDeclaration9 *d = NULL; if (FAILED(IDirect3DDevice9_CreateVertexDeclaration(dev, e, &d))) d = NULL; return d; }
+static void unbind_shaders(void) {
+    IDirect3DDevice9_SetVertexShader(dev, NULL);
+    IDirect3DDevice9_SetPixelShader(dev, NULL);
+    IDirect3DDevice9_SetVertexDeclaration(dev, NULL);
+    IDirect3DDevice9_SetTexture(dev, 0, NULL);
+    IDirect3DDevice9_SetTexture(dev, 1, NULL);
+}
+static int count_lit(void) { int n = 0; for (int y = 0; y < 128; y++) for (int x = 0; x < 128; x++) if (px(x, y)) n++; return n; }
+
+// the shared textured quad of scenes (a) and (d): local quad -1..1 turned into pixels 48..111 x 16..79 by world = scale(.5) * translate(.25, 0, 0)
+// and view = translate(0, .25, 0): every number is a power of two, so the result is exact
+static const unsigned k_tex4[4] = { 0xFFFFFFFFu, 0xFF0000FFu, 0xFF00FF00u, 0xFFFFFF00u };   // (0,0) white, (1,0) blue, (0,1) green, (1,1) yellow
+static D3DMATRIX g_world, g_view;
+static void make_wv(void) {
+    D3DMATRIX s, t;
+    mat_scale(&s, 0.5f, 0.5f, 1.0f);
+    mat_translate(&t, 0.25f, 0, 0);
+    mat_mul(&g_world, &s, &t);
+    mat_translate(&g_view, 0, 0.25f, 0);
+}
+static void draw_pct_quad(void) {
+    VtxPCT q[4] = { { -1, 1, 0.5f, 0xFFFF8080, 0, 0 }, { 1, 1, 0.5f, 0xFFFF8080, 1, 0 }, { -1, -1, 0.5f, 0xFFFF8080, 0, 1 }, { 1, -1, 0.5f, 0xFFFF8080, 1, 1 } };
+    IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof(VtxPCT));
+}
+static void set_wvp_constants(void) {
+    D3DMATRIX wv, wvp, ident_m;
+    ident(&ident_m);
+    mat_mul(&wv, &g_world, &g_view);
+    mat_mul(&wvp, &wv, &ident_m);
+    float c[16];
+    mat_transpose(c, &wvp);     // shader matrices are column major: c0..c3 hold the columns of the row-vector matrix
+    IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, c, 4);
+}
+// pixels of the four texels, away from the texel borders; the corners are exact because of the top-left rule
+static void v_quad_corners(const char *name, unsigned t00, unsigned t10, unsigned t01, unsigned t11, int tol) {
+    char nm[96];
+    snprintf(nm, sizeof nm, "%s texel (0,0)", name); check_px(nm, px(60, 30), t00, tol);
+    snprintf(nm, sizeof nm, "%s texel (1,0)", name); check_px(nm, px(100, 30), t10, tol);
+    snprintf(nm, sizeof nm, "%s texel (0,1)", name); check_px(nm, px(60, 70), t01, tol);
+    snprintf(nm, sizeof nm, "%s texel (1,1)", name); check_px(nm, px(100, 70), t11, tol);
+    snprintf(nm, sizeof nm, "%s extent", name);
+    check(nm, px(48, 16) != 0 && px(47, 16) == 0 && px(48, 15) == 0 && px(111, 79) != 0 && px(112, 79) == 0 && px(111, 80) == 0 && px(48, 80) == 0 && px(40, 30) == 0 && px(116, 30) == 0);
+}
+
+// (a) vs_2_0: world-view-projection from constants; ps_2_0: texture x diffuse
+static void t_shader_wvp(void) {
+    IDirect3DVertexShader9 *vs = mkvs(SH_vs20_wvp);
+    IDirect3DPixelShader9 *ps = mkps(SH_ps20_texmod);
+    IDirect3DVertexDeclaration9 *vd = mkdecl(el_pct);
+    check("vs_2_0 / ps_2_0 created", vs && ps && vd);
+    if (!(vs && ps && vd)) return;
+    reset_states();
+    make_wv();
+    IDirect3DTexture9 *t = make_tex(2, 2, D3DFMT_A8R8G8B8, k_tex4, 4);
+    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)t);
+    IDirect3DDevice9_SetVertexShader(dev, vs);
+    IDirect3DDevice9_SetPixelShader(dev, ps);
+    IDirect3DDevice9_SetVertexDeclaration(dev, vd);
+    set_wvp_constants();
+    clear(0xFF000000);
+    draw_pct_quad();
+    IDirect3DSurface9 *bb = backbuffer();
+    if (snapshot_rt(bb)) {
+        // texel x diffuse (1, 0.5, 0.5)
+        v_quad_corners("vs_2_0 wvp + ps_2_0", 0xFF8080, 0x000080, 0x008000, 0xFF8000, 2);
+        check("vs_2_0 wvp covers exactly 64 x 64 pixels", count_lit() == 64 * 64);
+        snap_end();
+    }
+    IDirect3DSurface9_Release(bb);
+    // a different matrix between two draws: the quad moves by one whole pixel column worth of NDC (1/64) and shrinks nothing
+    D3DMATRIX tr, m;
+    mat_translate(&tr, -0.5f, -0.5f, 0);
+    mat_mul(&m, &g_world, &g_view);
+    mat_mul(&m, &m, &tr);
+    float c[16];
+    mat_transpose(c, &m);
+    IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, c, 4);
+    clear(0xFF000000);
+    draw_pct_quad();
+    bb = backbuffer();
+    if (snapshot_rt(bb)) {
+        // 0.5 in NDC = 32 pixels right/down?: x grows by -0.5 * 64 = -32 pixels, y by +32 pixels (screen y is flipped): quad at 16..79 x 48..111
+        check_px("vs_2_0 constants changed between draws", px(28, 60), 0xFF8080, 2);
+        check("vs_2_0 moved quad extent", px(16, 48) != 0 && px(15, 48) == 0 && px(79, 111) != 0 && px(80, 111) == 0 && px(79, 112) == 0 && px(60, 40) == 0);
+        snap_end();
+    }
+    IDirect3DSurface9_Release(bb);
+    unbind_shaders();
+    IDirect3DTexture9_Release(t);
+    IDirect3DVertexDeclaration9_Release(vd);
+    IDirect3DVertexShader9_Release(vs);
+    IDirect3DPixelShader9_Release(ps);
+}
+
+// (b) vs_3_0 with semantics and a loop over constants; ps_3_0 discarding through vPos and texkill
+static void t_shader_sm3(void) {
+    IDirect3DVertexShader9 *vs = mkvs(SH_vs30_loop);
+    IDirect3DPixelShader9 *ps = mkps(SH_ps30_discard);
+    IDirect3DVertexDeclaration9 *vd = mkdecl(el_pntc);
+    check("vs_3_0 / ps_3_0 created", vs && ps && vd);
+    if (!(vs && ps && vd)) return;
+    reset_states();
+    IDirect3DDevice9_SetVertexShader(dev, vs);
+    IDirect3DDevice9_SetPixelShader(dev, ps);
+    IDirect3DDevice9_SetVertexDeclaration(dev, vd);
+    static const float consts[12] = { 0.25f, 0.5f, 0.25f, 0.5f,   0.25f, 0.25f, 0.25f, 0.25f,   0.0f, 0.25f, 0.25f, 0.25f };   // c10..c12, sum = (.5, 1, .75, 1)
+    IDirect3DDevice9_SetVertexShaderConstantF(dev, 10, consts, 3);
+    // pixels 36..99 x 20..83 (NDC -0.4375..0.5625 and 0.6875..-0.3125), v from 0 at the top to 1 at the bottom
+    const float x0 = -0.4375f, x1 = 0.5625f, y0 = 0.6875f, y1 = -0.3125f;
+    VtxPNTC q[4] = { { x0, y0, 0.5f, 0, 0, 0.5f, 0, 0, 0xFFFFFFFF }, { x1, y0, 0.5f, 0, 0, 0.5f, 1, 0, 0xFFFFFFFF },
+                     { x0, y1, 0.5f, 0, 0, 0.5f, 0, 1, 0xFFFFFFFF }, { x1, y1, 0.5f, 0, 0, 0.5f, 1, 1, 0xFFFFFFFF } };
+    for (int pass = 0; pass < 2; pass++) {
+        // pass 1: table fog switched on; pixel shader 3.0 does not get fixed-function fog applied
+        if (pass) { rs(D3DRS_FOGENABLE, TRUE); rs(D3DRS_FOGTABLEMODE, D3DFOG_LINEAR); rs(D3DRS_FOGSTART, fbits(0.0f)); rs(D3DRS_FOGEND, fbits(1.0f)); rs(D3DRS_FOGCOLOR, 0xFF0000FF); }
+        clear(0xFF000000);
+        IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof(VtxPNTC));
+        IDirect3DSurface9 *bb = backbuffer();
+        if (snapshot_rt(bb)) {
+            const char *sfx = pass ? " (fog enabled)" : "";
+            char nm[96];
+            // colour = vertex colour (1,1,1,1) x loop sum (.5, 1, .75), blue replaced by the interpolated texcoord1.z = 0.5
+            snprintf(nm, sizeof nm, "vs_3_0 loop + semantics%s", sfx); check_px(nm, px(45, 60), 0x80FF80, 1);
+            snprintf(nm, sizeof nm, "ps_3_0 vPos discards column 40%s", sfx); check(nm, px(40, 60) == 0 && px(41, 60) != 0 && px(39, 60) != 0);
+            snprintf(nm, sizeof nm, "ps_3_0 vPos discards column 48 and 96%s", sfx); check(nm, px(48, 60) == 0 && px(49, 60) != 0 && px(96, 60) == 0 && px(97, 60) != 0);
+            snprintf(nm, sizeof nm, "ps_3_0 texkill on texcoord v%s", sfx); check(nm, px(45, 37) == 0 && px(45, 38) != 0 && px(45, 20) == 0);
+            snprintf(nm, sizeof nm, "ps_3_0 quad extent%s", sfx); check(nm, px(36, 60) != 0 && px(35, 60) == 0 && px(99, 60) != 0 && px(100, 60) == 0 && px(45, 83) != 0 && px(45, 84) == 0);
+            // 64 columns minus the 8 columns with x = 0 (mod 8) = 56, rows 38..83 = 46
+            snprintf(nm, sizeof nm, "ps_3_0 surviving pixel count%s", sfx); check(nm, count_lit() == 56 * 46);
+            snap_end();
+        }
+        IDirect3DSurface9_Release(bb);
+    }
+    rs(D3DRS_FOGENABLE, FALSE);
+    unbind_shaders();
+    IDirect3DVertexDeclaration9_Release(vd);
+    IDirect3DVertexShader9_Release(vs);
+    IDirect3DPixelShader9_Release(ps);
+}
+
+// (c) ps_1_4: a texture lookup, "phase", then a dependent read that uses the first result as texture coordinates
+static void t_shader_ps14(void) {
+    IDirect3DPixelShader9 *ps = mkps(SH_ps14_phase);
+    check("ps_1_4 created", ps != NULL);
+    if (!ps) return;
+    reset_states();
+    static const unsigned coords[4] = { 0xFF000000u, 0xFFFF0000u, 0xFF00FF00u, 0xFFFFFF00u };   // (r,g) = (0,0) (1,0) (0,1) (1,1)
+    static const unsigned palette[4] = { 0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFF00u };   // red green blue yellow
+    IDirect3DTexture9 *t0 = make_tex(2, 2, D3DFMT_A8R8G8B8, coords, 4);
+    IDirect3DTexture9 *t1 = make_tex(2, 2, D3DFMT_A8R8G8B8, palette, 4);
+    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)t0);
+    IDirect3DDevice9_SetTexture(dev, 1, (IDirect3DBaseTexture9 *)t1);
+    IDirect3DDevice9_SetPixelShader(dev, ps);
+    clear(0xFF000000);
+    // pixels 16..79 square (pretransformed vertices; D3D9 pixel centres are integers, so the edges sit at -0.5)
+    quad_tex(15.5f, 15.5f, 79.5f, 79.5f, 0, 0, 1, 1, 0xFF8080FF);
+    IDirect3DSurface9 *bb = backbuffer();
+    if (snapshot_rt(bb)) {
+        // dependent read picks the palette entry named by the first texture, then diffuse (.5, .5, 1) is multiplied in
+        check_px("ps_1_4 phase / dependent read (0,0)", px(30, 30), 0x800000, 2);
+        check_px("ps_1_4 phase / dependent read (1,0)", px(65, 30), 0x008000, 2);
+        check_px("ps_1_4 phase / dependent read (0,1)", px(30, 65), 0x0000FF, 2);
+        check_px("ps_1_4 phase / dependent read (1,1)", px(65, 65), 0x808000, 2);
+        check("ps_1_4 quad extent", px(16, 16) != 0 && px(15, 16) == 0 && px(79, 79) != 0 && px(80, 79) == 0 && px(16, 15) == 0 && count_lit() == 64 * 64);
+        snap_end();
+    }
+    IDirect3DSurface9_Release(bb);
+    unbind_shaders();
+    IDirect3DTexture9_Release(t0);
+    IDirect3DTexture9_Release(t1);
+    IDirect3DPixelShader9_Release(ps);
+}
+
+// (d) vertex shader + fixed-function texture stages, and fixed-function vertices + pixel shader
+static void t_shader_mixed(void) {
+    IDirect3DVertexShader9 *vs = mkvs(SH_vs11_wvp);
+    IDirect3DPixelShader9 *ps = mkps(SH_ps20_const);
+    IDirect3DVertexDeclaration9 *vd = mkdecl(el_pct);
+    check("mixed pipeline shaders created", vs && ps && vd);
+    if (!(vs && ps && vd)) return;
+    reset_states();
+    make_wv();
+    IDirect3DTexture9 *t = make_tex(2, 2, D3DFMT_A8R8G8B8, k_tex4, 4);
+    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)t);
+    // vs_1_1 + fixed-function pixel pipeline: stage 0 = texture x diffuse, stage 1 = previous + texture factor (16, 16, 16)
+    IDirect3DDevice9_SetVertexShader(dev, vs);
+    IDirect3DDevice9_SetVertexDeclaration(dev, vd);
+    set_wvp_constants();
+    rs(D3DRS_TEXTUREFACTOR, 0x00101010);
+    IDirect3DDevice9_SetTextureStageState(dev, 1, D3DTSS_COLOROP, D3DTOP_ADD);
+    IDirect3DDevice9_SetTextureStageState(dev, 1, D3DTSS_COLORARG1, D3DTA_CURRENT);
+    IDirect3DDevice9_SetTextureStageState(dev, 1, D3DTSS_COLORARG2, D3DTA_TFACTOR);
+    IDirect3DDevice9_SetTextureStageState(dev, 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(dev, 1, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
+    clear(0xFF000000);
+    draw_pct_quad();
+    IDirect3DSurface9 *bb = backbuffer();
+    if (snapshot_rt(bb)) {
+        v_quad_corners("vs_1_1 + fixed-function stages", 0xFF9090, 0x101090, 0x109010, 0xFF9010, 2);
+        snap_end();
+    }
+    IDirect3DSurface9_Release(bb);
+    IDirect3DDevice9_SetTextureStageState(dev, 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    IDirect3DDevice9_SetTextureStageState(dev, 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    // fixed-function vertex pipeline (world / view / projection transforms) + ps_2_0 (texture x diffuse x (.5, 1, .25))
+    IDirect3DDevice9_SetVertexShader(dev, NULL);
+    IDirect3DDevice9_SetPixelShader(dev, ps);
+    IDirect3DDevice9_SetFVF(dev, D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+    IDirect3DDevice9_SetTransform(dev, D3DTS_WORLD, &g_world);
+    IDirect3DDevice9_SetTransform(dev, D3DTS_VIEW, &g_view);
+    clear(0xFF000000);
+    draw_pct_quad();
+    bb = backbuffer();
+    if (snapshot_rt(bb)) {
+        v_quad_corners("fixed-function vertices + ps_2_0", 0x808020, 0x000020, 0x008000, 0x808000, 2);
+        snap_end();
+    }
+    IDirect3DSurface9_Release(bb);
+    unbind_shaders();
+    IDirect3DTexture9_Release(t);
+    IDirect3DVertexDeclaration9_Release(vd);
+    IDirect3DVertexShader9_Release(vs);
+    IDirect3DPixelShader9_Release(ps);
+}
+
+// (e) ps_2_0 + table fog: fog is applied after the shader (pixel shaders below 3.0), the fog factor comes from the depth
+static void t_shader_fog(void) {
+    IDirect3DPixelShader9 *ps = mkps(SH_ps20_solid);
+    check("ps_2_0 solid created", ps != NULL);
+    if (!ps) return;
+    reset_states();
+    IDirect3DDevice9_SetPixelShader(dev, ps);
+    rs(D3DRS_FOGENABLE, TRUE); rs(D3DRS_FOGTABLEMODE, D3DFOG_LINEAR);
+    rs(D3DRS_FOGSTART, fbits(0.0f)); rs(D3DRS_FOGEND, fbits(1.0f)); rs(D3DRS_FOGCOLOR, 0xFF0000FF);
+    clear(0xFF000000);
+    quad_t(9.5f, 9.5f, 39.5f, 39.5f, 0.5f, 0xFFFFFFFF);    // z = 0.5: factor (end - z) / (end - start) = 0.5 -> half red, half blue
+    quad_t(49.5f, 9.5f, 79.5f, 39.5f, 0.0f, 0xFFFFFFFF);   // z = 0: no fog, the shader colour
+    quad_t(89.5f, 9.5f, 119.5f, 39.5f, 1.0f, 0xFFFFFFFF);  // z = 1: factor 0, pure fog colour
+    IDirect3DSurface9 *bb = backbuffer();
+    if (snapshot_rt(bb)) {
+        check_px("ps_2_0 table fog halfway", px(25, 25), 0x800080, 2);
+        check_px("ps_2_0 table fog near", px(65, 25), 0xFF0000, 1);
+        check_px("ps_2_0 table fog far", px(105, 25), 0x0000FF, 1);
+        snap_end();
+    }
+    IDirect3DSurface9_Release(bb);
+    rs(D3DRS_FOGENABLE, FALSE);
+    clear(0xFF000000);
+    quad_t(9.5f, 9.5f, 39.5f, 39.5f, 0.5f, 0xFFFFFFFF);
+    bb = backbuffer();
+    if (snapshot_rt(bb)) { check_px("ps_2_0 without fog", px(25, 25), 0xFF0000, 1); snap_end(); }
+    IDirect3DSurface9_Release(bb);
+    unbind_shaders();
+    IDirect3DPixelShader9_Release(ps);
+}
+
+// (f) vertex shader constants (float, integer, boolean) changed between draws of the same shader
+static void t_shader_consts(void) {
+    IDirect3DVertexShader9 *vs = mkvs(SH_vs20_consts);
+    IDirect3DPixelShader9 *ps = mkps(SH_ps11_diffuse);
+    IDirect3DVertexDeclaration9 *vd = mkdecl(el_pos3);
+    check("constant test shaders created", vs && ps && vd);
+    if (!(vs && ps && vd)) return;
+    reset_states();
+    IDirect3DDevice9_SetVertexShader(dev, vs);
+    IDirect3DDevice9_SetPixelShader(dev, ps);
+    IDirect3DDevice9_SetVertexDeclaration(dev, vd);
+    float quad[4][3] = { { -0.25f, 0.25f, 0.5f }, { 0.25f, 0.25f, 0.5f }, { -0.25f, -0.25f, 0.5f }, { 0.25f, -0.25f, 0.5f } };
+    // colour = c4 + count * c5, multiplied by c6 when b0 is set; the quad is moved by c7
+    float c4[4] = { 0.0f, 0.25f, 0.0f, 1.0f }, c5[4] = { 0.25f, 0.0f, 0.0f, 0.0f }, c6[4] = { 0.5f, 2.0f, 1.0f, 1.0f };
+    float off[4][4] = { { -0.5f, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0.5f, 0, 0, 0 }, { 0, -0.5f, 0, 0 } };
+    int cnt[4][4] = { { 0, 0, 1, 0 }, { 2, 0, 1, 0 }, { 2, 0, 1, 0 }, { 1, 0, 1, 0 } };
+    BOOL b[4] = { FALSE, FALSE, TRUE, FALSE };
+    IDirect3DDevice9_SetVertexShaderConstantF(dev, 4, c4, 1);
+    IDirect3DDevice9_SetVertexShaderConstantF(dev, 5, c5, 1);
+    IDirect3DDevice9_SetVertexShaderConstantF(dev, 6, c6, 1);
+    clear(0xFF000000);
+    for (int i = 0; i < 4; i++) {
+        if (i == 3) { c4[1] = 0.0f; c4[2] = 0.5f; IDirect3DDevice9_SetVertexShaderConstantF(dev, 4, c4, 1); }   // only a float constant changes here
+        IDirect3DDevice9_SetVertexShaderConstantF(dev, 7, off[i], 1);
+        IDirect3DDevice9_SetVertexShaderConstantI(dev, 0, cnt[i], 1);
+        IDirect3DDevice9_SetVertexShaderConstantB(dev, 0, &b[i], 1);
+        IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, quad, sizeof quad[0]);
+    }
+    int gi[4] = { 0 }; BOOL gb = TRUE; float gf[4] = { 0 };
+    IDirect3DDevice9_GetVertexShaderConstantI(dev, 0, gi, 1);
+    IDirect3DDevice9_GetVertexShaderConstantB(dev, 0, &gb, 1);
+    IDirect3DDevice9_GetVertexShaderConstantF(dev, 4, gf, 1);
+    check("vertex shader constants read back", gi[0] == 1 && gi[2] == 1 && gb == FALSE && gf[1] == 0.0f && gf[2] == 0.5f && gf[3] == 1.0f);
+    IDirect3DSurface9 *bb = backbuffer();
+    if (snapshot_rt(bb)) {
+        check_px("constants: zero loop iterations, no scale", px(32, 64), 0x004000, 1);       // c4 = (0, .25, 0, 1)
+        check_px("constants: integer loop count 2", px(64, 64), 0x804000, 1);                 // c4 + 2 * c5 = (.5, .25, 0, 1)
+        check_px("constants: boolean enables the scale", px(96, 64), 0x408000, 1);            // x c6 = (.25, .5, 0, 1)
+        check_px("constants: float change between draws", px(64, 96), 0x400080, 1);           // c4 = (0, 0, .5) + c5 = (.25, 0, .5)
+        check("constants: quads placed by c7", px(16, 48) != 0 && px(15, 48) == 0 && px(47, 79) != 0 && px(48, 79) != 0 && px(111, 79) != 0 && px(112, 79) == 0 && px(64, 112) == 0 && px(64, 111) != 0);
+        snap_end();
+    }
+    IDirect3DSurface9_Release(bb);
+    unbind_shaders();
+    IDirect3DVertexDeclaration9_Release(vd);
+    IDirect3DVertexShader9_Release(vs);
+    IDirect3DPixelShader9_Release(ps);
+}
+
+static void t_shader_scenes(void) {
+    t_shader_wvp();
+    t_shader_sm3();
+    t_shader_ps14();
+    t_shader_mixed();
+    t_shader_fog();
+    t_shader_consts();
+}
+
 // the frame the GUI script looks at: a gradient background with a few solid rectangles
 static void draw_gui_frame(void) {
     reset_states();
@@ -1221,6 +1580,8 @@ int main(int argc, char **argv) {
     t_swapchains();
     t_refcounts();
     t_shaders();
+    t_multiply_transform();
+    t_shader_scenes();
     t_reset();
     draw_gui_frame();
     check("present", IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL) == D3D_OK);

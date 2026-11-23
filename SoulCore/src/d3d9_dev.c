@@ -656,7 +656,7 @@ static void dv_MultiplyTransform(X86State *st) {
     TGT;
     float a[16], t[16];
     memcpy(a, G2H(ARG(2)), 64);
-    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) { float s = 0; for (int k = 0; k < 4; k++) s += S->xf[i][r * 4 + k] * a[k * 4 + c]; t[r * 4 + c] = s; }
+    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) { float s = 0; for (int k = 0; k < 4; k++) s += a[r * 4 + k] * S->xf[i][k * 4 + c]; t[r * 4 + c] = s; }  // pMatrix x State (row vectors: pMatrix applies first)
     memcpy(S->xf[i], t, 64);
     if (M) M->xf[i] = 1;
     RET(D3D_OK);

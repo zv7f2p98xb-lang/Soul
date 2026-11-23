@@ -388,6 +388,80 @@ static void test_clip_and_viewport(void) {
     }
 }
 
+// Fill rule with the top-left viewport origin (Direct3D): pixel centres on a top or left edge are covered, those on a
+// bottom or right edge are not. Quads are given in sgpu window coordinates where pixel (i, j) has its centre at i+0.5.
+static void win_quad(SgVertex *v, float x0, float y0, float x1, float y1) { // window coordinates, y down; NDC is exact in binary
+    quad(v, x0 / 32.0f - 1.0f, 1.0f - y0 / 32.0f, x1 / 32.0f - 1.0f, 1.0f - y1 / 32.0f, 0);
+}
+static void test_fill_rule(void) {
+    SgVertex v[6];
+    int n, ok;
+    // quad whose edges pass exactly through pixel centres: rows/columns 16..47 are covered and nothing else
+    reset(); S.vp_top_left = 1;
+    win_quad(v, 16.5f, 16.5f, 48.5f, 48.5f); // D3D coordinates (16, 16)-(48, 48) plus the half-pixel shift
+    // counter-clockwise on screen with y down is the front face for front_ccw = 0
+    S.front_ccw = 0;
+    colour(v, 6, 1, 0, 0, 1);
+    sg_triangles(&T, &S, v, 6);
+    n = 0; ok = 1;
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+        int in = x >= 16 && x < 48 && y >= 16 && y < 48;
+        if (px(x, y) == 0xFFFF0000u) n++;
+        if ((px(x, y) == 0xFFFF0000u) != in) ok = 0;
+    }
+    report("fill rule (top-left origin): quad through pixel centres covers rows/columns 16..47", ok && n == 32 * 32);
+    // the same, one pixel centre off: edges at y = 16.0 / 48.0 and x = 16.0 / 48.0 contain exactly the same pixels
+    reset(); S.vp_top_left = 1; S.front_ccw = 0;
+    win_quad(v, 16.0f, 16.0f, 48.0f, 48.0f);
+    colour(v, 6, 1, 0, 0, 1);
+    sg_triangles(&T, &S, v, 6);
+    n = 0; for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) if (px(x, y) == 0xFFFF0000u) n++;
+    report("fill rule (top-left origin): edges between pixel centres", n == 32 * 32 && px(16, 16) == 0xFFFF0000u && px(47, 47) == 0xFFFF0000u && px(15, 16) == BG && px(16, 15) == BG);
+    // a horizontal strip one pixel high and a vertical strip one pixel wide
+    reset(); S.vp_top_left = 1; S.front_ccw = 0;
+    win_quad(v, 8.5f, 20.5f, 40.5f, 21.5f);
+    colour(v, 6, 1, 0, 0, 1);
+    sg_triangles(&T, &S, v, 6);
+    n = 0; for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) if (px(x, y) == 0xFFFF0000u) n++;
+    report("fill rule (top-left origin): one-pixel strip lies on row 20 only", n == 32 && px(8, 20) == 0xFFFF0000u && px(39, 20) == 0xFFFF0000u && px(8, 21) == BG && px(8, 19) == BG);
+    // shared edges of adjacent triangles are drawn exactly once (additive blending exposes double coverage);
+    // a fan of triangles around an interior point with edges through pixel centres
+    reset(); S.vp_top_left = 1; S.front_ccw = 0;
+    S.blend = 1; S.blend_src = SG_ONE; S.blend_dst = SG_ONE; S.blend_op = SG_BLEND_ADD;
+    {
+        SgVertex f[12];
+        float cx = 32.5f, cy = 32.5f, L = 16.5f, R = 48.5f, Tp = 16.5f, B = 48.5f;
+        float X[5] = { L, R, R, L, L }, Y[5] = { Tp, Tp, B, B, Tp };
+        for (int i = 0; i < 4; i++) {
+            vtx(&f[3 * i], cx / 32.0f - 1, 1 - cy / 32.0f, 0, 1);
+            vtx(&f[3 * i + 1], X[i] / 32.0f - 1, 1 - Y[i] / 32.0f, 0, 1);
+            vtx(&f[3 * i + 2], X[i + 1] / 32.0f - 1, 1 - Y[i + 1] / 32.0f, 0, 1);
+        }
+        colour(f, 12, 0.25f, 0.25f, 0.25f, 1);
+        sg_triangles(&T, &S, f, 12);
+        n = 0; ok = 1;
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+            int in = x >= 16 && x < 48 && y >= 16 && y < 48;
+            uint32_t want = in ? 0xFF505050u : BG;
+            if (px(x, y) != want) ok = 0;
+            n += px(x, y) != BG;
+        }
+        report("fill rule (top-left origin): shared edges of a triangle fan are drawn exactly once", ok && n == 32 * 32);
+    }
+    // two triangles sharing a diagonal through pixel centres
+    reset(); S.vp_top_left = 1; S.front_ccw = 0;
+    S.blend = 1; S.blend_src = SG_ONE; S.blend_dst = SG_ONE; S.blend_op = SG_BLEND_ADD;
+    win_quad(v, 16.5f, 16.5f, 48.5f, 48.5f);
+    colour(v, 6, 0.25f, 0.25f, 0.25f, 1);
+    sg_triangles(&T, &S, v, 6);
+    n = 0; ok = 1;
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+        int in = x >= 16 && x < 48 && y >= 16 && y < 48;
+        if (px(x, y) != (in ? 0xFF505050u : BG)) ok = 0;
+    }
+    report("fill rule (top-left origin): shared diagonal drawn once", ok);
+}
+
 static void test_points(void) {
     SgVertex p;
     reset();
@@ -562,6 +636,7 @@ int main(void) {
     test_blend();
     test_depth();
     test_clip_and_viewport();
+    test_fill_rule();
     test_points();
     test_sample();
     printf("passed=%d failed=%d\n", g_pass, g_fail);

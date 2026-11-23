@@ -6,6 +6,12 @@
     "args": ""
   },
   {
+    "file": "Kup3BD3D9.exe",
+    "name": "Küp 3B (Direct3D 9)",
+    "description": "Direct3D 9 ile dönen dokulu, ışıklı küp: vs_2_0/ps_2_0 gölgelendiricileri; F tuşu sabit işlevli çizime geçer.",
+    "args": ""
+  },
+  {
     "file": "Cizim.exe",
     "name": "Çizim",
     "description": "Pencereli çizim programı: renk seçip parmakla çizin, resmi kaydedin.",

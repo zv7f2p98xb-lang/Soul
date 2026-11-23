@@ -134,6 +134,59 @@ unsupported query: ok
 cooperative level: ok
 scene state: ok
 shader pass-through: ok
+MultiplyTransform order is pMatrix x State: ok
+MultiplyTransform second product: ok
+vs_2_0 / ps_2_0 created: ok
+vs_2_0 wvp + ps_2_0 texel (0,0): ok
+vs_2_0 wvp + ps_2_0 texel (1,0): ok
+vs_2_0 wvp + ps_2_0 texel (0,1): ok
+vs_2_0 wvp + ps_2_0 texel (1,1): ok
+vs_2_0 wvp + ps_2_0 extent: ok
+vs_2_0 wvp covers exactly 64 x 64 pixels: ok
+vs_2_0 constants changed between draws: ok
+vs_2_0 moved quad extent: ok
+vs_3_0 / ps_3_0 created: ok
+vs_3_0 loop + semantics: ok
+ps_3_0 vPos discards column 40: ok
+ps_3_0 vPos discards column 48 and 96: ok
+ps_3_0 texkill on texcoord v: ok
+ps_3_0 quad extent: ok
+ps_3_0 surviving pixel count: ok
+vs_3_0 loop + semantics (fog enabled): ok
+ps_3_0 vPos discards column 40 (fog enabled): ok
+ps_3_0 vPos discards column 48 and 96 (fog enabled): ok
+ps_3_0 texkill on texcoord v (fog enabled): ok
+ps_3_0 quad extent (fog enabled): ok
+ps_3_0 surviving pixel count (fog enabled): ok
+ps_1_4 created: ok
+ps_1_4 phase / dependent read (0,0): ok
+ps_1_4 phase / dependent read (1,0): ok
+ps_1_4 phase / dependent read (0,1): ok
+ps_1_4 phase / dependent read (1,1): ok
+ps_1_4 quad extent: ok
+mixed pipeline shaders created: ok
+vs_1_1 + fixed-function stages texel (0,0): ok
+vs_1_1 + fixed-function stages texel (1,0): ok
+vs_1_1 + fixed-function stages texel (0,1): ok
+vs_1_1 + fixed-function stages texel (1,1): ok
+vs_1_1 + fixed-function stages extent: ok
+fixed-function vertices + ps_2_0 texel (0,0): ok
+fixed-function vertices + ps_2_0 texel (1,0): ok
+fixed-function vertices + ps_2_0 texel (0,1): ok
+fixed-function vertices + ps_2_0 texel (1,1): ok
+fixed-function vertices + ps_2_0 extent: ok
+ps_2_0 solid created: ok
+ps_2_0 table fog halfway: ok
+ps_2_0 table fog near: ok
+ps_2_0 table fog far: ok
+ps_2_0 without fog: ok
+constant test shaders created: ok
+vertex shader constants read back: ok
+constants: zero loop iterations, no scale: ok
+constants: integer loop count 2: ok
+constants: boolean enables the scale: ok
+constants: float change between draws: ok
+constants: quads placed by c7: ok
 reset: ok
 reset back buffer: ok
 reset depth buffer: ok

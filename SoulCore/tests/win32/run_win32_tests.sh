@@ -35,8 +35,12 @@ x86_64-w64-mingw32-g++ -O2 -static -o "$OUT/xaudio2.exe" xaudio2.cpp -lole32 || 
 i686-w64-mingw32-g++ -O2 -static -o "$OUT/xaudio2_32.exe" xaudio2.cpp -lole32 || exit 1
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/msi.exe" msi.c -lmsi || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/msi32.exe" msi.c -lmsi || exit 1
+x86_64-w64-mingw32-gcc -O2 -o "$OUT/d3d9.exe" d3d9.c -ld3d9 -lgdi32 -luser32 || exit 1
+i686-w64-mingw32-gcc -O2 -o "$OUT/d3d932.exe" d3d9.c -ld3d9 -lgdi32 -luser32 || exit 1
 cp ../msi/sample.msi ../msi/ca.msi ../msi/lzx/lzx.msi "$OUT/"
 pass=0; fail=0
+# the committed shader bytecode for d3d9.c must match its sources
+./gen_d3d9_shaders.sh "$OUT/d3d9_shaders.h" && cmp -s "$OUT/d3d9_shaders.h" d3d9_shaders.h || { fail=$((fail+1)); echo "FAIL d3d9_shaders.h is stale (run gen_d3d9_shaders.sh)"; }
 check() {
   local name=$1; shift
   local actual
@@ -80,6 +84,8 @@ for wav in xaudio2.wav xaudio2_32.wav; do
   if [ "$heard" == "expected tones present: True" ]; then echo "ok   xaudio2 tones $wav";  # part of the xaudio2 check above, not counted twice
   else fail=$((fail+1)); echo "FAIL xaudio2 sound $wav"; echo "$heard"; fi
 done
+check d3d9 d3d9.exe
+check d3d9 d3d932.exe
 # Windows Installer: the packages write into the drive folder; clean up so other tests and reruns see a fresh drive
 msi_clean() { rm -rf "$OUT/Program Files" "$OUT/Program Files (x86)" "$OUT/ProgramData" "$OUT/users" "$OUT/windows" "$OUT/Soul Test"; }
 msi_clean
