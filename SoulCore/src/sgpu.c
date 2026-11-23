@@ -866,6 +866,7 @@ const SgBackend *sg_metal_backend(void) __attribute__((weak));          // sgpu_
 void sg_metal_release_all(void) __attribute__((weak));
 int sg_metal_status(char *buf, size_t len) __attribute__((weak));
 int sg_metal_decline_summary(char *buf, size_t len) __attribute__((weak));
+int sg_metal_last_error(char *buf, size_t len) __attribute__((weak));
 
 static const SgBackend *g_backend;
 static int g_backend_init;
@@ -928,10 +929,14 @@ void sg_stats_get(SgStats *out) {
 
 int sg_stats_format(char *buf, size_t len) {
     SgStats s; sg_stats_get(&s);
-    return snprintf(buf, len, "gpu stats: backend=%s draws=%llu gpu=%llu declined=%llu clears=%llu syncs=%llu%s%s%s",
+    char lasterr[420];
+    lasterr[0] = 0;
+    if (is_metal(be()) && sg_metal_last_error) sg_metal_last_error(lasterr, sizeof lasterr);
+    return snprintf(buf, len, "gpu stats: backend=%s draws=%llu gpu=%llu declined=%llu clears=%llu syncs=%llu%s%s%s%s%s%s",
                     s.backend, (unsigned long long)s.draws, (unsigned long long)s.draws_gpu, (unsigned long long)s.draws_declined,
                     (unsigned long long)s.clears, (unsigned long long)s.syncs,
-                    s.reasons[0] ? " (declined: " : "", s.reasons, s.reasons[0] ? ")" : "");
+                    s.reasons[0] ? " (declined: " : "", s.reasons, s.reasons[0] ? ")" : "",
+                    lasterr[0] ? " last error: \"" : "", lasterr, lasterr[0] ? "\"" : "");
 }
 
 static int bk_draw(const SgBackend *b, SgTarget *t, const SgState *s, int prim, const SgVertex *v, int n) {

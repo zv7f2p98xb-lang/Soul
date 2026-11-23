@@ -123,6 +123,36 @@ static void dbg(const char *fmt, ...) {
 
 static int decline(int reason) { g_st.declined[reason]++; return -1; }
 
+// Metal errors of library / function / pipeline creation. The first few distinct messages are printed once each when
+// SOUL_GPU_DEBUG=1; the first and the last one are also offered to soulrun --gpu-stats (sg_metal_last_error).
+enum { kMaxDistinctErrors = 8 };
+static char g_errFirst[200], g_errLast[200];
+static NSMutableSet *g_errSeen;
+
+static void err_clean(char *dst, size_t dl, const char *src) {
+    size_t n = 0;
+    for (; *src && n + 1 < dl; src++) dst[n++] = (*src == '\n' || *src == '\r' || *src == '\t') ? ' ' : *src == '"' ? '\'' : *src;
+    dst[n] = 0;
+}
+
+static void record_error(const char *stage, NSError *e, const char *context) {
+    const char *msg = e ? [[e description] UTF8String] : NULL;
+    if (!msg) msg = "(no NSError)";
+    char line[200];
+    err_clean(line, sizeof line, msg);
+    char full[240];
+    snprintf(full, sizeof full, "%s: %s", stage, line);
+    err_clean(g_errLast, sizeof g_errLast, full);
+    if (!g_errFirst[0]) memcpy(g_errFirst, g_errLast, sizeof g_errFirst);
+    if (!g_debug) return;
+    if (!g_errSeen) g_errSeen = [NSMutableSet set];
+    NSString *k = [NSString stringWithFormat:@"%s|%s", stage, msg];
+    if ([g_errSeen containsObject:k] || g_errSeen.count >= (NSUInteger)kMaxDistinctErrors) return;
+    [g_errSeen addObject:k];
+    fprintf(stderr, "[sgpu-metal] %s failed (error %lu of at most %d distinct): %s\n[sgpu-metal]   context: %s\n",
+            stage, (unsigned long)g_errSeen.count, (int)kMaxDistinctErrors, msg, context ? context : "-");
+}
+
 // ---- command buffers, encoders, arena -------------------------------------------------------------------------------
 
 static void enc_end(void) {
@@ -573,6 +603,12 @@ static SgmProg *prog_compile(const SgState *s, int prim) {
     }
     if (!p->vs || !p->fs) {
         p->failed = YES;
+        {
+            char ctx[160];
+            snprintf(ctx, sizeof ctx, "program key %016llx prim %d, library %s, sg_vs %s, sg_fs %s", (unsigned long long)info.key, prim,
+                     lib ? "ok" : "FAILED", p->vs ? "ok" : "missing", p->fs ? "ok" : "missing");
+            record_error(lib ? "newFunctionWithName" : "newLibraryWithSource", e, ctx);
+        }
         if (g_debug && g_failLogged < 20) {
             g_failLogged++;
             fprintf(stderr, "[sgpu-metal] shader compile failed: %s\n--- MSL ---\n%s\n-----------\n", e ? [[e description] UTF8String] : "no functions", src);
@@ -659,15 +695,18 @@ static id<MTLRenderPipelineState> pipe_get(SgmProg *p, SgmDS *d, const SgState *
     int mask = (s->mask_r ? 8 : 0) | (s->mask_g ? 4 : 0) | (s->mask_b ? 2 : 0) | (s->mask_a ? 1 : 0);
     int sa = s->blend_sep_alpha != 0;
     int fa_s = sa ? s->blend_src_a : s->blend_src, fa_d = sa ? s->blend_dst_a : s->blend_dst, oa = sa ? s->blend_op_a : s->blend_op;
-    char kb[160];
-    if (s->blend) snprintf(kb, sizeof kb, "%lu.%lu|%d|B%d.%d.%d.%d.%d.%d", (unsigned long)dfmt, (unsigned long)sfmt, mask, s->blend_src, s->blend_dst, s->blend_op, fa_s, fa_d, oa);
-    else snprintf(kb, sizeof kb, "%lu.%lu|%d|N", (unsigned long)dfmt, (unsigned long)sfmt, mask);
+    int cls = prim == SG_PRIM_POINTS ? 2 : prim == SG_PRIM_LINES ? 1 : 0;
+    char kb[200];
+    if (s->blend) snprintf(kb, sizeof kb, "c%d.%lu.%lu.%lu|%d|B%d.%d.%d.%d.%d.%d", cls, (unsigned long)MTLPixelFormatBGRA8Unorm, (unsigned long)dfmt, (unsigned long)sfmt, mask, s->blend_src, s->blend_dst, s->blend_op, fa_s, fa_d, oa);
+    else snprintf(kb, sizeof kb, "c%d.%lu.%lu.%lu|%d|N", cls, (unsigned long)MTLPixelFormatBGRA8Unorm, (unsigned long)dfmt, (unsigned long)sfmt, mask);
     NSString *key = [NSString stringWithUTF8String:kb];
     id v = p->pipes[key];
     if (v) return [v isKindOfClass:[NSNull class]] ? nil : (id<MTLRenderPipelineState>)v;
     MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
     pd.vertexFunction = p->vs;
     pd.fragmentFunction = p->fs;
+    pd.vertexDescriptor = nil;   // the vertex function reads buffer(0) by vertex_id: no fixed-function vertex fetch
+    pd.rasterSampleCount = 1;
     pd.inputPrimitiveTopology = prim == SG_PRIM_POINTS ? MTLPrimitiveTopologyClassPoint : prim == SG_PRIM_LINES ? MTLPrimitiveTopologyClassLine : MTLPrimitiveTopologyClassTriangle;
     MTLRenderPipelineColorAttachmentDescriptor *ca = pd.colorAttachments[0];
     ca.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -687,7 +726,11 @@ static id<MTLRenderPipelineState> pipe_get(SgmProg *p, SgmDS *d, const SgState *
     id<MTLRenderPipelineState> pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
     g_st.pipes++;
     if (!pso) {
-        dbg("pipeline creation failed: %s", e ? [[e description] UTF8String] : "?");
+        char ctx[300];
+        snprintf(ctx, sizeof ctx, "program key %016llx prim %d, color %lu depth %lu stencil %lu, mask %d, blend %s %d/%d/%d alpha %d/%d/%d, textures %08x",
+                 (unsigned long long)p->info.key, prim, (unsigned long)pd.colorAttachments[0].pixelFormat, (unsigned long)dfmt, (unsigned long)sfmt, mask,
+                 s->blend ? "on" : "off", s->blend_src, s->blend_dst, s->blend_op, fa_s, fa_d, oa, (unsigned)p->info.texture_mask);
+        record_error("newRenderPipelineStateWithDescriptor", e, ctx);
         p->pipes[key] = [NSNull null];
         return nil;
     }
@@ -1088,6 +1131,16 @@ int sg_metal_decline_summary(char *buf, size_t len) {
         if (g_st.declined[i] && rl + 40 < len)
             rl += (size_t)snprintf(buf + rl, len - rl, "%s%s=%llu", rl ? " " : "", kReason[i], g_st.declined[i]);
     return (int)rl;
+}
+
+// First and last Metal creation error (library / function / pipeline) for the soulrun --gpu-stats line; 0 when none.
+int sg_metal_last_error(char *buf, size_t len) {
+    if (!buf || !len) return 0;
+    buf[0] = 0;
+    if (!g_errLast[0]) return 0;
+    if (!strcmp(g_errFirst, g_errLast)) snprintf(buf, len, "%s", g_errLast);
+    else snprintf(buf, len, "%s ... %s", g_errFirst, g_errLast);
+    return (int)strlen(buf);
 }
 
 uint64_t sg_metal_pixels_drawn(void) {

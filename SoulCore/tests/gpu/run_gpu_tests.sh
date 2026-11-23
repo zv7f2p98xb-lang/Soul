@@ -34,6 +34,8 @@ TOL=${SOUL_PIXEL_TOLERANCE:-$TOL_DEFAULT}
 SECS=${GPU_BENCH_SECONDS:-8}
 if [ -z "${GPU_BENCH:-}" ]; then [ "$BACKEND" = metal ] && GPU_BENCH=1 || GPU_BENCH=0; fi
 SAMPLES_DIR=${SAMPLES_DIR:-$CORE/build/samples}
+# The Metal backend then prints every distinct pipeline/library error once (with program key, formats, blend) on stderr.
+[ "$BACKEND" = metal ] && export SOUL_GPU_DEBUG=${SOUL_GPU_DEBUG:-1}
 
 info=$(SOUL_GPU="$BACKEND" "${RUNNER[@]}" --gpu-info 2>&1 < /dev/null | tail -1)
 case "$info" in
@@ -65,6 +67,7 @@ stats_of() {
   local line d g dec; line=$(grep '^gpu stats:' "$1" | tail -1)
   if [ -z "$line" ]; then echo "     (no gpu stats line for $2)"; return 0; fi
   echo "     $line"
+  grep -A1 '^\[sgpu-metal\] .* failed' "$1" | head -24 | sed 's/^/     /'
   d=$(echo "$line" | sed -n 's/.* draws=\([0-9]*\).*/\1/p'); g=$(echo "$line" | sed -n 's/.* gpu=\([0-9]*\).*/\1/p')
   dec=$(echo "$line" | sed -n 's/.* declined=\([0-9]*\).*/\1/p')
   d=${d:-0}; g=${g:-0}; dec=${dec:-0}
@@ -87,7 +90,7 @@ for exe in d3d9 d3d932; do
   (cd "$RUN" && SOUL_GPU="$BACKEND" SOUL_PIXEL_TOLERANCE="$TOL" timeout 900 "${RUNNER[@]}" --quiet --gpu-stats $exe.exe > "$exe.out" 2> "$exe.err" < /dev/null)
   cmp_out "d3d9-console $exe" tests/win32/d3d9.expected "$RUN/$exe.out"
   stats_of "$RUN/$exe.err" "d3d9-console $exe"
-  grep -v '^gpu stats:' "$RUN/$exe.err" | head -5
+  grep -v -e '^gpu stats:' -e '^\[sgpu-metal\]' "$RUN/$exe.err" | head -5
 done
 
 # 2. GUI scripts with pixel checks (the script's "pixel" command honours SOUL_PIXEL_TOLERANCE)

@@ -197,7 +197,7 @@ static void print_vertex(SgBuf *b, const SgState *s, int prim, int lang, int nv,
         if (s->point_sprite) sb_put(b, "    if (sz < 1.0f) sz = 1.0f;\n    if (sz > 4096.0f) sz = 4096.0f;\n");
         else sb_put(b, "    sz = sz > 1.5f ? sg_floor(sz + 0.5f) : 1.0f;\n    if (sz > 4096.0f) sz = 4096.0f;\n");
         sb_put(b, "    o.point_size = sz;\n");
-    } else sb_put(b, "    o.point_size = 1.0f;\n");
+    } else if (lang != SGSL_MSL) sb_put(b, "    o.point_size = 1.0f;\n");   // MSL: no [[point_size]] member outside point primitives
     for (int i = 0; i < nclip; i++) {
         if (s->clip_mask & (1 << i)) sb_put(b, "    o.clip[%d] = u.clip_plane[%d].x * p.x + u.clip_plane[%d].y * p.y + u.clip_plane[%d].z * p.z + u.clip_plane[%d].w * p.w;\n", i, i, i, i, i);
         else sb_put(b, "    o.clip[%d] = 1.0f;\n", i);
@@ -283,9 +283,12 @@ char *sgsl_generate_prim(const SgState *s, int prim, int lang, SgslInfo *info, c
         if (!ubytes) { fail_out(err, errlen, "uniform layout mismatch"); gb_free(&g); free(b.p); return NULL; }
         sb_put(&b,
                "struct SgVertex { float x, y, z, w; float c[4]; float t[2][2]; float fog; float psize; float v[12][4]; };\n");
-        sb_put(&b, "struct SgVSOut {\n    float4 position [[position]];\n    float point_size [[point_size]];\n");
+        // [[point_size]] only for point primitives (Metal requires it there, and nothing else uses it). A flat varying carries the
+        // same qualifier on both sides of the stage link ([[user(vN), flat]] in SgVSOut and SgFSIn).
+        sb_put(&b, "struct SgVSOut {\n    float4 position [[position]];\n");
+        if (prim == SG_PRIM_POINTS) sb_put(&b, "    float point_size [[point_size]];\n");
         if (nclip) sb_put(&b, "    float clip [[clip_distance]] [%d];\n", nclip);
-        for (int k = 0; k < nv; k++) sb_put(&b, "    float4 v%d [[user(v%d)]];\n", k, k);
+        for (int k = 0; k < nv; k++) sb_put(&b, "    float4 v%d [[user(v%d)%s]];\n", k, k, ((flatmask >> k) & 1) ? ", flat" : "");
         sb_put(&b, "};\nstruct SgFSIn {\n    float4 position [[position]];\n");
         for (int k = 0; k < nv; k++) sb_put(&b, "    float4 v%d [[user(v%d)%s]];\n", k, k, ((flatmask >> k) & 1) ? ", flat" : "");
         sb_put(&b, "};\nstruct SgFSOut {\n    float4 color [[color(0)]];\n");

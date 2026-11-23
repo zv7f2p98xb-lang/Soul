@@ -555,6 +555,41 @@ static int msl_check(const char *src, char *why, size_t whylen) {
     if (strstr(src, "] [[") || strstr(src, "][[")) { snprintf(why, whylen, "attribute after array bounds"); return 0; }
     if (!strstr(src, "vertex SgVSOut sg_vs(")) { snprintf(why, whylen, "no vertex sg_vs"); return 0; }
     if (!strstr(src, "fragment SgFSOut sg_fs(")) { snprintf(why, whylen, "no fragment sg_fs"); return 0; }
+    // stage link: every SgFSIn member must have an identical member (type, name, [[user()]] and interpolation qualifier) in SgVSOut,
+    // [[point_size]] exists in SgVSOut for point primitives only, and nothing but position/user members is in SgFSIn
+    {
+        const char *vo = strstr(src, "struct SgVSOut {"), *fi = strstr(src, "struct SgFSIn {");
+        if (!vo || !fi) { snprintf(why, whylen, "no SgVSOut/SgFSIn"); return 0; }
+        const char *vo_end = strstr(vo, "};"), *fi_end = strstr(fi, "};");
+        if (!vo_end || !fi_end) { snprintf(why, whylen, "unterminated SgVSOut/SgFSIn"); return 0; }
+        int prim = -1;
+        const char *hp = strstr(src, ", primitive ");
+        if (hp) prim = atoi(hp + 12);
+        const char *ps = strstr(vo, "[[point_size]]");
+        int has_ps = ps && ps < vo_end;
+        if (has_ps != (prim == SG_PRIM_POINTS)) { snprintf(why, whylen, "[[point_size]] must be in SgVSOut exactly for points"); return 0; }
+        const char *pos = strstr(vo, "float4 position [[position]];");
+        if (!pos || pos > vo_end) { snprintf(why, whylen, "SgVSOut without [[position]]"); return 0; }
+        for (const char *q = fi; q < fi_end; ) {
+            const char *eol = strchr(q, '\n');
+            if (!eol || eol > fi_end) break;
+            char line[160];
+            size_t n = (size_t)(eol - q);
+            if (n >= sizeof line) n = sizeof line - 1;
+            memcpy(line, q, n); line[n] = 0;
+            q = eol + 1;
+            if (!strstr(line, "[[user(")) {
+                if (strstr(line, "struct SgFSIn") || strstr(line, "float4 position [[position]];") || !strchr(line, '[')) continue;
+                snprintf(why, whylen, "unexpected SgFSIn member: %s", line); return 0;
+            }
+            const char *b = line;
+            while (*b == ' ') b++;
+            const char *f = vo;
+            int found = 0;
+            while ((f = strstr(f, b)) && f < vo_end) { if (f[-1] == ' ') { found = 1; break; } f += 1; }
+            if (!found) { snprintf(why, whylen, "SgFSIn member without identical SgVSOut member: %s", b); return 0; }
+        }
+    }
     // textures / samplers used must be declared as parameters of sg_fs, texture types must not clash
     const char *fs = strstr(src, "fragment SgFSOut sg_fs(");
     for (const char *p = fs; (p = strstr(p, "tex")); p += 3) {
