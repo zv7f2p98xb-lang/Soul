@@ -10,7 +10,7 @@ mkdir -p "$OUT"
 export TMPDIR=${TMPDIR:-$(mktemp -d)}
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/msi.exe" ../win32/msi.c -lmsi || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/msi32.exe" ../win32/msi.c -lmsi || exit 1
-cp sample.msi ca.msi "$OUT/"
+cp sample.msi ca.msi lzx/lzx.msi "$OUT/"
 pass=0; fail=0
 clean() { rm -rf "$OUT/Program Files" "$OUT/Program Files (x86)" "$OUT/ProgramData" "$OUT/users" "$OUT/windows" "$OUT/Soul Test"; }
 check() { # name command...

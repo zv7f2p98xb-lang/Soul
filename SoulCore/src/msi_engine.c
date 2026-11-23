@@ -1544,8 +1544,8 @@ static int act_install_files(MsiSess *s) {
         if (cc.err) rc = cc.err;
         else if (r != 0) {
             char mm[700];
-            if (strstr(err, "LZX") || strstr(err, "not supported") || strstr(err, "desteklen"))
-                snprintf(mm, sizeof mm, "Kurulum paketindeki '%s' dosyası LZX ile sıkıştırılmış; Soul bu sıkıştırmayı henüz desteklemiyor. (%s)", cab, err);
+            if (strstr(err, "Quantum") || strstr(err, "desteklen"))
+                snprintf(mm, sizeof mm, "Kurulum paketindeki '%s' dosyası Quantum ile sıkıştırılmış; Soul bu sıkıştırmayı desteklemiyor. (%s)", cab, err);
             else snprintf(mm, sizeof mm, "'%s' dosyası okunamadı: %s", cab, err);
             ui_error(s, mm);
             rc = 1603;

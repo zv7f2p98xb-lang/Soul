@@ -76,6 +76,22 @@ nope.txt exists: 0
 ca_imm.txt exists: 0
 install dir exists: 0
 state: -1
+== lzx.msi ==
+install: 0 errors=0 state=5
+code.exe: size=100001 crc=b8f142aa
+text.txt: size=60000 crc=e81de84b
+sub\table.dat: size=50001 crc=d474482d
+tiny.txt: size=17 crc=6e85ed24
+empty.bin: size=0 crc=00000000
+tiny.txt: tiny file, 31 byt
+uninstall: 0
+code.exe exists: 0
+text.txt exists: 0
+sub\table.dat exists: 0
+tiny.txt exists: 0
+empty.bin exists: 0
+install dir exists: 0
+state: -1
 == msiexec ==
 msiexec /i /qn: 0 readme exists: 1 state: 5
 msiexec /x /qn: 0 readme exists: 0 state: -1

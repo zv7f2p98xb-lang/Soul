@@ -264,6 +264,49 @@ static int fuzz_msi(int rounds) {
     return 1;
 }
 
+
+// ---- LZX cabinets: tests/msi/lzx/cabs/*.cab vs. tests/msi/lzx/src/* (manifest.txt: "cab file size crc32") ------------------
+typedef struct { int n, bad, order_bad; char names[16][40]; } LzxCheck;
+static int lzx_cb(void *ctx, const char *name, const uint8_t *data, size_t len, uint32_t attribs) {
+    LzxCheck *lc = ctx;
+    char rel[100];
+    size_t n = 0;
+    snprintf(rel, sizeof rel, "lzx/src/%s", name);
+    uint8_t *ref = slurp(rel, &n);
+    if (lc->n < 16) snprintf(lc->names[lc->n], 40, "%s", name);
+    lc->n++;
+    if (!ref || n != len || (len && memcmp(ref, data, len) != 0)) { lc->bad++; printf("  mismatch: %s (%zu vs %zu)\n", name, len, ref ? n : 0); }
+    free(ref);
+    return 0;
+}
+static int fuzz_lzx(const char *rel, int rounds) {
+    size_t n;
+    uint8_t *orig = slurp(rel, &n);
+    if (!orig) return 0;
+    uint8_t *w = malloc(n);
+    int ok = 0;
+    for (int i = 0; i < rounds; i++) {
+        size_t wn = n;
+        memcpy(w, orig, n);
+        char err[200];
+        switch (i % 4) {
+        case 0: wn = rnd() % n; break;                                          // truncation
+        case 1: {                                                               // damage inside the first block header / trees
+            size_t lo = 36 + 8 * (n > 400 ? 2 : 1), span = n - lo < 700 ? n - lo : 700;
+            for (int j = 0, k = 1 + (int)(rnd() % 3); j < k; j++) w[lo + rnd() % span] ^= (uint8_t)(1u << (rnd() % 8));
+            break;
+        }
+        case 2: for (int j = 0, k = 1 + (int)(rnd() % 8); j < k; j++) w[rnd() % n] = (uint8_t)rnd(); break;
+        default: w[rnd() % n] ^= (uint8_t)(1u << (rnd() % 8)); break;           // single bit flip anywhere
+        }
+        if (cab_extract(w, wn, NULL, NULL, err, sizeof err) == 0) ok++;
+    }
+    free(w);
+    free(orig);
+    printf("  lzx fuzz %s: %d rounds, %d still extracted\n", rel, rounds, ok);
+    return 1;
+}
+
 static int fuzz_cab(const char *rel, int rounds) {
     size_t n;
     uint8_t *orig = slurp(rel, &n);
@@ -430,12 +473,60 @@ int main(int argc, char **argv) {
                 size_t fo = 36 + 0;    // first CFFOLDER (no reserve fields, no prev/next)
                 m[fo + 6] = 3;
                 int r1 = cab_extract(m, n, NULL, NULL, err, sizeof err);
-                report("cab LZX reports unsupported", r1 == -1 && strstr(err, "LZX") != NULL);
+                report("cab MSZIP data declared as LZX gives a clean error", r1 == -1 && err[0]);
                 m[fo + 6] = 2;
                 r1 = cab_extract(m, n, NULL, NULL, err, sizeof err);
                 report("cab Quantum reports unsupported", r1 == -1 && strstr(err, "Quantum") != NULL);
                 free(m);
             }
+            free(c);
+        }
+        // LZX cabinets
+        {
+            size_t mn;
+            uint8_t *man = slurp("lzx/manifest.txt", &mn);
+            report("lzx manifest present", man && mn > 50);
+            int ncabs = 0, allok = 1;
+            const char *list[] = {"lzx15.cab", "lzx16.cab", "lzx21.cab", "lzxlate.cab", "lzxe8.cab", "lzxtiny.cab"};
+            for (int i = 0; i < 6; i++) {
+                char rel[100], nm[140];
+                size_t cn;
+                snprintf(rel, sizeof rel, "lzx/cabs/%s", list[i]);
+                uint8_t *c = slurp(rel, &cn);
+                LzxCheck lc;
+                memset(&lc, 0, sizeof lc);
+                int rc = c ? cab_extract(c, cn, lzx_cb, &lc, err, sizeof err) : -1;
+                // expected file list: manifest lines of this cabinet, in order
+                int want = 0, order_ok = 1;
+                for (char *p = man ? (char *)man : NULL; p && p < (char *)man + mn;) {
+                    char *e = memchr(p, '\n', (char *)man + mn - p);
+                    size_t ll = e ? (size_t)(e - p) : (size_t)((char *)man + mn - p);
+                    char line[200];
+                    snprintf(line, sizeof line, "%.*s", (int)(ll < 199 ? ll : 199), p);
+                    char cabn[64], fn[64];
+                    unsigned long sz;
+                    if (sscanf(line, "%63s %63s %lu", cabn, fn, &sz) == 3 && !strcmp(cabn, list[i])) {
+                        if (want < 16 && strcmp(lc.names[want], fn)) order_ok = 0;
+                        want++;
+                    }
+                    p = e ? e + 1 : (char *)man + mn;
+                }
+                snprintf(nm, sizeof nm, "lzx %s: %d files extract byte-identically", list[i], want);
+                int good = c && rc == 0 && lc.n == want && want > 0 && lc.bad == 0 && order_ok;
+                report(nm, good);
+                if (rc) printf("  %s\n", err);
+                allok &= good;
+                ncabs++;
+                free(c);
+            }
+            report("lzx: all cabinets ok", allok && ncabs == 6);
+            free(man);
+            // a callback that stops early, and extraction without a callback
+            size_t cn;
+            uint8_t *c = slurp("lzx/cabs/lzx15.cab", &cn);
+            LzxCheck lc;
+            memset(&lc, 0, sizeof lc);
+            report("lzx: extraction without callback", c && cab_extract(c, cn, NULL, NULL, err, sizeof err) == 0);
             free(c);
         }
         report("cab rejects garbage", cab_extract((const uint8_t *)"hello world, this is not a cabinet!!!!!!!!", 42, NULL, NULL, err, sizeof err) == -1);
@@ -448,6 +539,12 @@ int main(int argc, char **argv) {
         snprintf(nm, sizeof nm, "fuzz: mszip cab corruption");
         report(nm, fuzz_cab("cabs/mszip.cab", rounds));
         report("fuzz: stored cab corruption", fuzz_cab("cabs/stored.cab", rounds / 3));
+        {
+            const char *list[] = {"lzx/cabs/lzx15.cab", "lzx/cabs/lzx16.cab", "lzx/cabs/lzx21.cab", "lzx/cabs/lzxlate.cab", "lzx/cabs/lzxe8.cab", "lzx/cabs/lzxtiny.cab"};
+            int ok = 1;
+            for (int i = 0; i < 6; i++) ok &= fuzz_lzx(list[i], i == 2 ? rounds / 2 : rounds);
+            report("fuzz: lzx cab corruption and truncation", ok);
+        }
         report("open nonexistent file fails cleanly", msidb_open("/nonexistent/file.msi", err, sizeof err) == NULL && err[0]);
         report("open non-msi fails cleanly", msidb_open(path[0] ? "/etc/passwd" : "", err, sizeof err) == NULL && err[0]);
     }

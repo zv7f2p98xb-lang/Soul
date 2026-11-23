@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="3F0B7C1E-5D2A-4E8B-9A41-6C7D8E9F0A1B" Name="Soul LZX Test" Language="1033" Codepage="1252" Version="2.0.1"
+           Manufacturer="Soul Yazilim" UpgradeCode="9A4C1D7E-2B6F-4A83-8E5D-0C1B2A3F4E5D">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" Description="Soul LZX test package" Comments="LZX cabinet" />
+    <Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" />
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLDIR" Name="Soul LZX">
+          <Directory Id="SUBDIR" Name="sub">
+            <Component Id="CompSub" Guid="22222222-3333-4444-5555-666666666601">
+              <File Id="tableDat" Name="table.dat" Source="src/table.dat" KeyPath="yes" />
+            </Component>
+          </Directory>
+          <Component Id="CompMain" Guid="22222222-3333-4444-5555-666666666602">
+            <File Id="codeExe" Name="code.exe" Source="src/code.exe" KeyPath="yes" />
+            <File Id="tinyTxt" Name="tiny.txt" Source="src/tiny.txt" />
+            <File Id="emptyBin" Name="empty.bin" Source="src/empty.bin" />
+          </Component>
+          <Component Id="CompText" Guid="22222222-3333-4444-5555-666666666603">
+            <File Id="textTxt" Name="text.txt" Source="src/text.txt" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="Main" Title="LZX" Level="1">
+      <ComponentRef Id="CompSub" /><ComponentRef Id="CompMain" /><ComponentRef Id="CompText" />
+    </Feature>
+  </Product>
+</Wix>

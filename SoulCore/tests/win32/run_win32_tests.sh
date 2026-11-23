@@ -35,7 +35,7 @@ x86_64-w64-mingw32-g++ -O2 -static -o "$OUT/xaudio2.exe" xaudio2.cpp -lole32 || 
 i686-w64-mingw32-g++ -O2 -static -o "$OUT/xaudio2_32.exe" xaudio2.cpp -lole32 || exit 1
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/msi.exe" msi.c -lmsi || exit 1
 i686-w64-mingw32-gcc -O2 -o "$OUT/msi32.exe" msi.c -lmsi || exit 1
-cp ../msi/sample.msi ../msi/ca.msi "$OUT/"
+cp ../msi/sample.msi ../msi/ca.msi ../msi/lzx/lzx.msi "$OUT/"
 pass=0; fail=0
 check() {
   local name=$1; shift

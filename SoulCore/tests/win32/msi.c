@@ -1,4 +1,4 @@
-// Windows Installer: installs / queries / uninstalls tests/msi/sample.msi and ca.msi through msi.dll, then runs the
+// Windows Installer: installs / queries / uninstalls tests/msi/sample.msi, ca.msi and lzx/lzx.msi through msi.dll, then runs the
 // msiexec stub. The packages sit next to this program (the test runner copies them).
 #include <windows.h>
 #include <msi.h>
@@ -288,6 +288,53 @@ static DWORD run_msiexec(const wchar_t *args) {
     return code;
 }
 
+static unsigned long crc32_file(const wchar_t *path, long *size) {
+    static unsigned long tab[256];
+    if (!tab[1]) for (unsigned long i = 0; i < 256; i++) { unsigned long c = i; for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320UL ^ (c >> 1) : c >> 1; tab[i] = c; }
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    *size = -1;
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    unsigned long crc = 0xFFFFFFFFUL;
+    static unsigned char buf[16384];
+    DWORD n;
+    *size = 0;
+    while (ReadFile(h, buf, sizeof buf, &n, NULL) && n) {
+        for (DWORD i = 0; i < n; i++) crc = tab[(crc ^ buf[i]) & 0xFF] ^ (crc >> 8);
+        *size += (long)n;
+    }
+    CloseHandle(h);
+    return crc ^ 0xFFFFFFFFUL;
+}
+
+// lzx.msi: the embedded cabinet is LZX-compressed (window 2^21, E8 translation, verbatim/aligned/uncompressed blocks).
+static void lzx_tests(void) {
+    wchar_t pkg[MAX_PATH], p[MAX_PATH];
+    swprintf(pkg, MAX_PATH, L"%ls\\lzx.msi", g_dir);
+    const wchar_t *code = L"{3F0B7C1E-5D2A-4E8B-9A41-6C7D8E9F0A1B}";
+    const wchar_t *root = L"C:\\Program Files (x86)\\Soul LZX";
+    P(L"== lzx.msi ==");
+    g_error = 0;
+    UINT r = MsiInstallProductW(pkg, L"");
+    P(L"install: %u errors=%d state=%d", r, g_error, (int)MsiQueryProductStateW(code));
+    const wchar_t *files[] = { L"code.exe", L"text.txt", L"sub\\table.dat", L"tiny.txt", L"empty.bin" };
+    for (int i = 0; i < 5; i++) {
+        long sz;
+        swprintf(p, MAX_PATH, L"%ls\\%ls", root, files[i]);
+        unsigned long c = crc32_file(p, &sz);
+        P(L"%ls: size=%ld crc=%08lx", files[i], sz, c);
+    }
+    swprintf(p, MAX_PATH, L"%ls\\tiny.txt", root);
+    show_file(L"tiny.txt", p);
+    r = MsiInstallProductW(pkg, L"REMOVE=ALL");
+    P(L"uninstall: %u", r);
+    for (int i = 0; i < 5; i++) {
+        swprintf(p, MAX_PATH, L"%ls\\%ls", root, files[i]);
+        P(L"%ls exists: %d", files[i], exists(p));
+    }
+    P(L"install dir exists: %d", exists(root));
+    P(L"state: %d", (int)MsiQueryProductStateW(code));
+}
+
 static void msiexec_tests(void) {
     wchar_t args[MAX_PATH * 2];
     P(L"== msiexec ==");
@@ -343,6 +390,7 @@ int main(int argc, char **argv) {
     P(L"msi test");
     sample_tests();
     ca_tests();
+    lzx_tests();
     msiexec_tests();
     shell_tests();
     return 0;

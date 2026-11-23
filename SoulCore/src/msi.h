@@ -46,7 +46,7 @@ int msiview_column_count(MsiView *v);
 const char *msiview_column_name(MsiView *v, int i);  // selected columns in order (all columns for *)
 void msiview_close(MsiView *v);
 
-// Cabinets (MS-CAB): uncompressed and MSZIP folders. LZX / Quantum folders fail with a "not supported yet" error.
+// Cabinets (MS-CAB): stored, MSZIP and LZX folders. Quantum folders fail with a "not supported" error.
 typedef int (*CabFileFn)(void *ctx, const char *name, const uint8_t *data, size_t len, uint32_t attribs); // return non-zero to stop
 int cab_extract(const uint8_t *cab, size_t len, CabFileFn fn, void *ctx, char *err, size_t errlen); // 0 ok, -1 error
 
