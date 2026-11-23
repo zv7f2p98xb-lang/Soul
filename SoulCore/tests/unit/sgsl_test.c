@@ -551,6 +551,8 @@ static int msl_check(const char *src, char *why, size_t whylen) {
         if (paren < 0 || brace < 0 || brack < 0) { snprintf(why, whylen, "unbalanced brackets"); return 0; }
     }
     if (paren || brace || brack) { snprintf(why, whylen, "unbalanced brackets at the end"); return 0; }
+    // MSL requires attributes before array bounds (float clip [[clip_distance]] [N]); "] [[" is an attribute after array bounds
+    if (strstr(src, "] [[") || strstr(src, "][[")) { snprintf(why, whylen, "attribute after array bounds"); return 0; }
     if (!strstr(src, "vertex SgVSOut sg_vs(")) { snprintf(why, whylen, "no vertex sg_vs"); return 0; }
     if (!strstr(src, "fragment SgFSOut sg_fs(")) { snprintf(why, whylen, "no fragment sg_fs"); return 0; }
     // textures / samplers used must be declared as parameters of sg_fs, texture types must not clash

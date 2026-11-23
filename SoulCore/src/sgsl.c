@@ -284,7 +284,7 @@ char *sgsl_generate_prim(const SgState *s, int prim, int lang, SgslInfo *info, c
         sb_put(&b,
                "struct SgVertex { float x, y, z, w; float c[4]; float t[2][2]; float fog; float psize; float v[12][4]; };\n");
         sb_put(&b, "struct SgVSOut {\n    float4 position [[position]];\n    float point_size [[point_size]];\n");
-        if (nclip) sb_put(&b, "    float clip[%d] [[clip_distance]];\n", nclip);
+        if (nclip) sb_put(&b, "    float clip [[clip_distance]] [%d];\n", nclip);
         for (int k = 0; k < nv; k++) sb_put(&b, "    float4 v%d [[user(v%d)]];\n", k, k);
         sb_put(&b, "};\nstruct SgFSIn {\n    float4 position [[position]];\n");
         for (int k = 0; k < nv; k++) sb_put(&b, "    float4 v%d [[user(v%d)%s]];\n", k, k, ((flatmask >> k) & 1) ? ", flat" : "");
