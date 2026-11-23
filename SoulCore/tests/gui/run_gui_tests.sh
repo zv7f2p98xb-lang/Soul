@@ -3,10 +3,12 @@
 # Usage: tests/gui/run_gui_tests.sh [soulrun-command...]
 set -u
 cd "$(dirname "$0")"
+. ../portable.sh
 HERE=$(pwd)
 RUNNER=("$@")
-[ ${#RUNNER[@]} -eq 0 ] && RUNNER=("$HERE/../../build/native/soulrun")
-case "${RUNNER[-1]}" in /*) ;; *) RUNNER[-1]="$HERE/../../${RUNNER[-1]#../../}" ;; esac
+[ ${#RUNNER[@]} -eq 0 ] && RUNNER=("$HERE/../../build/$SOUL_HOST_BUILD/soulrun")
+LAST=$((${#RUNNER[@]} - 1))   # (no negative indices: macOS ships bash 3.2)
+case "${RUNNER[$LAST]}" in /*) ;; *) RUNNER[$LAST]="$HERE/../../${RUNNER[$LAST]#../../}" ;; esac
 OUT="$HERE/../../build/guitests"
 mkdir -p "$OUT"
 x86_64-w64-mingw32-windres gui_basic.rc -O coff -o "$OUT/gui_basic.res" || exit 1

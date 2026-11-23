@@ -43,6 +43,102 @@ jobs:
         with:
           name: samples
           path: samples-out/
+      - name: Package the Windows test executables for the macOS GPU job
+        run: |
+          cd SoulCore
+          # the executables the suites above built, the reference outputs of the differential tests, the msi
+          # packages, and (when the shader translator wrote them) the generated Metal sources
+          { find build/tests build/win32tests build/guitests \( -name '*.exe' -o -name '*.expected' -o -name '*.msi' \) -print0
+            [ -d build/unit/sgsl_msl ] && find build/unit/sgsl_msl -type f -print0
+            true; } > "$RUNNER_TEMP/prebuilt.list"
+          tar czf "$GITHUB_WORKSPACE/prebuilt.tgz" --null -T "$RUNNER_TEMP/prebuilt.list"
+          ls -la "$GITHUB_WORKSPACE/prebuilt.tgz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-tests
+          path: prebuilt.tgz
+
+  macos-gpu:
+    name: macOS GPU tests
+    runs-on: macos-15
+    needs: core
+    env:
+      # the Windows test programs come from the Linux job (no MinGW here); the interpreter is used by default
+      # (an ad-hoc signed CLI could use MAP_JIT, but the JIT is exercised by the Linux/qemu job and the simulator
+      # job - what matters here is the GPU backend). The JIT step below is informational.
+      SOUL_PREBUILT: "1"
+      SOUL_NO_JIT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: samples
+          path: SoulCore/build/samples
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-tests
+          path: prebuilt
+      - name: Unpack the prebuilt Windows test programs
+        run: |
+          tar xzf prebuilt/prebuilt.tgz -C SoulCore
+          find SoulCore/build -name '*.exe' | wc -l
+      - name: Machine
+        run: |
+          sw_vers; uname -m; xcodebuild -version || true
+          system_profiler SPDisplaysDataType | head -20 || true
+      - name: Build soulrun for macOS
+        run: make -C SoulCore macos -j4
+      - name: Backends in this binary
+        run: |
+          SoulCore/build/macos/soulrun --gpu-info
+          SOUL_GPU=mirror SoulCore/build/macos/soulrun --gpu-info
+          SOUL_GPU=metal SoulCore/build/macos/soulrun --gpu-info
+      - name: Differential tests (interpreter, macOS)
+        run: SoulCore/tests/run_tests.sh
+      - name: Win32 / C++ / threads tests (interpreter, macOS)
+        run: SoulCore/tests/win32/run_win32_tests.sh
+      - name: GUI tests (CPU, exact pixels, macOS)
+        run: SoulCore/tests/gui/run_gui_tests.sh
+      - name: GPU tests, SOUL_GPU=metal (tolerance +-2) and frame rates
+        run: |
+          set -o pipefail
+          SOUL_GPU=metal SOUL_PIXEL_TOLERANCE=2 GPU_BENCH_SECONDS=10 SoulCore/tests/gpu/run_gpu_tests.sh 2>&1 | tee gpu-metal.log
+          { echo '### GPU frame rates (Metal vs CPU)'; echo '```'; sed -n '/--- frame rates/,/^gpu tests/p' gpu-metal.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: GPU tests, SOUL_GPU=mirror (exact)
+        run: SOUL_GPU=mirror SOUL_PIXEL_TOLERANCE=0 GPU_BENCH=0 SoulCore/tests/gpu/run_gpu_tests.sh
+      - name: Mirror backend over the whole win32 + GUI suites
+        run: SoulCore/tests/gpu/run_mirror_tests.sh
+      - name: Compile the generated Metal shaders
+        run: |
+          dir=SoulCore/build/unit/sgsl_msl
+          if ! ls "$dir"/*.metal >/dev/null 2>&1; then
+            echo "::notice::no generated Metal sources in $dir (shader translator not in this build yet), skipping"
+            exit 0
+          fi
+          xcrun -sdk macosx metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain || true
+          tmp=$(mktemp -d); bad=0; n=0
+          for f in "$dir"/*.metal; do
+            n=$((n+1))
+            if ! xcrun -sdk macosx metal -c "$f" -o "$tmp/$(basename "$f").air" 2> "$tmp/err.txt"; then
+              bad=$((bad+1)); echo "FAIL $f"; head -30 "$tmp/err.txt"
+            fi
+          done
+          echo "metal: compiled $((n-bad)) of $n shaders"
+          [ $bad -eq 0 ]
+      - name: Differential tests with the JIT (informational)
+        continue-on-error: true
+        env:
+          SOUL_NO_JIT: "0"
+        run: SoulCore/tests/run_tests.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-gpu-results
+          path: |
+            gpu-metal.log
+            SoulCore/build/gputests/run/*.out
+            SoulCore/build/gputests/run/*.err
+            SoulCore/build/gputests/run/*.ppm
 
   ipa:
     name: iPad app (unsigned IPA)

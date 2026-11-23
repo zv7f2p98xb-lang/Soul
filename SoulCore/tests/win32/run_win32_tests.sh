@@ -4,8 +4,9 @@
 # Usage: tests/win32/run_win32_tests.sh [soulrun-command...]
 set -u
 cd "$(dirname "$0")"
+. ../portable.sh
 RUNNER=("$@")
-[ ${#RUNNER[@]} -eq 0 ] && RUNNER=(../../build/native/soulrun)
+[ ${#RUNNER[@]} -eq 0 ] && RUNNER=(../../build/$SOUL_HOST_BUILD/soulrun)
 OUT=../../build/win32tests
 mkdir -p "$OUT"
 x86_64-w64-mingw32-gcc -O2 -o "$OUT/winapi.exe" winapi.c || exit 1

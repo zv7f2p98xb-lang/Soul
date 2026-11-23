@@ -3,6 +3,7 @@
 # and the msiexec full UI driven by GUI scripts. Usage: tests/msi/run_msi_tests.sh
 set -u
 cd "$(dirname "$0")"
+. ../portable.sh
 HERE=$(pwd)
 CORE=$HERE/../..
 OUT=$CORE/build/win32tests

@@ -1,5 +1,6 @@
 // soulrun - command line runner for SoulCore (Linux/macOS testing).
 #include "../include/SoulCore.h"
+#include "../src/sgpu.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,6 +67,17 @@ static void *audio_main(void *arg) { // pulls the mix in real time like an audio
 // ---- GUI scripting (tests): drives windows like the iPad UI would -------------------------------
 static const char *g_script;
 static int g_script_failed;
+static int g_pixel_tol;   // --pixel-tolerance N / SOUL_PIXEL_TOLERANCE=N: "pixel" checks accept +-N per channel (GPU backends)
+
+static int pixel_near(uint32_t got, uint32_t want) {
+    if (g_pixel_tol <= 0) return got == want;
+    if (got > 0xFFFFFFu) return 0;   // outside the window
+    for (int s = 0; s < 24; s += 8) {
+        int a = (int)((got >> s) & 255), b = (int)((want >> s) & 255);
+        if (a - b > g_pixel_tol || b - a > g_pixel_tol) return 0;
+    }
+    return 1;
+}
 
 static int top_windows(SoulWindowInfo *w, int max) { return soul_gui_windows(g_p, w, max); }
 
@@ -234,7 +246,7 @@ static void *script_main(void *arg) {
             soul_gui_copy(g_p, w[i].hwnd, px, (size_t)w[i].width * 4, w[i].width, w[i].height, &ver);
             int x = atoi(a), y = atoi(b);
             uint32_t want = (uint32_t)strtoul(c, NULL, 16), got = x < w[i].width && y < w[i].height ? px[(size_t)y * w[i].width + x] & 0xFFFFFF : 0xFFFFFFFF;
-            if (got != want) { fprintf(stderr, "[script] HATA: piksel (%d,%d) = %06X, beklenen %06X\n", x, y, got, want); g_script_failed = 1; }
+            if (!pixel_near(got, want)) { fprintf(stderr, "[script] HATA: piksel (%d,%d) = %06X, beklenen %06X (tolerans %d)\n", x, y, got, want, g_pixel_tol); g_script_failed = 1; }
             free(px);
             continue;
         }
@@ -247,7 +259,9 @@ static void *script_main(void *arg) {
 }
 
 int main(int argc, char **argv) {
-    int jit = 1, verbose = 0, stats = 0, screen_w = 0, screen_h = 0;
+    int jit = 1, verbose = 0, stats = 0, screen_w = 0, screen_h = 0, gpu_info = 0;
+    { const char *nj = getenv("SOUL_NO_JIT"); if (nj && *nj && strcmp(nj, "0")) jit = 0; }   // same as --no-jit (for test scripts that cannot pass runner options)
+    if (getenv("SOUL_PIXEL_TOLERANCE")) g_pixel_tol = atoi(getenv("SOUL_PIXEL_TOLERANCE"));
     const char *drive = NULL;
     int i = 1;
     for (; i < argc && argv[i][0] == '-'; i++) {
@@ -259,12 +273,19 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--quiet")) g_quiet_log = 1;
         else if (!strcmp(argv[i], "--drive") && i + 1 < argc) drive = argv[++i];
         else if (!strcmp(argv[i], "--gui-script") && i + 1 < argc) g_script = argv[++i];
+        else if (!strcmp(argv[i], "--pixel-tolerance") && i + 1 < argc) g_pixel_tol = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gpu-info")) gpu_info = 1;
         else if (!strcmp(argv[i], "--audio") && i + 1 < argc) g_audio_path = argv[++i];
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc) { if (sscanf(argv[++i], "%dx%d", &screen_w, &screen_h) != 2) return 2; }
         else { fprintf(stderr, "bilinmeyen seçenek %s\n", argv[i]); return 2; }
     }
+    if (gpu_info) { // which sgpu backend SOUL_GPU selects in this binary: "gpu backend: mirror|metal|none"
+        const SgBackend *b = sg_backend_get();
+        printf("gpu backend: %s\n", b && b->name ? b->name : "none");
+        return 0;
+    }
     if (i >= argc) {
-        fprintf(stderr, "kullanım: soulrun [--no-jit] [-v] [--stats] [--drive DIR] [--gui-script FILE] [--screen WxH] [--audio FILE.wav] program.exe [argümanlar...]\n");
+        fprintf(stderr, "kullanım: soulrun [--no-jit] [--pixel-tolerance N] [--gpu-info] [-v] [--stats] [--drive DIR] [--gui-script FILE] [--screen WxH] [--audio FILE.wav] program.exe [argümanlar...]\n");
         return 2;
     }
     const char *exe = argv[i++];
