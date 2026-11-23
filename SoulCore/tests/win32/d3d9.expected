@@ -1,0 +1,146 @@
+device created
+caps: hr=1 dev=1 vs=300 ps=300 tex=4096 stages=8 simul=8 streams=16 vsconst=256 lights=8
+adapter: count=1 name=1
+check: a8r8g8b8 tex 1, dxt1 tex 1, d24s8 1, msaa 0
+display mode: ok
+mode enum: ok
+clear color: ok
+clear color corner: ok
+depth reject: ok
+depth accept: ok
+clear rect: ok
+rhw quad inside: ok
+rhw quad corners: ok
+rhw quad outside: ok
+cube front face: ok
+cube silhouette: ok
+cube no-depth backface cull: ok
+cube depth hides back faces: ok
+cube lit/unlit faces: ok
+texture created: ok
+tex point texel 0,0: ok
+tex point texel 1,0: ok
+tex point texel 3,3: ok
+tex point edge 15: ok
+tex point edge 16: ok
+tex point row 2: ok
+tex linear left: ok
+tex linear mid 31: ok
+tex linear mid 32: ok
+tex linear right: ok
+dxt1 created: ok
+dxt1 row0 red: ok
+dxt1 row1 blue: ok
+dxt1 row2 2/3: ok
+dxt1 row3 1/3: ok
+fmt r5g6b5: ok
+fmt l8: ok
+fmt x1r5g5b5: ok
+fmt a8l8: ok
+fmt a8: ok
+rt texture created: ok
+viewport follows target: ok
+rtt sampled green: ok
+rtt sampled red: ok
+rtt outside: ok
+blend srcalpha: ok
+blend one/one add: ok
+alpha test reject: ok
+alpha test accept: ok
+stencil marked: ok
+stencil unmarked: ok
+stencil unmarked 2: ok
+scissor inside: ok
+scissor edges: ok
+scissor clear: ok
+two stages modulate+add: ok
+vertex fog linear: ok
+vertex fog none at z=0: ok
+point size 5: ok
+point size outside: ok
+point size 1: ok
+indexed16 base vertex: ok
+indexed32: ok
+indexed no garbage: ok
+vb refcount: ok
+ib refcount: ok
+drawprimitiveup strip: ok
+drawprimitiveup fan: ok
+drawprimitiveup lines: ok
+vertex declaration created: ok
+vertex declaration quad: ok
+vertex declaration clip-space: ok
+vertex declaration refcount: ok
+cube texture created: ok
+cube map +x: ok
+cube map -y: ok
+cube map +z: ok
+render target surface: ok
+stretchrect hr: ok
+stretchrect: ok
+surface GetDC: ok
+render target data copy: ok
+update surface: ok
+surface GetDC / GDI: ok
+backbuffer is render target: ok
+depth stencil exists: ok
+depth desc: ok
+texture transform scroll left: ok
+texture transform scroll right: ok
+wireframe: ok
+flat shading: ok
+gouraud differs from flat: ok
+clip plane: ok
+specular highlight: ok
+point light attenuation: ok
+spot light inside inner cone: ok
+spot light outside outer cone: ok
+instancing: ok
+mip level 0: ok
+mip level selected by minification: ok
+table fog linear (z = 0.5): ok
+table fog with specular-alpha vertex fog: ok
+cull modes: ok
+volume texture created: ok
+volume texture slice 0: ok
+volume texture slice 1: ok
+p8 texture: ok
+palettised texture: ok
+autogen texture: ok
+autogen level count: ok
+auto generated mip chain: ok
+occlusion query: ok
+occlusion pixels: ok
+point sprite texture coordinates: ok
+point sprite extent: ok
+swap chain count: ok
+get swap chain: ok
+present parameters: ok
+swap chain back buffer identity: ok
+swap chain present: ok
+additional swap chain: ok
+additional back buffer size: ok
+additional present: ok
+texture levels: ok
+texture bound ref: ok
+GetTexture identity: ok
+texture unbound ref: ok
+stateblock recording does not apply: ok
+stateblock apply: ok
+stateblock capture: ok
+event query: ok
+event signalled: ok
+unsupported query: ok
+cooperative level: ok
+scene state: ok
+shader pass-through: ok
+reset: ok
+reset back buffer: ok
+reset depth buffer: ok
+reset viewport: ok
+draw after reset: ok
+reset back: ok
+present: ok
+device release: 0
+d3d release: 0
+failures: 0

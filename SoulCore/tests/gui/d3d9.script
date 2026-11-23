@@ -1,0 +1,15 @@
+# Direct3D 9: the presented frame (blue-grey background, red and green squares) shows up in the window.
+waitwin 1
+wait 800
+pixel 2 2 204080
+pixel 126 2 204080
+pixel 9 9 204080
+pixel 10 10 FF0000
+pixel 49 49 FF0000
+pixel 50 50 204080
+pixel 69 69 204080
+pixel 70 70 00FF00
+pixel 119 119 00FF00
+pixel 120 120 204080
+dump d3d9.ppm
+close

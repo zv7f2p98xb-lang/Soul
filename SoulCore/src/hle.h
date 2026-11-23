@@ -32,6 +32,8 @@ extern const HleEntry hle_audio_table[];
 extern const HleEntry hle_msi_table[];     // msi_install.c
 extern const HleEntry hle_gdiplus_table[]; // gdiplus.c
 extern const HleEntry hle_xaudio2_table[]; // xaudio2.c
+extern const HleEntry hle_d3d9_table[];    // d3d9.c (Direct3D 9 on sgpu)
+void d9_process_exit(void);                // d3d9.c: frees the Direct3D objects of the active process
 // xaudio2.c: creates an XAudio2 / X3DAudio COM object for CoCreateInstance; REGDB_E_CLASSNOTREG (0x80040154) = not ours
 uint32_t xaudio2_com_create(X86State *st, uint64_t clsid, uint64_t riid, uint64_t ppv);
 // hle_com.c: writes a .lnk file (UTF-8 strings, Windows paths for target/workdir/icon, NULL = empty; show_cmd SW_*). 0 = ok
