@@ -1,5 +1,6 @@
 // SoulCore - CPU backend of the sgpu 3D pipeline (see sgpu.h).
 #include "sgpu.h"
+#include "sgpu_program.h"
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -443,7 +444,7 @@ static void raster_tri(SgTarget *t, const SgState *s, const Sv *v0, const Sv *v1
     }
 }
 
-void sg_triangles(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
+void sg_cpu_triangles(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
     if (!t->color) return;
     Clip cr = clip_rect(t, s);
     if (cr.x0 >= cr.x1 || cr.y0 >= cr.y1) return;
@@ -515,7 +516,7 @@ static void raster_line(SgTarget *t, const SgState *s, const Sv *a, const Sv *b,
     }
 }
 
-void sg_lines(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
+void sg_cpu_lines(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
     if (!t->color) return;
     Plane pl[MAXPLANES];
     int np = build_planes(t, s, pl, 1);
@@ -537,7 +538,7 @@ void sg_lines(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
     }
 }
 
-void sg_points(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
+void sg_cpu_points(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
     if (!t->color) return;
     Clip c = clip_rect(t, s);
     Plane pl[MAXPLANES];
@@ -591,7 +592,7 @@ void sg_points(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
     }
 }
 
-void sg_clear_ex(SgTarget *t, const SgState *s, int flags, uint32_t argb, float z, uint8_t stencil) {
+void sg_cpu_clear_ex(SgTarget *t, const SgState *s, int flags, uint32_t argb, float z, uint8_t stencil) {
     int x0 = 0, y0 = 0, x1 = t->w, y1 = t->h;
     if (s->scissor) {
         x0 = s->sc_x; x1 = s->sc_x + s->sc_w;
@@ -652,9 +653,11 @@ void sg_texture_build_mips(SgTexture *tx) {
         tx->levels++;
         w = nw; h = nh; d = nd;
     }
+    sg_texture_touch(tx);
 }
 
 void sg_texture_free(SgTexture *tx) {
+    sg_texture_release(tx);
     for (int i = 1; i < tx->levels; i++) free(tx->mip[i]);
     free(tx->rgba);
     memset(tx, 0, sizeof *tx);
@@ -849,4 +852,131 @@ void sg_sample(const SgTexture *t, const SgSampler *s, const float coord[4], con
         for (int k = 0; k < 4; k++) acc[k] += v[k];
     }
     for (int k = 0; k < 4; k++) out[k] = acc[k] / (float)ntap;
+}
+
+// ---- backend dispatch ---------------------------------------------------------------------------------------------
+
+const SgBackend *sg_mirror_backend(void) __attribute__((weak));
+
+static const SgBackend *g_backend;
+static int g_backend_init;
+
+static void backend_init(void) {
+    g_backend_init = 1;
+    const char *e = getenv("SOUL_GPU");
+    if (e && !strcmp(e, "mirror") && sg_mirror_backend) g_backend = sg_mirror_backend();
+}
+static inline const SgBackend *be(void) {
+    if (__builtin_expect(!g_backend_init, 0)) backend_init();
+    return g_backend;
+}
+
+void sg_backend_set(const SgBackend *b) { g_backend_init = 1; g_backend = b; }
+const SgBackend *sg_backend_get(void) { return be(); }
+
+static int bk_draw(const SgBackend *b, SgTarget *t, const SgState *s, int prim, const SgVertex *v, int n) {
+    if (!t->color || n <= 0) return 1;   // nothing to do: same as the CPU path
+    if (b->draw && b->draw(b->self, t, s, prim, v, n) == 0) return 1;
+    return 0;
+}
+static void bk_fallback_pre(const SgBackend *b, SgTarget *t) { if (b->sync_to_cpu) b->sync_to_cpu(b->self, t); }
+static void bk_fallback_post(const SgBackend *b, SgTarget *t) { if (b->cpu_wrote) b->cpu_wrote(b->self, t, 0, 0, 0, 0); }
+
+void sg_triangles(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
+    const SgBackend *b = be();
+    if (!b) { sg_cpu_triangles(t, s, v, n); return; }
+    if (bk_draw(b, t, s, SG_PRIM_TRIANGLES, v, n)) return;
+    bk_fallback_pre(b, t); sg_cpu_triangles(t, s, v, n); bk_fallback_post(b, t);
+}
+void sg_lines(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
+    const SgBackend *b = be();
+    if (!b) { sg_cpu_lines(t, s, v, n); return; }
+    if (bk_draw(b, t, s, SG_PRIM_LINES, v, n)) return;
+    bk_fallback_pre(b, t); sg_cpu_lines(t, s, v, n); bk_fallback_post(b, t);
+}
+void sg_points(SgTarget *t, const SgState *s, const SgVertex *v, int n) {
+    const SgBackend *b = be();
+    if (!b) { sg_cpu_points(t, s, v, n); return; }
+    if (bk_draw(b, t, s, SG_PRIM_POINTS, v, n)) return;
+    bk_fallback_pre(b, t); sg_cpu_points(t, s, v, n); bk_fallback_post(b, t);
+}
+void sg_clear_ex(SgTarget *t, const SgState *s, int flags, uint32_t argb, float z, uint8_t stencil) {
+    const SgBackend *b = be();
+    if (!b) { sg_cpu_clear_ex(t, s, flags, argb, z, stencil); return; }
+    if (b->clear && b->clear(b->self, t, s, flags, argb, z, stencil) == 0) return;
+    bk_fallback_pre(b, t); sg_cpu_clear_ex(t, s, flags, argb, z, stencil); bk_fallback_post(b, t);
+}
+
+void sg_target_sync(SgTarget *t) { const SgBackend *b = be(); if (b && b->sync_to_cpu) b->sync_to_cpu(b->self, t); }
+void sg_target_cpu_wrote(SgTarget *t, int x, int y, int w, int h) { const SgBackend *b = be(); if (b && b->cpu_wrote) b->cpu_wrote(b->self, t, x, y, w, h); }
+void sg_target_gone(const void *color, const void *depth, const void *stencil) {
+    const SgBackend *b = be();
+    if (b && b->target_gone && (color || depth || stencil)) b->target_gone(b->self, color, depth, stencil);
+}
+void sg_end_frame(void) { const SgBackend *b = be(); if (b && b->end_frame) b->end_frame(b->self); }
+
+// ---- texture identity -----------------------------------------------------------------------------------------------
+
+static uint64_t g_next_tex_id = 1;
+
+uint64_t sg_texture_id(SgTexture *tx) {
+    if (!tx->id) tx->id = g_next_tex_id++;
+    return tx->id;
+}
+void sg_texture_touch(SgTexture *tx) {
+    sg_texture_id(tx);
+    tx->version++;
+}
+void sg_texture_release(SgTexture *tx) {
+    if (tx->id) {
+        const SgBackend *b = be();
+        if (b && b->texture_gone) b->texture_gone(b->self, tx);
+    }
+    tx->id = 0; tx->version = 0;
+}
+
+// ---- pixel stage key --------------------------------------------------------------------------------------------------
+
+typedef struct KeyH { uint64_t h; } KeyH;
+static inline void kh(KeyH *k, uint64_t v) { k->h = (k->h ^ v) * 0x100000001b3ULL; k->h ^= k->h >> 29; }
+
+uint64_t sg_program_key(const SgState *s) {
+    KeyH k = { 0xcbf29ce484222325ULL };
+    const SgProgram *p = s->program;
+    kh(&k, (uint64_t)(p ? p->kind : SGP_NONE));
+    kh(&k, (uint64_t)(unsigned)nvary_of(s));
+    kh(&k, (uint64_t)(s->pixel_writes_depth != 0));
+    if (!p) {
+        for (int u = 0; u < SG_UNITS; u++) {
+            int on = s->tex_on[u] && s->tex[u];
+            kh(&k, (uint64_t)on);
+            if (on) { kh(&k, (uint64_t)s->tex_env[u]); kh(&k, (uint64_t)s->tex[u]->format); }
+        }
+        kh(&k, (uint64_t)(s->fog != 0)); kh(&k, (uint64_t)(s->flat != 0));
+        kh(&k, (uint64_t)(s->alpha_test != 0)); if (s->alpha_test) kh(&k, (uint64_t)s->alpha_func);
+        return k.h;
+    }
+    kh(&k, (uint64_t)(s->alpha_test != 0)); if (s->alpha_test) kh(&k, (uint64_t)s->alpha_func);
+    kh(&k, (uint64_t)p->fog.enable); kh(&k, (uint64_t)(p->fog.enable ? p->fog.table : 0));
+    if (p->kind == SGP_D3D9_TSS) {
+        const SgpTss *t = &p->tss;
+        kh(&k, (uint64_t)t->nstages); kh(&k, (uint64_t)(t->specular != 0));
+        for (int i = 0; i < t->nstages && i < SGP_MAX_STAGES; i++) {
+            const SgpTssStage *st = &t->stage[i];
+            kh(&k, (uint64_t)st->colorop); kh(&k, (uint64_t)st->alphaop); kh(&k, (uint64_t)st->result_arg);
+            for (int a = 0; a < 3; a++) { kh(&k, (uint64_t)(unsigned)st->color_arg[a]); kh(&k, (uint64_t)(unsigned)st->alpha_arg[a]); }
+            kh(&k, (uint64_t)(unsigned)st->slot); kh(&k, (uint64_t)(unsigned)st->ncoord); kh(&k, (uint64_t)(st->projected != 0));
+            kh(&k, (uint64_t)(unsigned)st->tex_kind); kh(&k, (uint64_t)(st->bump_signed != 0));
+            kh(&k, (uint64_t)(p->samplers[i].tex ? (unsigned)p->samplers[i].tex->kind + 1u : 0u));
+        }
+    } else if (p->kind == SGP_D3D9_PS) {
+        const SgpPs *ps = &p->ps;
+        for (int i = 0; i < ps->ntokens; i++) kh(&k, ps->tokens[i]);
+        kh(&k, (uint64_t)(ps->writes_depth != 0)); kh(&k, (uint64_t)(ps->uses_vpos != 0)); kh(&k, (uint64_t)(ps->uses_vface != 0));
+        for (int i = 0; i < SGP_MAX_SAMPLERS; i++) if (ps->sampler_mask & (1u << i)) {
+            kh(&k, (uint64_t)i); kh(&k, (uint64_t)(unsigned)ps->sampler_type[i]);
+            kh(&k, (uint64_t)(p->samplers[i].tex ? (unsigned)p->samplers[i].tex->kind + 1u : 0u));
+        }
+    }
+    return k.h;
 }

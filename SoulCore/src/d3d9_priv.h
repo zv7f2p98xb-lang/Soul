@@ -296,6 +296,12 @@ void d9_surf_to_native(D9Surf *s);       // render storage -> lockable memory
 void d9_surf_from_native(D9Surf *s);
 uint32_t *d9_surf_argb(D9Surf *s);       // ARGB8 render view (refreshes the shadow)
 void d9_surf_touch(D9Surf *s);           // contents changed (draw, clear, copy)
+// sgpu backend synchronisation (see sgpu.h "Backends"): sync before the CPU reads or partly writes render storage
+// (argb, or depth/stencil), cpu_wrote after the CPU wrote it (rc = left top right bottom, NULL = whole surface).
+void d9_surf_sync(D9Surf *s);
+void d9_surf_cpu_wrote(D9Surf *s, const int32_t *rc);
+void d9_depth_sync(D9Surf *s);
+void d9_depth_cpu_wrote(D9Surf *s);
 int d9_surf_read_argb(D9Surf *s, const int32_t *rc, uint32_t *out);   // rc: left top right bottom (NULL = all), out w*h
 int d9_surf_write_argb(D9Surf *s, const int32_t *rc, const uint32_t *in);
 uint32_t d9_surf_copy(D9Surf *dst, const int32_t *drc, D9Surf *src, const int32_t *src_rc, int filter);

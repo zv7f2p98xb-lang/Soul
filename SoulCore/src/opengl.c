@@ -198,6 +198,7 @@ static void fb_sync(GlCtx *c) {
     if (W > 4096) W = 4096;
     if (H > 4096) H = 4096;
     if (c->fb.color && c->fb.w == W && c->fb.h == H) return;
+    sg_target_gone(c->fb.color, c->fb.depth, c->fb.stencil);   // old frame buffer memory is freed (and may be reused)
     free(c->fb.color); free(c->fb.depth);
     c->fb.w = W; c->fb.h = H;
     c->fb.color = calloc((size_t)W * (size_t)H, 4);
@@ -209,6 +210,7 @@ static void fb_sync(GlCtx *c) {
 static void present(GlCtx *c) {
     Win *w = win_get(c->hwnd);
     if (!w || !c->fb.color) return;
+    sg_target_sync(&c->fb);           // the CPU reads the frame buffer below
     Win *top = win_top(w);
     if (!top || !top->pixels) return;
     int ox, oy, x0, y0, x1, y1;
@@ -225,6 +227,7 @@ static void present(GlCtx *c) {
         }
     }
     win_touch(top);
+    sg_end_frame();
 }
 
 // ---- textures ----------------------------------------------------------------------------------
@@ -314,11 +317,12 @@ static void tex_image(GlCtx *c, int level, int internal, int w, int h, int forma
     t->tex.rgba = px; t->tex.w = w; t->tex.h = h; t->tex.format = fmt;
     t->dirty_mips = 1;
     if (mips) t->gen_mips = 1;
+    sg_texture_touch(&t->tex);
 }
 
 static void tex_prepare(GlTex *t) {
     if (!t || !t->tex.rgba) return;
-    if (t->tex.use_mips && t->dirty_mips) { sg_texture_build_mips(&t->tex); t->dirty_mips = 0; }
+    if (t->tex.use_mips && t->dirty_mips) { sg_texture_build_mips(&t->tex); t->dirty_mips = 0; }   // touches the texture
 }
 
 // ---- lighting --------------------------------------------------------------------------------
@@ -742,6 +746,7 @@ HLE(w_wglCreateContext) {
 HLE(w_wglDeleteContext) {
     GlCtx *c = ctx_of(ARG(0));
     if (!c) { RET(0); return; }
+    sg_target_gone(c->fb.color, c->fb.depth, c->fb.stencil);
     free(c->fb.color); free(c->fb.depth); free(c->imm);
     memset(c, 0, sizeof *c);
     RET(1);
@@ -1099,12 +1104,14 @@ HLE(gl_TexSubImage2D) {
     }
     free(px);
     t->dirty_mips = 1;
+    sg_texture_touch(&t->tex);
 }
 HLE(gl_CopyTexImage2D) {
     // (target, level, internalformat, x, y, w, h, border): copy from the frame buffer
     CTX();
     int x = IA(3), y = (int)(int32_t)hle_arg(st, 4), w = (int)(int32_t)hle_arg(st, 5), h = (int)(int32_t)hle_arg(st, 6);
     if (IA(1) > 0 || w <= 0 || h <= 0 || !c->fb.color) return;
+    sg_target_sync(&c->fb);           // CPU read of the frame buffer
     uint8_t *px = malloc((size_t)w * (size_t)h * 4);
     for (int yy = 0; yy < h; yy++) for (int xx = 0; xx < w; xx++) {
         int sx = x + xx, sy = c->fb.h - 1 - (y + yy);
@@ -1147,6 +1154,7 @@ HLE(gl_ReadPixels) {
     int fmt = (int)(int32_t)hle_arg(st, 4);
     uint8_t *out = PA(6);
     if (!out || !c->fb.color) return;
+    sg_target_sync(&c->fb);           // CPU read of the frame buffer
     int comps = fmt == GL_RGB || fmt == GL_BGR ? 3 : fmt == GL_RGBA || fmt == GL_BGRA ? 4 : 1;
     size_t stride = ((size_t)w * (size_t)comps + (size_t)c->pack_align - 1) / (size_t)c->pack_align * (size_t)c->pack_align;
     for (int yy = 0; yy < h; yy++) for (int xx = 0; xx < w; xx++) {
@@ -1397,6 +1405,7 @@ HLE(gl_DrawPixels) {
     int w = IA(0), h = IA(1);
     if (!c->raster_valid || w <= 0 || h <= 0 || !c->fb.color) return;
     uint8_t *px = unpack(c, w, h, IA(2), IA(3), PA(4));
+    sg_target_sync(&c->fb);           // the CPU modifies (and for blending reads) the frame buffer
     int x0 = (int)c->raster[0], y0 = (int)c->raster[1];
     for (int y = 0; y < h; y++) {
         int sy = c->fb.h - 1 - (y0 + y);
@@ -1414,6 +1423,7 @@ HLE(gl_DrawPixels) {
         }
     }
     free(px);
+    sg_target_cpu_wrote(&c->fb, 0, 0, 0, 0);
 }
 HLE(gl_Bitmap) {
     // (w, h, xorig, yorig, xmove, ymove, bitmap)
@@ -1423,6 +1433,7 @@ HLE(gl_Bitmap) {
     const uint8_t *bits = PA(6);
     if (c->raster_valid && bits && c->fb.color) {
         uint32_t argb = 0xFF000000u | ((uint32_t)c8(c->color[0]) << 16) | ((uint32_t)c8(c->color[1]) << 8) | c8(c->color[2]);
+        sg_target_sync(&c->fb);       // the CPU modifies the frame buffer
         int stride = (w + 7) / 8;
         stride = (stride + c->unpack_align - 1) / c->unpack_align * c->unpack_align;
         int x0 = (int)(c->raster[0] - xo), y0 = (int)(c->raster[1] - yo);
@@ -1431,6 +1442,7 @@ HLE(gl_Bitmap) {
             int sx = x0 + x, sy = c->fb.h - 1 - (y0 + y);
             if (sx >= 0 && sy >= 0 && sx < c->fb.w && sy < c->fb.h) c->fb.color[(size_t)sy * c->fb.w + sx] = argb;
         }
+        sg_target_cpu_wrote(&c->fb, 0, 0, 0, 0);
     }
     c->raster[0] += xm; c->raster[1] += ym;
 }
@@ -1559,7 +1571,7 @@ HLE(glu_Project) {
 
 // ---- lifecycle -----------------------------------------------------------------------------------
 void gl_reset(void) {
-    for (int i = 0; i < 16; i++) { free(g_ctx[i].fb.color); free(g_ctx[i].fb.depth); free(g_ctx[i].imm); }
+    for (int i = 0; i < 16; i++) { sg_target_gone(g_ctx[i].fb.color, g_ctx[i].fb.depth, g_ctx[i].fb.stencil); free(g_ctx[i].fb.color); free(g_ctx[i].fb.depth); free(g_ctx[i].imm); }
     memset(g_ctx, 0, sizeof g_ctx);
     for (int i = 0; i < MAX_TEX; i++) if (g_tex[i].used) sg_texture_free(&g_tex[i].tex);
     memset(g_tex, 0, sizeof g_tex);

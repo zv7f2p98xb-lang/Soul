@@ -1,5 +1,6 @@
 // Unit test for src/sgpu.c: renders small scenes into a 64x64 target and checks pixels.
 #include "sgpu.h"
+#include "sgpu_program.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -629,6 +630,214 @@ static void test_sample(void) {
     sg_texture_free(&t);
 }
 
+
+// ---- backend interface, texture identity, program key ----
+typedef struct Rec {
+    int draws, clears, sync, wrote, wrote_whole, gone, tgone, frames;
+    int ret;                 // value returned by draw / clear
+    int last_prim, last_n;
+    const void *gone_c, *gone_d;
+    uint64_t gone_tex;
+} Rec;
+static int rb_draw(void *self, SgTarget *t, const SgState *s, int prim, const SgVertex *v, int n) { Rec *r = self; (void)t; (void)s; (void)v; r->draws++; r->last_prim = prim; r->last_n = n; return r->ret; }
+static int rb_clear(void *self, SgTarget *t, const SgState *s, int f, uint32_t a, float z, int st) { Rec *r = self; (void)t; (void)s; (void)f; (void)a; (void)z; (void)st; r->clears++; return r->ret; }
+static void rb_sync(void *self, SgTarget *t) { Rec *r = self; (void)t; r->sync++; }
+static void rb_wrote(void *self, SgTarget *t, int x, int y, int w, int h) { Rec *r = self; (void)t; (void)x; (void)y; r->wrote++; if (!w || !h) r->wrote_whole++; }
+static void rb_gone(void *self, const void *c, const void *d, const void *st) { Rec *r = self; (void)st; r->gone++; r->gone_c = c; r->gone_d = d; }
+static void rb_tgone(void *self, SgTexture *t) { Rec *r = self; r->tgone++; r->gone_tex = t->id; }
+static void rb_frame(void *self) { ((Rec *)self)->frames++; }
+
+static void test_backend(void) {
+    Rec rec;
+    memset(&rec, 0, sizeof rec);
+    SgBackend be = { "test", &rec, rb_draw, rb_clear, rb_sync, rb_wrote, rb_gone, rb_tgone, rb_frame };
+    SgVertex v[6];
+    reset();
+    quad(v, -1, -1, 1, 1, 0);
+    colour(v, 6, 1, 0, 0, 1);
+
+    report("backend: none installed by default", sg_backend_get() == NULL);
+    sg_backend_set(&be);
+    report("backend: sg_backend_get returns the installed backend", sg_backend_get() == &be);
+
+    // the backend takes the draw: no CPU rasterisation, no sync, no cpu_wrote
+    rec.ret = 0;
+    sg_triangles(&T, &S, v, 6);
+    report("backend: draw dispatched (triangles, n=6)", rec.draws == 1 && rec.last_prim == SG_PRIM_TRIANGLES && rec.last_n == 6);
+    report("backend: accepted draw leaves the CPU target untouched", px(10, 10) == BG && rec.sync == 0 && rec.wrote == 0);
+    sg_lines(&T, &S, v, 2);
+    sg_points(&T, &S, v, 1);
+    report("backend: lines and points dispatched", rec.draws == 3 && rec.last_prim == SG_PRIM_POINTS && rec.last_n == 1);
+    sg_clear_ex(&T, &S, SG_CLEAR_COLOR, 0xFF123456u, 1, 0);
+    report("backend: clear dispatched and accepted", rec.clears == 1 && px(0, 0) == BG && rec.sync == 0);
+
+    // declined: sync to CPU, rasterise on the CPU, report cpu_wrote (whole)
+    memset(&rec, 0, sizeof rec);
+    rec.ret = -1;
+    sg_triangles(&T, &S, v, 6);
+    report("backend: declined draw falls back to the CPU rasteriser", rec.draws == 1 && near_col(px(10, 10), 255, 0, 0, 255, 0) && near_col(px(63, 63), 255, 0, 0, 255, 0));
+    report("backend: fallback syncs before and reports cpu_wrote after", rec.sync == 1 && rec.wrote == 1 && rec.wrote_whole == 1);
+    sg_clear_ex(&T, &S, SG_CLEAR_COLOR, 0xFF123456u, 1, 0);
+    report("backend: declined clear falls back (CPU result, sync, cpu_wrote)", px(5, 5) == 0xFF123456u && rec.clears == 1 && rec.sync == 2 && rec.wrote == 2);
+
+    // optional hooks may be NULL
+    SgBackend bare = { "bare", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+    sg_backend_set(&bare);
+    reset();
+    sg_triangles(&T, &S, v, 6);
+    sg_target_sync(&T); sg_target_cpu_wrote(&T, 0, 0, 0, 0); sg_target_gone(cbuf, NULL, NULL); sg_end_frame();
+    report("backend: a backend without hooks behaves like the CPU", near_col(px(10, 10), 255, 0, 0, 255, 0));
+
+    // front-end hooks reach the backend
+    memset(&rec, 0, sizeof rec);
+    sg_backend_set(&be);
+    sg_target_sync(&T);
+    sg_target_cpu_wrote(&T, 1, 2, 3, 4);
+    sg_target_cpu_wrote(&T, 0, 0, 0, 0);
+    sg_target_gone(cbuf, zbuf, NULL);
+    sg_target_gone(NULL, NULL, NULL);
+    sg_end_frame();
+    report("backend: sync / cpu_wrote (rect, whole) / target_gone / end_frame forwarded",
+           rec.sync == 1 && rec.wrote == 2 && rec.wrote_whole == 1 && rec.gone == 1 && rec.gone_c == cbuf && rec.gone_d == zbuf && rec.frames == 1);
+
+    // nothing to draw: not dispatched as work
+    memset(&rec, 0, sizeof rec);
+    SgTarget nt = T; nt.color = NULL;
+    sg_triangles(&nt, &S, v, 6);
+    report("backend: target without colour is a no-op (no dispatch, no sync)", rec.draws == 0 && rec.sync == 0 && rec.wrote == 0);
+
+    // texture identity
+    SgTexture tx;
+    memset(&tx, 0, sizeof tx);
+    report("texture: zero struct has no id", tx.id == 0 && tx.version == 0);
+    uint64_t id = sg_texture_id(&tx);
+    report("texture: id assigned lazily and stable", id != 0 && sg_texture_id(&tx) == id && tx.version == 0);
+    sg_texture_touch(&tx);
+    sg_texture_touch(&tx);
+    report("texture: touch bumps the version, keeps the id", tx.version == 2 && tx.id == id);
+    SgTexture t2;
+    memset(&t2, 0, sizeof t2);
+    report("texture: ids are unique", sg_texture_id(&t2) != id);
+    tx.w = tx.h = 2; tx.rgba = calloc(16, 1);
+    sg_texture_build_mips(&tx);
+    report("texture: sg_texture_build_mips touches", tx.version == 3);
+    sg_texture_free(&tx);
+    report("texture: free notifies the backend with the id and clears id/version", rec.tgone == 1 && rec.gone_tex == id && tx.id == 0 && tx.version == 0);
+    sg_texture_free(&tx);
+    report("texture: freeing an id-less texture does not notify", rec.tgone == 1);
+    uint64_t id2 = sg_texture_id(&tx);
+    report("texture: a recycled struct gets a new id", id2 != id && id2 != 0);
+    sg_texture_release(&tx);
+    report("texture: sg_texture_release notifies and clears", rec.tgone == 2 && tx.id == 0);
+    sg_texture_free(&t2);
+
+    sg_backend_set(NULL);
+    report("backend: NULL restores CPU only", sg_backend_get() == NULL);
+    reset();
+    sg_triangles(&T, &S, v, 6);
+    report("backend: CPU-only draw works after removal", near_col(px(10, 10), 255, 0, 0, 255, 0));
+}
+
+static void test_program_key(void) {
+    SgState a, b;
+    memset(&a, 0, sizeof a);
+    memset(&b, 0, sizeof b);
+    report("key: deterministic for GL fixed function", sg_program_key(&a) == sg_program_key(&b));
+    uint8_t px4[16] = { 0 };
+    SgTexture t0;
+    memset(&t0, 0, sizeof t0);
+    t0.w = t0.h = 2; t0.rgba = px4; t0.format = SG_FMT_RGBA;
+    a.tex_on[0] = 1; a.tex[0] = &t0; a.tex_env[0] = SG_ENV_MODULATE;
+    b = a;
+    uint64_t k = sg_program_key(&a);
+    report("key: GL texture on changes the key", k != sg_program_key(&(SgState){ 0 }));
+    b.env_color[0][0] = 0.5f; b.fog_color[1] = 0.25f; b.alpha_ref = 0.3f; b.blend = 1; b.blend_src = SG_SRC_ALPHA; b.depth_test = 1;
+    report("key: GL constants and non-pixel state do not change the key", sg_program_key(&b) == k);
+    b.tex_env[0] = SG_ENV_ADD;
+    report("key: GL tex_env changes the key", sg_program_key(&b) != k);
+    b = a; b.fog = 1;
+    report("key: GL fog changes the key", sg_program_key(&b) != k);
+    b = a; b.alpha_test = 1; b.alpha_func = SG_GREATER;
+    uint64_t kg = sg_program_key(&b);
+    b.alpha_func = SG_LESS;
+    report("key: alpha test function changes the key", kg != k && sg_program_key(&b) != kg);
+    b = a; t0.format = SG_FMT_LUMINANCE;
+    report("key: GL texture format changes the key", sg_program_key(&b) != k);
+    t0.format = SG_FMT_RGBA;
+
+    // D3D9 texture stage cascade
+    SgProgram p1, p2;
+    memset(&p1, 0, sizeof p1);
+    p1.kind = SGP_D3D9_TSS; p1.nvary = 11;
+    p1.tss.nstages = 2;
+    p1.tss.stage[0] = (SgpTssStage){ .colorop = 4, .alphaop = 2, .color_arg = { 0, 2, 1 }, .alpha_arg = { 0, 2, 1 }, .result_arg = 1, .slot = 0, .ncoord = 2, .tex_kind = SG_TEX_2D };
+    p1.tss.stage[1] = (SgpTssStage){ .colorop = 7, .alphaop = 1, .color_arg = { 0, 2, 1 }, .result_arg = 1, .slot = 1, .tex_kind = SG_TEX_2D };
+    SgTexture tex2 = t0;
+    p1.samplers[0].tex = &t0; p1.samplers[1].tex = &tex2;
+    p2 = p1;
+    SgState sa, sb;
+    memset(&sa, 0, sizeof sa);
+    sa.program = &p1; sa.nvary = 11;
+    sb = sa; sb.program = &p2;
+    uint64_t kt = sg_program_key(&sa);
+    report("key: TSS identical programs give the same key", kt == sg_program_key(&sb) && kt != k);
+    p2.tss.tfactor[0] = 0.7f; p2.tss.stage[0].constant[1] = 0.2f; p2.tss.stage[0].bump_mat[2] = 3; p2.tss.stage[1].bump_lscale = 2;
+    p2.fog.start = 1; p2.fog.end = 9; p2.fog.density = 0.5f; p2.fog.color[0] = 1;
+    p2.samplers[0].samp.lod_bias = 1.5f; p2.samplers[1].samp.min_filter = SG_FILTER_LINEAR; p2.samplers[0].samp.srgb = 1;
+    SgTexture other = t0; other.version = 77; other.id = 99;
+    p2.samplers[0].tex = &other;
+    report("key: TSS constants, fog values, sampler state and texture identity do not change the key", sg_program_key(&sb) == kt);
+    p2 = p1; p2.tss.stage[0].colorop = 5;
+    report("key: TSS colour op changes the key", sg_program_key(&sb) != kt);
+    p2 = p1; p2.tss.stage[1].alpha_arg[1] = 0x12;
+    report("key: TSS argument modifier changes the key", sg_program_key(&sb) != kt);
+    p2 = p1; p2.tss.stage[0].projected = 1;
+    report("key: TSS projected flag changes the key", sg_program_key(&sb) != kt);
+    p2 = p1; p2.tss.specular = 1;
+    report("key: TSS specular changes the key", sg_program_key(&sb) != kt);
+    p2 = p1; p2.fog.enable = 1; p2.fog.table = 3;
+    uint64_t kf = sg_program_key(&sb);
+    p2.fog.table = 2;
+    report("key: TSS fog mode changes the key", kf != kt && sg_program_key(&sb) != kf);
+    p2 = p1; p2.tss.nstages = 1;
+    report("key: TSS stage count changes the key", sg_program_key(&sb) != kt);
+    p2 = p1; p2.samplers[0].tex = NULL;
+    report("key: TSS unbound texture changes the key", sg_program_key(&sb) != kt);
+    p2 = p1; tex2.kind = SG_TEX_CUBE; p2.samplers[1].tex = &tex2;
+    report("key: TSS texture kind changes the key", sg_program_key(&sb) != kt);
+    tex2.kind = SG_TEX_2D;
+
+    // D3D9 pixel shader
+    static const uint32_t tok1[] = { 0xFFFF0300u, 0x0000FFFFu }, tok2[] = { 0xFFFF0200u, 0x0000FFFFu };
+    SgProgram q1, q2;
+    memset(&q1, 0, sizeof q1);
+    q1.kind = SGP_D3D9_PS; q1.nvary = 4;
+    q1.ps.tokens = tok1; q1.ps.ntokens = 2; q1.ps.major = 3; q1.ps.sampler_mask = 1; q1.ps.sampler_type[0] = SG_TEX_2D;
+    q1.samplers[0].tex = &t0;
+    q2 = q1;
+    sa.program = &q1; sb.program = &q2;
+    uint64_t kp = sg_program_key(&sa);
+    D3dShaderConsts c1, c2;
+    memset(&c1, 0, sizeof c1); memset(&c2, 0, sizeof c2);
+    c2.f[0][0] = 5; c2.i[1][0] = 3; c2.b[2] = 1;
+    q1.ps.consts = &c1; q2.ps.consts = &c2;
+    q2.ps.bump_mat[0][0] = 1; q2.samplers[0].samp.max_anisotropy = 4; q2.samplers[0].tex = &other;
+    report("key: PS constants, bump parameters, sampler state, texture identity do not change the key", kp == sg_program_key(&sb));
+    q2.ps.tokens = tok2;
+    report("key: PS bytecode changes the key", kp != sg_program_key(&sb));
+    q2 = q1; q2.ps.uses_vpos = 1;
+    report("key: PS vpos use changes the key", kp != sg_program_key(&sb));
+    q2 = q1; q2.fog.enable = 1; q2.fog.table = 1;
+    report("key: PS fog wrap changes the key", kp != sg_program_key(&sb));
+    q2 = q1; q2.samplers[0].tex = NULL;
+    report("key: PS unbound sampler changes the key", kp != sg_program_key(&sb));
+    q2 = q1; q2.ps.sampler_type[0] = SG_TEX_CUBE;
+    report("key: PS declared sampler type changes the key", kp != sg_program_key(&sb));
+    sb.nvary = 5;
+    report("key: nvary changes the key", sg_program_key(&sb) != sg_program_key(&sa));
+    report("key: PS key differs from TSS key", kp != kt);
+}
+
 int main(void) {
     test_varyings();
     test_derivs();
@@ -639,6 +848,8 @@ int main(void) {
     test_fill_rule();
     test_points();
     test_sample();
+    test_backend();
+    test_program_key();
     printf("passed=%d failed=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

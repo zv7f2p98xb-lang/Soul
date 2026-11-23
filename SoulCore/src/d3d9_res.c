@@ -117,7 +117,31 @@ D9Surf *d9_surf_create(D9Dev *dev, int w, int h, int fmt, int usage, int pool, i
     }
     return s;
 }
+// ---- backend (sgpu) synchronisation of render storage. A surface's `argb` / `depth` / `stencil` memory
+// may be mirrored on a GPU backend: sync before the CPU reads (or partly writes) it, cpu_wrote after it wrote.
+void d9_surf_sync(D9Surf *s) {
+    if (!s->argb) return;
+    SgTarget t = { 0 };
+    t.color = s->argb; t.w = s->w; t.h = s->h;
+    sg_target_sync(&t);
+}
+void d9_surf_cpu_wrote(D9Surf *s, const int32_t *rc) {
+    if (!s->argb) return;
+    SgTarget t = { 0 };
+    t.color = s->argb; t.w = s->w; t.h = s->h;
+    if (rc) sg_target_cpu_wrote(&t, rc[0], rc[1], rc[2] - rc[0], rc[3] - rc[1]);
+    else sg_target_cpu_wrote(&t, 0, 0, 0, 0);
+}
+static void depth_target(D9Surf *s, SgTarget *t) {
+    memset(t, 0, sizeof *t);
+    t->depth = s->depth; t->stencil = s->stencil; t->w = s->dw; t->h = s->dh;
+}
+void d9_depth_sync(D9Surf *s) { if (!s->depth) return; SgTarget t; depth_target(s, &t); sg_target_sync(&t); }
+void d9_depth_cpu_wrote(D9Surf *s) { if (!s->depth) return; SgTarget t; depth_target(s, &t); sg_target_cpu_wrote(&t, 0, 0, 0, 0); }
+
 void d9_surf_free_storage(D9Surf *s) {
+    sg_target_gone(s->argb, s->depth, s->stencil);
+    sg_target_gone(NULL, s->sdepth, s->sstencil);
     if (s->shadow) free(s->argb);
     s->argb = NULL;
     g_free(s->data);
@@ -133,6 +157,7 @@ void d9_surf_touch(D9Surf *s) {
 }
 void d9_surf_to_native(D9Surf *s) {
     if (!s->shadow || !s->native_stale) return;
+    d9_surf_sync(s);
     for (int y = 0; y < s->h; y++) d9_pack_row(s->fmt, s->argb + (size_t)y * (size_t)s->w, s->data + (size_t)y * (size_t)s->pitch, s->w);
     s->native_stale = 0;
 }
@@ -140,6 +165,7 @@ void d9_surf_from_native(D9Surf *s) {
     if (!s->shadow) return;
     for (int y = 0; y < s->h; y++) d9_unpack_row(s->fmt, s->data + (size_t)y * (size_t)s->pitch, s->argb + (size_t)y * (size_t)s->w, s->w, NULL);
     s->argb_stale = 0;
+    d9_surf_cpu_wrote(s, NULL);
 }
 uint32_t *d9_surf_argb(D9Surf *s) { return s->argb; }
 
@@ -157,6 +183,7 @@ int d9_surf_read_argb(D9Surf *s, const int32_t *rc, uint32_t *out) {
     if (!clip_rc(s, rc, r)) return 0;
     int rw = r[2] - r[0], rh = r[3] - r[1];
     if (s->argb) {
+        d9_surf_sync(s);
         for (int y = 0; y < rh; y++) memcpy(out + (size_t)y * (size_t)rw, s->argb + (size_t)(r[1] + y) * (size_t)s->w + (size_t)r[0], (size_t)rw * 4);
         return 1;
     }
@@ -177,7 +204,9 @@ int d9_surf_write_argb(D9Surf *s, const int32_t *rc, const uint32_t *in) {
     if (!clip_rc(s, rc, r)) return 0;
     int rw = r[2] - r[0], rh = r[3] - r[1];
     if (s->argb) {
+        d9_surf_sync(s);
         for (int y = 0; y < rh; y++) memcpy(s->argb + (size_t)(r[1] + y) * (size_t)s->w + (size_t)r[0], in + (size_t)y * (size_t)rw, (size_t)rw * 4);
+        d9_surf_cpu_wrote(s, r);
         d9_surf_touch(s);
         return 1;
     }
@@ -196,6 +225,7 @@ uint32_t d9_surf_copy(D9Surf *dst, const int32_t *drc, D9Surf *src, const int32_
     int dw = dr[2] - dr[0], dh = dr[3] - dr[1], sw = sr[2] - sr[0], sh = sr[3] - sr[1];
     // identical formats, no scaling, plain memory: copy rows
     if (dst->fmt == src->fmt && dw == sw && dh == sh && !dst->shadow && !src->shadow && dst->data && src->data) {
+        d9_surf_sync(src); d9_surf_sync(dst);          // render storage (argb == data) may live on a GPU backend
         if (d9_fmt_is_dxt(dst->fmt)) {
             if ((dr[0] | dr[1] | sr[0] | sr[1]) & 3) return D3DERR_INVALIDCALL;
             size_t bs = dst->fmt == F_DXT1 ? 8 : 16;
@@ -207,6 +237,7 @@ uint32_t d9_surf_copy(D9Surf *dst, const int32_t *drc, D9Surf *src, const int32_
             for (int y = 0; y < dh; y++)
                 memmove(dst->data + (size_t)(dr[1] + y) * (size_t)dst->pitch + (size_t)dr[0] * bpp, src->data + (size_t)(sr[1] + y) * (size_t)src->pitch + (size_t)sr[0] * bpp, (size_t)dw * bpp);
         }
+        d9_surf_cpu_wrote(dst, dr);
         d9_surf_touch(dst);
         return D3D_OK;
     }
@@ -252,6 +283,7 @@ static uint32_t surf_lock(D9Surf *s, uint64_t plr, uint64_t prect, uint32_t flag
     int have = rd_rect(prect, rc);
     int32_t r[4];
     if (!clip_rc(s, have ? rc : NULL, r)) return D3DERR_INVALIDCALL;
+    d9_surf_sync(s);
     if (s->shadow) d9_surf_to_native(s);
     size_t off;
     if (d9_fmt_is_dxt(s->fmt)) off = (size_t)(r[1] / 4) * (size_t)s->pitch + (size_t)(r[0] / 4) * (s->fmt == F_DXT1 ? 8 : 16);
@@ -268,6 +300,7 @@ static uint32_t surf_unlock(D9Surf *s) {
     s->lock_count = 0;
     if (!(s->lock_flags & LOCK_READONLY)) {
         if (s->shadow) { d9_surf_from_native(s); s->native_stale = 0; }
+        else d9_surf_cpu_wrote(s, NULL);
         d9_surf_touch(s);
         s->native_stale = 0;
     }
@@ -298,6 +331,7 @@ static void s_GetDC(X86State *st) {
     D9Surf *s = D9OBJ(D9Surf, 0);
     if (!ARG(1) || s->depth || s->dc_hdc) { RET(D3DERR_INVALIDCALL); return; }
     switch (s->fmt) { case F_X8R8G8B8: case F_A8R8G8B8: case F_R5G6B5: case F_X1R5G5B5: case F_A1R5G5B5: case F_R8G8B8: break; default: RET(D3DERR_INVALIDCALL); return; }
+    d9_surf_sync(s);
     if (s->shadow) d9_surf_to_native(s);
     GdiObj *bm;
     uint64_t hbm = gdi_alloc(GO_BITMAP, &bm);
@@ -473,6 +507,7 @@ SgTexture *d9_tex_prepare(D9Tex *t) {
         if (l == 0) sg->rgba = buf;
     }
     if ((t->usage & USAGE_AUTOGENMIPMAP) && t->levels == 1) sg_texture_build_mips(sg);
+    sg_texture_touch(sg);                 // new texel data: new id/version for GPU backends
     t->sg_valid = 1;
     t->dirty = 0;
     return sg;

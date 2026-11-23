@@ -60,6 +60,9 @@ typedef struct SgTexture {
     int kind;            // SG_TEX_*
     int depth;           // volume slices at level 0
     int mip_d[SG_MAX_MIPS];
+    // ---- backend identity (see "Textures and backends" below). Zero-initialised structs are fine.
+    uint64_t id;         // unique, never reused; assigned lazily by sg_texture_id()/sg_texture_touch(); 0 = none yet
+    uint32_t version;    // bumped by sg_texture_touch() whenever texel data / size / levels change
 } SgTexture;
 
 // Sampler state for sg_sample (D3D9 sampler states map 1:1; values are D3DTEXF_x / D3DTADDRESS_x
@@ -155,6 +158,12 @@ typedef struct SgState {
     int sprite_slot;             // varying receiving the sprite coordinate (xy = s,t; zw = 0,1); also fixed unit 0 t
     int point_size_vertex;       // size comes from SgVertex.psize
     float point_size_min, point_size_max; // clamp when point_size_max > 0
+    // GPU-translatable description of the pixel stage (sgpu_program.h). NULL = the fixed-function
+    // OpenGL pixel stage described by this very struct (tex_on/tex/tex_env/env_color/fog/fog_color/
+    // alpha_test/flat..., no pixel_fn). Front ends that set pixel_fn ALSO set `program` so that a
+    // backend that cannot call pixel_fn (a GPU) can translate it. The CPU rasteriser ignores `program`
+    // and always runs pixel_fn when it is set.
+    const struct SgProgram *program;
 } SgState;
 
 typedef struct SgTarget {
@@ -163,6 +172,12 @@ typedef struct SgTarget {
     int w, h;
     uint8_t *stencil;            // optional, w*h bytes
 } SgTarget;
+
+// ============================================================================================
+// Rasterising entry points. These dispatch to the installed backend (below); without one they
+// are the CPU rasteriser, bit-identical to the pre-backend behaviour.
+// ============================================================================================
+enum { SG_PRIM_TRIANGLES, SG_PRIM_LINES, SG_PRIM_POINTS };
 
 void sg_triangles(SgTarget *t, const SgState *s, const SgVertex *v, int n); // n = 3 * triangles
 void sg_lines(SgTarget *t, const SgState *s, const SgVertex *v, int n);     // n = 2 * lines
@@ -174,6 +189,107 @@ enum { SG_CLEAR_COLOR = 1, SG_CLEAR_DEPTH = 2, SG_CLEAR_STENCIL = 4, SG_CLEAR_NO
 // masks, depth respects depth_write, stencil respects stencil[0].write_mask, unless SG_CLEAR_NOMASK.
 void sg_clear_ex(SgTarget *t, const SgState *s, int flags, uint32_t argb, float z, uint8_t stencil);
 
-void sg_texture_build_mips(SgTexture *tex);   // 2D, cube (6 faces) and volume
-void sg_texture_free(SgTexture *tex);
+// The CPU rasteriser itself (never dispatches, never calls backend hooks). Backends use these to
+// implement their own fallback or debug behaviour. A caller that uses them directly on memory a
+// backend may own must do the sync/cpu_wrote calls itself (sg_target_sync / sg_target_cpu_wrote).
+void sg_cpu_triangles(SgTarget *t, const SgState *s, const SgVertex *v, int n);
+void sg_cpu_lines(SgTarget *t, const SgState *s, const SgVertex *v, int n);
+void sg_cpu_points(SgTarget *t, const SgState *s, const SgVertex *v, int n);
+void sg_cpu_clear_ex(SgTarget *t, const SgState *s, int flags, uint32_t argb, float z, uint8_t stencil);
+
+// ============================================================================================
+// Backends (GPU or debug) - the rules
+// ============================================================================================
+// A backend owns resources (shadow memory) for render targets and textures but the CPU memory
+// remains the *source of truth whenever the CPU looks at it*. Contract:
+//
+// Target identity
+//  * A render target is identified by its MEMORY POINTERS: `color`, `depth` and `stencil` of an
+//    SgTarget, each independently. SgTarget structs are rebuilt per draw and carry no identity.
+//    The same depth buffer may be paired with different colour buffers over time and vice versa; a
+//    backend keeps one resource per distinct non-NULL pointer. The extent of a resource is w*h
+//    elements as given by the SgTarget of the use (a later use with larger w*h grows it; a depth
+//    buffer may legitimately be larger than w*h of the colour target using it).
+//  * The first time a backend sees a pointer, the resource is initialised FROM the CPU memory.
+//  * A backend resource is "dirty" while it is newer than the CPU memory (after draw/clear returned 0).
+//
+// Hooks (all optional - NULL = no-op; all called by sgpu / the front ends, with the global lock held)
+//  * draw(prim, v, n): rasterise on the backend. Return 0 = done (target now dirty), -1 = cannot:
+//    sgpu then calls sync_to_cpu(t), runs the CPU rasteriser and calls cpu_wrote(t, 0,0,0,0).
+//    A backend must not partially draw and then return -1. Vertices and `s` (incl. s->program and the
+//    pixel_ctx it points to) are valid only during the call: copy what must outlive it. Textures are
+//    found through s->tex[] (GL, program == NULL) and s->program->samplers[] (program != NULL);
+//    CPU-side texels are authoritative: upload when (id, version) is new.
+//  * clear(flags, argb, z, stencil): like draw; same -1 / fallback rule (sg_clear_ex).
+//  * sync_to_cpu(t): make the CPU memory of every non-NULL buffer of `t` (color / depth / stencil,
+//    w*h elements each) equal to the backend's, then the backend's copy is clean. Called before the
+//    CPU READS a target, and before the CPU WRITES part of it (a partial write on a dirty resource
+//    would otherwise be overwritten by a later sync). Must be cheap when nothing is dirty.
+//  * cpu_wrote(t, x, y, w, h): the CPU changed memory of `t` (colour rect in pixels; w == 0 || h == 0
+//    means the whole buffer(s) of t, which also covers depth / stencil of a SgTarget with those set).
+//    The backend's copy must be refreshed / invalidated (it was clean when this is called, because the
+//    writer synced before a partial write; for whole-buffer overwrites no prior sync is needed).
+//  * target_gone(color, depth, stencil): CPU memory of these buffers is about to be freed or reused
+//    for something else; drop the resources (WITHOUT writing back). NULL arguments are ignored.
+//  * texture_gone(tex): the texture is released (sg_texture_free / sg_texture_release): drop resources
+//    for tex->id. The struct is still intact during the call.
+//  * end_frame(): a frame was presented (window system present / SwapBuffers / D3D Present); a place
+//    to flush/commit. It is NOT a sync point: the front end has already called sync_to_cpu for what
+//    it displays.
+//
+// Textures and backends
+//  * SgTexture.id: unique and never reused within the process, 0 until sg_texture_id() or
+//    sg_texture_touch() assigns one (lazy, so zero-initialised structs work). sg_texture_free /
+//    sg_texture_release call texture_gone and clear id/version, so a recycled struct gets a new id.
+//  * SgTexture.version: front ends call sg_texture_touch() after EVERY change of texel data, w/h/
+//    kind/levels/mip storage/format of a texture; a backend re-uploads when (id, version) differs
+//    from what it holds. Sampler-like fields (min_linear, mag_linear, clamp_s/t, use_mips) are read
+//    from the struct at every draw and do not need a bump. A render-target texture is converted to an
+//    SgTexture (after sync_to_cpu of the target) and touched on every conversion.
+//  * Never keep SgTexture pointers across calls; identify by id.
+//  * Occlusion statistics (sg_pixels_drawn) count CPU-rasterised pixels only.
+//
+// Selection: sg_backend_set(b) installs a backend (NULL = CPU only, the default). When no backend was
+// installed explicitly, the first sgpu call looks at the environment variable SOUL_GPU: "mirror"
+// installs the debug backend of sgpu_mirror.c (SOUL_GPU_MIRROR_DECLINE=N: decline every N-th draw,
+// default 7, 0 = never). Other values are ignored (a Metal backend registers itself with
+// sg_backend_set). sg_backend_get() returns the active one or NULL.
+typedef struct SgBackend {
+    const char *name;
+    void *self;
+    int (*draw)(void *self, SgTarget *t, const SgState *s, int prim, const SgVertex *v, int n);
+    int (*clear)(void *self, SgTarget *t, const SgState *s, int flags, uint32_t argb, float z, int stencil);
+    void (*sync_to_cpu)(void *self, SgTarget *t);
+    void (*cpu_wrote)(void *self, SgTarget *t, int x, int y, int w, int h);
+    void (*target_gone)(void *self, const void *color, const void *depth, const void *stencil);
+    void (*texture_gone)(void *self, SgTexture *tex);
+    void (*end_frame)(void *self);
+} SgBackend;
+void sg_backend_set(const SgBackend *b);   // NULL = CPU only; the struct must outlive its use
+const SgBackend *sg_backend_get(void);
+// The debug backend of sgpu_mirror.c: `const SgBackend *sg_mirror_backend(void)` (sgpu.c references it
+// weakly, so programs that do not link sgpu_mirror.c still link).
+
+// Front-end side of the hooks. Cheap no-ops without a backend.
+// RULES for front ends: call sg_target_sync() before CPU code reads (or partially writes) memory that
+// was ever used as a render target / depth / stencil buffer; call sg_target_cpu_wrote() after writing
+// it; call sg_target_gone() before freeing or recycling such memory; call sg_texture_touch() after
+// changing a texture's data; call sg_end_frame() when presenting. A SgTarget passed to these only
+// needs the pointers (and w/h) of the buffers concerned - the others may be NULL.
+void sg_target_sync(SgTarget *t);
+void sg_target_cpu_wrote(SgTarget *t, int x, int y, int w, int h);   // w == 0 || h == 0: everything
+void sg_target_gone(const void *color, const void *depth, const void *stencil);
+void sg_end_frame(void);
+
+uint64_t sg_texture_id(SgTexture *tex);       // assigns an id if there is none yet
+void sg_texture_touch(SgTexture *tex);        // texel data / layout changed: ++version (assigns an id first)
+void sg_texture_release(SgTexture *tex);      // notify the backend, clear id/version; memory untouched
+
+// Pixel-stage key of a draw: hash of everything that changes generated shader code and nothing else
+// (see sgpu_program.h): for program == NULL the fixed-function pixel parameters of `s`, otherwise
+// the program's static part. Equal keys can share a compiled pipeline.
+uint64_t sg_program_key(const SgState *s);
+
+void sg_texture_build_mips(SgTexture *tex);   // 2D, cube (6 faces) and volume; touches the texture
+void sg_texture_free(SgTexture *tex);         // releases (backend) and frees storage, zeroes the struct
 uint64_t sg_pixels_drawn(void);

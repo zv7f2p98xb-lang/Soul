@@ -131,6 +131,7 @@ int d3dsh_ps_nvary(const D3dShader *ps);              // highest read slot + 1 =
 int d3dsh_ps_writes_depth(const D3dShader *ps);       // oDepth written (SgState.pixel_writes_depth)
 uint32_t d3dsh_ps_sampler_mask(const D3dShader *ps);  // bit s set = sampler s is used
 int d3dsh_ps_sampler_type(const D3dShader *ps, int s);// SG_TEX_* expected by dcl_2d/cube/volume, -1 unknown (ps_1_x: from bound texture)
+uint32_t d3dsh_ps_misc_mask(const D3dShader *ps);     // ps_3_0 misc inputs read: bit 0 = vPos (VPOS), bit 1 = vFace (VFACE)
 
 // ---- vertex execution -----------------------------------------------------------------------
 

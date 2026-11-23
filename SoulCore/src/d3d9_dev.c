@@ -98,6 +98,7 @@ D9Swap *d9_swap_create(D9Dev *dev, uint64_t pp, int implicit, uint32_t *hr) {
         b->is_back = 1;
         for (size_t k = 0; k < (size_t)w * (size_t)h; k++) b->argb[k] = 0xFF000000u;
         if (b->shadow) b->native_stale = 1;
+        d9_surf_cpu_wrote(b, NULL);      // the CPU initialised the whole back buffer
         sw->back[i] = b;
     }
     // write the resolved values back like Direct3D does
@@ -127,6 +128,7 @@ uint32_t d9_present(D9Dev *dev, D9Swap *sw, const int32_t *src, const int32_t *d
             win_client_origin(w, &ox, &oy);
             if (win_visible_rect(w, &x0, &y0, &x1, &y1)) {
                 if (b->shadow && b->argb_stale) d9_surf_from_native(b);
+                d9_surf_sync(b);         // the CPU reads the back buffer below (a GPU backend may hold newer pixels)
                 int sr[4] = { 0, 0, b->w, b->h }, dr[4] = { 0, 0, w->w, w->h };
                 if (src) { memcpy(sr, src, 16); if (sr[0] < 0) sr[0] = 0; if (sr[1] < 0) sr[1] = 0; if (sr[2] > b->w) sr[2] = b->w; if (sr[3] > b->h) sr[3] = b->h; }
                 if (dst) memcpy(dr, dst, 16);
@@ -151,6 +153,7 @@ uint32_t d9_present(D9Dev *dev, D9Swap *sw, const int32_t *src, const int32_t *d
         }
     }
     sw->present_count++;
+    sg_end_frame();
     // pace to the display unless the program asked for immediate presentation
     double now = soul_now();
     if (sw->interval != 0x80000000u && dev->last_present > 0) {
@@ -562,8 +565,10 @@ static void dv_StretchRect(X86State *st) { // (this, src, srcRect, dst, dstRect,
     int hs = rd_rect(ARG(2), sr), ht = rd_rect(ARG(4), dr);
     if (s->depth || t->depth) {
         if (!(s->depth && t->depth) || s->w != t->w || s->h != t->h) { RET(D3DERR_INVALIDCALL); return; }
+        d9_depth_sync(s);                // CPU copy of depth/stencil memory (whole destination is overwritten)
         memcpy(t->depth, s->depth, (size_t)s->w * (size_t)s->h * sizeof(float));
         memcpy(t->stencil, s->stencil, (size_t)s->w * (size_t)s->h);
+        d9_depth_cpu_wrote(t);
         RET(D3D_OK);
         return;
     }

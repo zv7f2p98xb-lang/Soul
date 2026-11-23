@@ -536,3 +536,14 @@ int d3dsh_ps_sampler_type(const D3dShader *ps, int s) {
     if (!ps || !ps->pixel || s < 0 || s >= 16) return -1;
     return ps->sampler_type[s];
 }
+
+uint32_t d3dsh_ps_misc_mask(const D3dShader *ps) {
+    uint32_t m = 0;
+    if (!ps || !ps->pixel) return 0;
+    for (int i = 0; i < ps->nins; i++) {
+        const Instr *in = &ps->ins[i];
+        for (int k = 0; k < in->nsrc && k < 4; k++)
+            if (in->src[k].file == RF_MISC && in->src[k].idx < 2) m |= 1u << in->src[k].idx;
+    }
+    return m;
+}

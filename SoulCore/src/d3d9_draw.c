@@ -7,6 +7,7 @@
 // by half a pixel (x += w / vp_w, y -= w / vp_h) so that XYZRHW quads and shader output cover the pixels they
 // do on Windows. Depth is a float; every depth format maps to the sgpu float depth + 8-bit stencil.
 #include "d3d9_priv.h"
+#include "sgpu_program.h"
 
 // ---- small math ------------------------------------------------------------------------------------------------------
 static inline float sat(float v) { return v > 0 ? (v < 1 ? v : 1) : 0; }
@@ -55,6 +56,7 @@ void d9_surf_target(D9Dev *dev, D9Surf *rt, D9Surf *ds, SgTarget *t) {
     if (ds->w == rt->w && ds->h >= rt->h) { t->depth = ds->depth; t->stencil = has_stencil(ds->fmt) ? ds->stencil : NULL; return; }
     // depth buffer of another width: keep a render-target sized copy (contents are not shared with the larger one)
     if (!ds->sdepth || ds->sw_ != rt->w || ds->sh_ != rt->h) {
+        sg_target_gone(NULL, ds->sdepth, ds->sstencil);   // the memory is about to be freed (and may be reused)
         free(ds->sdepth); free(ds->sstencil);
         ds->sw_ = rt->w; ds->sh_ = rt->h;
         ds->sdepth = malloc((size_t)rt->w * (size_t)rt->h * sizeof(float));
@@ -181,6 +183,7 @@ typedef struct DrawCtx {
     int tci[8], ttff[8];
     int point_scale;
     float ps_size, ps_min, ps_max, ps_a, ps_b, ps_c, vp_h;
+    SgProgram prog;                // GPU-translatable description of the pixel stage (SgState.program)
     // viewport
     float vpx, vpy, vpw, vph, vpminz, vpmaxz;
     float shift_x, shift_y;
@@ -703,6 +706,60 @@ static void build_ff_ps(DrawCtx *dc, FfCtx *f) {
     }
 }
 
+// ---- pixel stage -> SgProgram (the declarative twin of the pixel_fn chosen below) ---------------------------------------------------------------
+static void prog_fog(SgProgram *p, const FfCtx *f, int enable) {
+    p->fog.enable = enable;
+    if (!enable) return;
+    p->fog.table = f->fog_table;
+    p->fog.start = f->fog_start; p->fog.end = f->fog_end; p->fog.density = f->fog_density;
+    for (int k = 0; k < 3; k++) p->fog.color[k] = f->fog_color[k];
+}
+static void prog_tss(SgProgram *p, const FfCtx *f, const D9State *S) {
+    p->kind = SGP_D3D9_TSS;
+    SgpTss *t = &p->tss;
+    t->nstages = f->nstages;
+    memcpy(t->tfactor, f->tfactor, 16);
+    t->specular = f->specular;
+    for (int i = 0; i < f->nstages; i++) {
+        const FfStage *s = &f->st[i];
+        SgpTssStage *o = &t->stage[i];
+        o->colorop = s->colorop; o->alphaop = s->alphaop;
+        for (int k = 0; k < 3; k++) { o->color_arg[k] = s->carg[k]; o->alpha_arg[k] = s->aarg[k]; }
+        o->result_arg = s->resultarg;
+        o->slot = s->slot; o->ncoord = s->count; o->projected = s->proj;
+        o->tex_kind = s->tex ? s->tex->kind : -1;
+        o->bump_signed = s->bump_signed;
+        o->tci = S->tss[i][11]; o->ttf = S->tss[i][24];
+        memcpy(o->bump_mat, s->bm, 16);
+        o->bump_lscale = s->lscale; o->bump_loffset = s->loffset;
+        memcpy(o->constant, s->constant, 16);
+        p->samplers[i].tex = s->tex; p->samplers[i].samp = s->samp;
+    }
+    p->nsamplers = f->nstages;
+    prog_fog(p, f, f->fog_mode);
+}
+static void prog_ps(SgProgram *p, const D9Shader *ps, const D3dPsCtx *pc, const FfCtx *f, int wrap_fog) {
+    p->kind = SGP_D3D9_PS;
+    SgpPs *o = &p->ps;
+    o->shader = ps->sh;
+    o->tokens = d3dsh_tokens(ps->sh); o->ntokens = (int)d3dsh_token_count(ps->sh);
+    o->major = d3dsh_major(ps->sh); o->minor = d3dsh_minor(ps->sh);
+    o->consts = pc->c;
+    o->input_mask = d3dsh_ps_input_mask(ps->sh);
+    o->sampler_mask = d3dsh_ps_sampler_mask(ps->sh);
+    for (int i = 0; i < SGP_MAX_SAMPLERS; i++) o->sampler_type[i] = d3dsh_ps_sampler_type(ps->sh, i);
+    o->writes_depth = d3dsh_ps_writes_depth(ps->sh);
+    uint32_t misc = d3dsh_ps_misc_mask(ps->sh);
+    o->uses_vpos = (misc & 1) != 0; o->uses_vface = (misc & 2) != 0;
+    for (int i = 0; i < SGP_MAX_SAMPLERS; i++) {
+        memcpy(o->bump_mat[i], pc->bump_mat[i], 16);
+        o->bump_lscale[i] = pc->bump_lscale[i]; o->bump_loffset[i] = pc->bump_loffset[i];
+        p->samplers[i].tex = pc->tex[i]; p->samplers[i].samp = pc->samp[i];
+        if (pc->tex[i]) p->nsamplers = i + 1;
+    }
+    prog_fog(p, f, wrap_fog);
+}
+
 // ---- state -> SgState -------------------------------------------------------------------------------------------------------------------------------------
 static int blend_f(uint32_t v, int *both_inv) {
     *both_inv = 0;
@@ -914,12 +971,16 @@ uint32_t d9_draw(D9Dev *dev, int ptype, int base_vertex, uint32_t min_vertex, ui
             if (sgs.nvary < 11) sgs.nvary = 11;
             sgs.pixel_fn = ps_fog_pixel; sgs.pixel_ctx = psf;
         } else { sgs.pixel_fn = d3dsh_ps_pixel; sgs.pixel_ctx = psc; }
+        prog_ps(&c->prog, ps, psc, &ff, psf != NULL);
+        sgs.program = &c->prog;
     } else {
         build_ff_ps(c, &ff);
         sgs.nvary = ff.fog_mode ? 11 : 10;
         sgs.pixel_fn = ff.nstages == 0 ? ff_pixel : ff.fast ? ff_pixel_fast : ff_pixel;
         sgs.pixel_ctx = &ff;
         if (ff.nstages == 0) { /* no stages: diffuse (+ specular, fog) through the cascade with nothing active */ }
+        prog_tss(&c->prog, &ff, S);
+        sgs.program = &c->prog;
     }
     if (c->use_vs && !ps) { /* VS + fixed-function pixel stage: outputs come from the shader's varyings */ }
     if (c->use_vs && !ps) c->tc_stage_mask = 0;
