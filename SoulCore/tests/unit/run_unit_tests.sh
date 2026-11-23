@@ -49,3 +49,19 @@ if gcc -fsanitize=address,undefined -o "$B/san_probe" "$B/san_probe.c" 2>/dev/nu
     "$B/d3dsh_test_asan" | tee "$B/d3dsh_test_asan.log"
     grep -q 'failed=0$' "$B/d3dsh_test_asan.log" || exit 1
 fi
+
+# sgsl shader translator (GL fixed function / D3D9 texture stages / D3D9 pixel shaders -> MSL and C): the C rendering of
+# every configuration is compiled at test time and compared with the CPU implementations; the MSL text is written to
+# build/unit/sgsl_msl/*.metal (+ index.txt) for the macOS CI step. The committed prelude must be up to date.
+bash sgsl/gen_prelude.sh "$B/sgsl_prelude.c" || { echo "FAIL sgsl prelude generation"; echo "passed=0 failed=1"; exit 1; }
+cmp -s "$B/sgsl_prelude.c" ../../src/sgsl_prelude.c || { echo "FAIL src/sgsl_prelude.c is stale (re-run tests/unit/sgsl/gen_prelude.sh)"; echo "passed=0 failed=1"; exit 1; }
+SLSRCS="sgsl_test.c ../../src/sgsl.c ../../src/sgsl_ir.c ../../src/sgsl_fe_fix.c ../../src/sgsl_fe_ps.c ../../src/sgsl_prelude.c ../../src/d3d9_shader.c ../../src/d3d9_shader_exec.c"
+gcc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -ffp-contract=off -I../../src -I. -o "$B/sgsl_test" $SLSRCS -lm -ldl || { echo "FAIL sgsl build"; echo "passed=0 failed=1"; exit 1; }
+"$B/sgsl_test" | tee "$B/sgsl_test.log"
+grep -q 'failed=0$' "$B/sgsl_test.log" || exit 1
+if gcc -fsanitize=address,undefined -o "$B/san_probe" "$B/san_probe.c" 2>/dev/null && "$B/san_probe"; then
+    echo "--- sgsl_test under -fsanitize=address,undefined"
+    gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -ffp-contract=off -I../../src -I. -o "$B/sgsl_test_asan" $SLSRCS -lm -ldl || { echo "FAIL sgsl asan build"; echo "passed=0 failed=1"; exit 1; }
+    SGSL_SAMPLES=60 SGSL_NO_MOCK=1 ASAN_OPTIONS=detect_leaks=0 "$B/sgsl_test_asan" | tee "$B/sgsl_test_asan.log"
+    grep -q 'failed=0$' "$B/sgsl_test_asan.log" || exit 1
+fi

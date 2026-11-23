@@ -1,0 +1,235 @@
+// ---- sgsl prelude: helper functions shared by the MSL and C renderings (same text, see sgsl_prelude.txt) ----
+#define SG_M1(N, F) SG_FN float4 N(float4 a) { return mk4(F(a.x), F(a.y), F(a.z), F(a.w)); }
+#define SG_M2(N, F) SG_FN float4 N(float4 a, float4 b) { return mk4(F(a.x, b.x), F(a.y, b.y), F(a.z, b.z), F(a.w, b.w)); }
+#define SG_M3(N, F) SG_FN float4 N(float4 a, float4 b, float4 c) { return mk4(F(a.x, b.x, c.x), F(a.y, b.y, c.y), F(a.z, b.z, c.z), F(a.w, b.w, c.w)); }
+SG_FN float4 sg_splat(float f) { return mk4(f, f, f, f); }
+SG_FN float sg_sat1(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }
+SG_FN float sg_minf(float a, float b) { return a < b ? a : b; }
+SG_FN float sg_maxf(float a, float b) { return a > b ? a : b; }
+SG_FN float sg_clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+SG_FN int sg_clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+SG_FN int sg_relidx(int base, int al) { int k = base + al; return k > 1000000 ? 1000000 : (k < -1000000 ? -1000000 : k); }
+SG_FN float sg_exp2(float x) { return sg_exp2f(x); }
+SG_FN float gl_clamp01(float f) { if (f < 0.0f) f = 0.0f; if (f > 1.0f) f = 1.0f; return f; }
+SG_M1(sg_sat4, sg_sat1)
+SG_FN float sg_add1(float a, float b) { return a + b; }
+SG_FN float sg_sub1(float a, float b) { return a - b; }
+SG_FN float sg_mul1(float a, float b) { return a * b; }
+SG_M2(sg_add4, sg_add1)
+SG_M2(sg_sub4, sg_sub1)
+SG_M2(sg_mul4, sg_mul1)
+SG_FN float4 sg_scale4(float4 a, float k) { return mk4(a.x * k, a.y * k, a.z * k, a.w * k); }
+SG_FN float sg_clamp11(float x) { return x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x); }
+SG_FN float4 sg_clamp114(float4 a) { return mk4(sg_clamp11(a.x), sg_clamp11(a.y), sg_clamp11(a.z), sg_clamp11(a.w)); }
+SG_FN float4 sg_fogmix(float4 c, float f, float4 fc) { return mk4(c.x * f + fc.x * (1.0f - f), c.y * f + fc.y * (1.0f - f), c.z * f + fc.z * (1.0f - f), c.w); }
+SG_FN float sg_fogf(int mode, float d, float start, float end, float dens) {
+    float f = 1.0f;
+    if (mode == 1) f = sg_expf(-d * dens);
+    else if (mode == 2) f = sg_expf(-(d * dens) * (d * dens));
+    else if (mode == 3) f = end != start ? (end - d) / (end - start) : (d < start ? 1.0f : 0.0f);
+    return sg_sat1(f);
+}
+// ---- GL fixed-function texture environment (sgpu.c tex_combine) ----
+SG_FN float4 gl_combine(int env, int fmt, float4 c, float4 tx, float4 ec) {
+    int has_rgb = fmt != 2;
+    int has_a = fmt == 0 || fmt == 2 || fmt == 4 || fmt == 5;
+    if (env == 1) {
+        if (has_rgb) { c.x = tx.x; c.y = tx.y; c.z = tx.z; }
+        if (has_a) c.w = tx.w;
+    } else if (env == 2) {
+        if (fmt == 0) { c.x += (tx.x - c.x) * tx.w; c.y += (tx.y - c.y) * tx.w; c.z += (tx.z - c.z) * tx.w; }
+        else if (fmt == 1) { c.x = tx.x; c.y = tx.y; c.z = tx.z; }
+    } else if (env == 3) {
+        if (has_rgb) { c.x += tx.x; c.y += tx.y; c.z += tx.z; if (c.x > 1.0f) c.x = 1.0f; if (c.y > 1.0f) c.y = 1.0f; if (c.z > 1.0f) c.z = 1.0f; }
+        if (has_a) c.w *= tx.w;
+    } else if (env == 4) {
+        if (has_rgb) { c.x = c.x * (1.0f - tx.x) + ec.x * tx.x; c.y = c.y * (1.0f - tx.y) + ec.y * tx.y; c.z = c.z * (1.0f - tx.z) + ec.z * tx.z; }
+        if (has_a) c.w *= tx.w;
+    } else {
+        if (has_rgb) { c.x *= tx.x; c.y *= tx.y; c.z *= tx.z; }
+        if (has_a) c.w *= tx.w;
+    }
+    return c;
+}
+// ---- D3D9 texture stage cascade (d3d9_draw.c ff_*) ----
+SG_FN float ff_rcpz(float q) { return q != 0.0f ? 1.0f / q : 1.0f; }
+SG_FN float4 ff_pd(float4 vx, float4 c, float dq, float iq) { return mk4((vx.x - c.x * dq) * iq, (vx.y - c.y * dq) * iq, (vx.z - c.z * dq) * iq, (vx.w - c.w * dq) * iq); }
+SG_FN float4 ff_addxy(float4 c, float4 p) { c.x += p.x; c.y += p.y; return c; }
+SG_FN float4 ff_lum(float4 t, float l) { t.x *= l; t.y *= l; t.z *= l; return t; }
+SG_FN float ff_sraw(float b) { int v = (int)(b * 255.0f + 0.5f); if (v > 127) v -= 256; float f = (float)v / 127.0f; return f < -1.0f ? -1.0f : f; }
+SG_FN float4 ff_bump(float4 t, float4 bm) { float du = ff_sraw(t.x), dv = ff_sraw(t.y); return mk4(bm.x * du + bm.z * dv, bm.y * du + bm.w * dv, 0.0f, 0.0f); }
+SG_FN float4 ff_argx(int arg, float4 tx, float4 cur, float4 tmp, float4 dif, float4 spc, float4 tf, float4 cst, int alpha_only) {
+    float4 o;
+    int k = arg & 15;
+    if (k == 0) o = dif; else if (k == 1) o = cur; else if (k == 2) o = tx; else if (k == 3) o = tf;
+    else if (k == 4) o = spc; else if (k == 5) o = tmp; else if (k == 6) o = cst; else o = cur;
+    if (arg & 0x10) o = mk4(1.0f - o.x, 1.0f - o.y, 1.0f - o.z, 1.0f - o.w);
+    if ((arg & 0x20) && !alpha_only) { float w = o.w; o = mk4(w, w, w, w); }
+    return o;
+}
+SG_FN float4 ff_arg(int arg, float4 tx, float4 cur, float4 tmp, float4 dif, float4 spc, float4 tf, float4 cst) { return ff_argx(arg, tx, cur, tmp, dif, spc, tf, cst, 0); }
+SG_FN float4 ff_arga(int arg, float4 tx, float4 cur, float4 tmp, float4 dif, float4 spc, float4 tf, float4 cst) { return ff_argx(arg, tx, cur, tmp, dif, spc, tf, cst, 1); }
+SG_FN float ff_op1(int op, float x0, float x1, float x2, float a1w, float bdif, float btex, float btf, float bcur, int alpha) {
+    float v = x1, bf;
+    switch (op) {
+    case 2: v = x1; break; case 3: v = x2; break;
+    case 4: v = x1 * x2; break; case 5: v = x1 * x2 * 2.0f; break; case 6: v = x1 * x2 * 4.0f; break;
+    case 7: v = x1 + x2; break; case 8: v = x1 + x2 - 0.5f; break; case 9: v = (x1 + x2 - 0.5f) * 2.0f; break;
+    case 10: v = x1 - x2; break; case 11: v = x1 + x2 - x1 * x2; break;
+    case 12: bf = bdif; v = x1 * bf + x2 * (1.0f - bf); break;
+    case 13: bf = btex; v = x1 * bf + x2 * (1.0f - bf); break;
+    case 14: bf = btf; v = x1 * bf + x2 * (1.0f - bf); break;
+    case 15: v = x1 + x2 * (1.0f - btex); break;
+    case 16: bf = bcur; v = x1 * bf + x2 * (1.0f - bf); break;
+    case 17: v = x1; break;
+    case 18: v = alpha ? x1 : x1 + a1w * x2; break;
+    case 19: v = alpha ? x1 : x1 * x2 + a1w; break;
+    case 20: v = alpha ? x1 : (1.0f - a1w) * x2 + x1; break;
+    case 21: v = alpha ? x1 : (1.0f - x1) * x2 + a1w; break;
+    case 25: v = x0 + x1 * x2; break;
+    case 26: v = x0 * x1 + (1.0f - x0) * x2; break;
+    default: v = x1; break;
+    }
+    return sg_sat1(v);
+}
+SG_FN float4 ff_opc(int op, float4 a0, float4 a1, float4 a2, float4 tx, float4 cur, float4 dif, float4 tf) {
+    return mk4(ff_op1(op, a0.x, a1.x, a2.x, a1.w, dif.w, tx.w, tf.w, cur.w, 0), ff_op1(op, a0.y, a1.y, a2.y, a1.w, dif.w, tx.w, tf.w, cur.w, 0),
+               ff_op1(op, a0.z, a1.z, a2.z, a1.w, dif.w, tx.w, tf.w, cur.w, 0), 0.0f);
+}
+SG_FN float ff_opa(int op, float4 a0, float4 a1, float4 a2, float4 tx, float4 cur, float4 dif, float4 tf) {
+    return ff_op1(op, a0.w, a1.w, a2.w, a1.w, dif.w, tx.w, tf.w, cur.w, 1);
+}
+SG_FN float4 ff_setrgb(float4 base, float4 s) { return mk4(s.x, s.y, s.z, base.w); }
+SG_FN float4 ff_dot3(float4 a1, float4 a2) {
+    float d = (a1.x * 2.0f - 1.0f) * (a2.x * 2.0f - 1.0f) + (a1.y * 2.0f - 1.0f) * (a2.y * 2.0f - 1.0f) + (a1.z * 2.0f - 1.0f) * (a2.z * 2.0f - 1.0f);
+    return sg_splat(sg_sat1(d));
+}
+SG_FN float4 ff_spec(float4 o, float4 s) { return mk4(sg_sat1(o.x + s.x), sg_sat1(o.y + s.y), sg_sat1(o.z + s.z), o.w); }
+// ---- D3D9 shader arithmetic (d3d9_shader_exec.c) ----
+SG_FN float d3_mul(float a, float b) { float m = a * b; if (m != m && (a == 0.0f || b == 0.0f)) m = 0.0f; return m; }
+SG_M2(d3_mul4, d3_mul)
+SG_FN float d3_dp3f(float4 a, float4 b) { return d3_mul(a.x, b.x) + d3_mul(a.y, b.y) + d3_mul(a.z, b.z); }
+SG_FN float4 d3_dp3(float4 a, float4 b) { return sg_splat(d3_dp3f(a, b)); }
+SG_FN float4 d3_dp4(float4 a, float4 b) { return sg_splat(d3_dp3f(a, b) + d3_mul(a.w, b.w)); }
+SG_FN float d3_mrow(float4 a, float4 b, int dim) { return d3_dp3f(a, b) + (dim == 4 ? d3_mul(a.w, b.w) : 0.0f); }
+SG_FN float d3_mdot(float4 d, float4 b, int dim) { float v = d.x * b.x + d.y * b.y + d.z * b.z; if (dim == 4) v += d.w * b.w; return v; }
+SG_FN float4 d3_rcp(float4 a) { return sg_splat(1.0f / a.x); }
+SG_FN float4 d3_rsq(float4 a) { float x = sg_fabs(a.x); return sg_splat(x == 0.0f ? SG_INF : 1.0f / sg_sqrt(x)); }
+SG_FN float d3_min1(float a, float b) { return a < b ? a : b; }
+SG_FN float d3_max1(float a, float b) { return a >= b ? a : b; }
+SG_FN float d3_slt1(float a, float b) { return a < b ? 1.0f : 0.0f; }
+SG_FN float d3_sge1(float a, float b) { return a >= b ? 1.0f : 0.0f; }
+SG_M2(d3_min4, d3_min1)
+SG_M2(d3_max4, d3_max1)
+SG_M2(d3_slt4, d3_slt1)
+SG_M2(d3_sge4, d3_sge1)
+SG_FN float4 d3_exp(float4 a) { return sg_splat(sg_exp2f(a.x)); }
+SG_FN float4 d3_log(float4 a) { float x = sg_fabs(a.x); return sg_splat(x == 0.0f ? -SG_INF : sg_log2f(x)); }
+SG_FN float4 d3_lit(float4 a) {
+    float p = a.w; p = p < -127.9961f ? -127.9961f : (p > 127.9961f ? 127.9961f : p);
+    float4 r = mk4(1.0f, 0.0f, 0.0f, 1.0f);
+    if (a.x > 0.0f) { r.y = a.x; if (a.y > 0.0f) r.z = sg_powf(a.y, p); }
+    return r;
+}
+SG_FN float4 d3_dst(float4 a, float4 b) { return mk4(1.0f, d3_mul(a.y, b.y), a.z, b.w); }
+SG_FN float d3_lrp1(float a, float b, float c) { return d3_mul(a, b - c) + c; }
+SG_M3(d3_lrp, d3_lrp1)
+SG_FN float d3_frc1(float a) { return a - sg_floor(a); }
+SG_M1(d3_frc, d3_frc1)
+SG_FN float4 d3_pow(float4 a, float4 b) { float x = sg_fabs(a.x), y = b.x; return sg_splat(y == 0.0f ? 1.0f : sg_powf(x, y)); }
+SG_FN float4 d3_crs(float4 a, float4 b) {
+    return mk4(d3_mul(a.y, b.z) - d3_mul(a.z, b.y), d3_mul(a.z, b.x) - d3_mul(a.x, b.z), d3_mul(a.x, b.y) - d3_mul(a.y, b.x), 0.0f);
+}
+SG_FN float d3_sgn1(float a) { return a > 0.0f ? 1.0f : (a < 0.0f ? -1.0f : 0.0f); }
+SG_M1(d3_sgn, d3_sgn1)
+SG_M1(d3_abs, sg_fabs)
+SG_FN float4 d3_nrm(float4 a) {
+    float l = d3_dp3f(a, a);
+    if (l > 0.0f && sg_isfinite(l)) { float inv = 1.0f / sg_sqrt(l); return mk4(a.x * inv, a.y * inv, a.z * inv, a.w * inv); }
+    return mk4(0.0f, 0.0f, 0.0f, 0.0f);
+}
+SG_FN float4 d3_sincos(float4 a) { return mk4(sg_cos(a.x), sg_sin(a.x), 0.0f, 0.0f); }
+SG_FN float4 d3_dp2add(float4 a, float4 b, float4 c) { return sg_splat(d3_mul(a.x, b.x) + d3_mul(a.y, b.y) + c.x); }
+SG_FN float d3_cnd1(float a, float b, float c) { return a > 0.5f ? b : c; }
+SG_FN float d3_cmp1(float a, float b, float c) { return a >= 0.0f ? b : c; }
+SG_M3(d3_cnd, d3_cnd1)
+SG_M3(d3_cmp, d3_cmp1)
+SG_FN float4 d3_mod(int mod, float4 v) {
+    float4 r = v;
+    switch (mod) {
+    case 1: r = mk4(-v.x, -v.y, -v.z, -v.w); break;
+    case 2: r = mk4(v.x - 0.5f, v.y - 0.5f, v.z - 0.5f, v.w - 0.5f); break;
+    case 3: r = mk4(-(v.x - 0.5f), -(v.y - 0.5f), -(v.z - 0.5f), -(v.w - 0.5f)); break;
+    case 4: r = mk4(2.0f * (v.x - 0.5f), 2.0f * (v.y - 0.5f), 2.0f * (v.z - 0.5f), 2.0f * (v.w - 0.5f)); break;
+    case 5: r = mk4(-2.0f * (v.x - 0.5f), -2.0f * (v.y - 0.5f), -2.0f * (v.z - 0.5f), -2.0f * (v.w - 0.5f)); break;
+    case 6: r = mk4(1.0f - v.x, 1.0f - v.y, 1.0f - v.z, 1.0f - v.w); break;
+    case 7: r = mk4(v.x * 2.0f, v.y * 2.0f, v.z * 2.0f, v.w * 2.0f); break;
+    case 8: r = mk4(v.x * -2.0f, v.y * -2.0f, v.z * -2.0f, v.w * -2.0f); break;
+    case 9: { float z = v.z; r = mk4(z != 0.0f ? v.x / z : v.x, z != 0.0f ? v.y / z : v.y, z != 0.0f ? v.z / z : v.z, z != 0.0f ? v.w / z : v.w); break; }
+    case 10: { float w = v.w; r = mk4(w != 0.0f ? v.x / w : v.x, w != 0.0f ? v.y / w : v.y, w != 0.0f ? v.z / w : v.z, w != 0.0f ? v.w / w : v.w); break; }
+    case 11: r = mk4(sg_fabs(v.x), sg_fabs(v.y), sg_fabs(v.z), sg_fabs(v.w)); break;
+    case 12: r = mk4(-sg_fabs(v.x), -sg_fabs(v.y), -sg_fabs(v.z), -sg_fabs(v.w)); break;
+    default: break;
+    }
+    return r;
+}
+SG_FN float4 d3_vpos(float4 pos) { return mk4(sg_floor(pos.x), sg_floor(pos.y), 0.0f, 0.0f); }
+SG_FN float4 d3_vface(int front) { return sg_splat(front ? 1.0f : -1.0f); }
+SG_FN bool d3_killtest(float4 p) { return p.x < 0.0f || p.y < 0.0f || p.z < 0.0f; }
+SG_FN float4 d3_projc(float4 a) { if (a.w != 0.0f) { float iw = 1.0f / a.w; return mk4(a.x * iw, a.y * iw, a.z * iw, 1.0f); } return a; }
+SG_FN float4 d3_projd(float4 a, float4 d) {
+    float w = a.w;
+    if (w != 0.0f) { float iw = 1.0f / w; return mk4((d.x * w - a.x * d.w) * iw * iw, (d.y * w - a.y * d.w) * iw * iw, (d.z * w - a.z * d.w) * iw * iw, d.w); }
+    return d;
+}
+SG_FN bool d3_hasd(float4 dx, float4 dy) { return dx.x != 0.0f || dx.y != 0.0f || dx.z != 0.0f || dy.x != 0.0f || dy.y != 0.0f || dy.z != 0.0f; }
+SG_FN float4 d3_texcoord(float4 v) { return mk4(sg_sat1(v.x), sg_sat1(v.y), sg_sat1(v.z), 1.0f); }
+SG_FN float4 d3_texcoord4(float4 a) { return mk4(a.x, a.y, a.z, 1.0f); }
+SG_FN float4 d3_bemc(float4 cv, float4 m, float4 a) { return mk4(cv.x + m.x * a.x + m.z * a.y, cv.y + m.y * a.x + m.w * a.y, cv.z, cv.w); }
+SG_FN float4 d3_lumscale(float4 r, float l) { return mk4(r.x * l, r.y * l, r.z * l, r.w); }
+SG_FN float4 d3_refl(float4 c, float4 e) {
+    float nn = c.x * c.x + c.y * c.y + c.z * c.z, ne = c.x * e.x + c.y * e.y + c.z * e.z;
+    float k = nn != 0.0f ? 2.0f * ne / nn : 0.0f;
+    return mk4(c.x * k - e.x, c.y * k - e.y, c.z * k - e.z, c.w);
+}
+SG_FN float d3_depthdiv(float n, float d) { return d != 0.0f ? n / d : 1.0f; }
+SG_FN float4 d3_bem(float4 a, float4 b, float4 m) { return mk4(a.x + m.x * b.x + m.z * b.y, a.y + m.y * b.x + m.w * b.y, 0.0f, 0.0f); }
+// ---- derivative propagation (d3d9_shader_exec.c deriv_alu) ----
+SG_FN float4 d_absd(float4 raw, float4 d, int neg) {
+    float sx = raw.x < 0.0f ? -1.0f : 1.0f, sy = raw.y < 0.0f ? -1.0f : 1.0f, sz = raw.z < 0.0f ? -1.0f : 1.0f, sw = raw.w < 0.0f ? -1.0f : 1.0f;
+    if (neg) { sx = -sx; sy = -sy; sz = -sz; sw = -sw; }
+    return mk4(d.x * sx, d.y * sy, d.z * sz, d.w * sw);
+}
+SG_FN float d_abs1(float a, float x) { return a < 0.0f ? -x : x; }
+SG_M2(d_abs, d_abs1)
+SG_FN float d_mul1(float a, float x, float b, float y) { return x * b + a * y; }
+SG_FN float4 d_mul(float4 a, float4 x, float4 b, float4 y) { return mk4(d_mul1(a.x, x.x, b.x, y.x), d_mul1(a.y, x.y, b.y, y.y), d_mul1(a.z, x.z, b.z, y.z), d_mul1(a.w, x.w, b.w, y.w)); }
+SG_FN float d_mad1(float a, float x, float b, float y, float z) { return x * b + a * y + z; }
+SG_FN float4 d_mad(float4 a, float4 x, float4 b, float4 y, float4 z) { return mk4(d_mad1(a.x, x.x, b.x, y.x, z.x), d_mad1(a.y, x.y, b.y, y.y, z.y), d_mad1(a.z, x.z, b.z, y.z, z.z), d_mad1(a.w, x.w, b.w, y.w, z.w)); }
+SG_FN float d_lrp1(float a, float x, float b, float y, float c, float z) { return x * (b - c) + a * (y - z) + z; }
+SG_FN float4 d_lrp(float4 a, float4 x, float4 b, float4 y, float4 c, float4 z) { return mk4(d_lrp1(a.x, x.x, b.x, y.x, c.x, z.x), d_lrp1(a.y, x.y, b.y, y.y, c.y, z.y), d_lrp1(a.z, x.z, b.z, y.z, c.z, z.z), d_lrp1(a.w, x.w, b.w, y.w, c.w, z.w)); }
+SG_FN float4 d_dp2add(float4 a, float4 x, float4 b, float4 y, float4 z) { return sg_splat(x.x * b.x + a.x * y.x + x.y * b.y + a.y * y.y + z.x); }
+SG_FN float4 d_dp3(float4 a, float4 x, float4 b, float4 y) {
+    float v = 0.0f; v += x.x * b.x + a.x * y.x; v += x.y * b.y + a.y * y.y; v += x.z * b.z + a.z * y.z; return sg_splat(v);
+}
+SG_FN float4 d_dp4(float4 a, float4 x, float4 b, float4 y) {
+    float v = 0.0f; v += x.x * b.x + a.x * y.x; v += x.y * b.y + a.y * y.y; v += x.z * b.z + a.z * y.z; v += x.w * b.w + a.w * y.w; return sg_splat(v);
+}
+SG_FN float4 d_rcp(float4 r, float4 x) { return mk4(-r.x * r.x * x.x, -r.y * r.y * x.x, -r.z * r.z * x.x, -r.w * r.w * x.x); }
+SG_FN float4 d_rsq(float4 r, float4 x) { return mk4(-0.5f * r.x * r.x * r.x * x.x, -0.5f * r.y * r.y * r.y * x.x, -0.5f * r.z * r.z * r.z * x.x, -0.5f * r.w * r.w * r.w * x.x); }
+SG_FN float d_min1(float a, float b, float x, float y) { return a < b ? x : y; }
+SG_FN float d_max1(float a, float b, float x, float y) { return a >= b ? x : y; }
+SG_FN float4 d_min(float4 a, float4 b, float4 x, float4 y) { return mk4(d_min1(a.x, b.x, x.x, y.x), d_min1(a.y, b.y, x.y, y.y), d_min1(a.z, b.z, x.z, y.z), d_min1(a.w, b.w, x.w, y.w)); }
+SG_FN float4 d_max(float4 a, float4 b, float4 x, float4 y) { return mk4(d_max1(a.x, b.x, x.x, y.x), d_max1(a.y, b.y, x.y, y.y), d_max1(a.z, b.z, x.z, y.z), d_max1(a.w, b.w, x.w, y.w)); }
+SG_FN float d_cmp1(float a, float y, float z) { return a >= 0.0f ? y : z; }
+SG_FN float d_cnd1(float a, float y, float z) { return a > 0.5f ? y : z; }
+SG_M3(d_cmp, d_cmp1)
+SG_M3(d_cnd, d_cnd1)
+SG_FN float4 d_pow(float4 a, float4 b, float4 res, float4 x, float4 y) {
+    float xa = sg_fabs(a.x), r = res.x, v = 0.0f;
+    if (xa > 0.0f && sg_isfinite(r)) v = b.x * r / xa * (a.x < 0.0f ? -x.x : x.x) + r * sg_logf(xa) * y.x;
+    return sg_splat(v);
+}
+SG_FN float4 d_exp(float4 r, float4 x) { return mk4(0.69314718f * r.x * x.x, 0.69314718f * r.y * x.x, 0.69314718f * r.z * x.x, 0.69314718f * r.w * x.x); }
+SG_FN float4 d_log(float4 a, float4 x) { return sg_splat(a.x != 0.0f ? x.x / (sg_fabs(a.x) * 0.69314718f) * (a.x < 0.0f ? -1.0f : 1.0f) : 0.0f); }
+SG_FN float4 d_sincos(float4 a, float4 x) { return mk4(-sg_sin(a.x) * x.x, sg_cos(a.x) * x.x, 0.0f, 0.0f); }
