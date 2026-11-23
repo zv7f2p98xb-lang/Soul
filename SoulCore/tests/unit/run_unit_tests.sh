@@ -22,3 +22,15 @@ if gcc -fsanitize=address,undefined -o "$B/san_probe" "$B/san_probe.c" 2>/dev/nu
 else
     echo "(sanitizers unavailable, skipping the ASan run)"
 fi
+
+# sgpu software 3D pipeline: pixel-exact scenes (plain build, then under ASan/UBSan when available).
+SGSRCS="sgpu_test.c ../../src/sgpu.c"
+gcc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -I../../src -o "$B/sgpu_test" $SGSRCS -lm || { echo "FAIL sgpu build"; echo "passed=0 failed=1"; exit 1; }
+"$B/sgpu_test" | tee "$B/sgpu_test.log"
+grep -q 'failed=0$' "$B/sgpu_test.log" || exit 1
+if gcc -fsanitize=address,undefined -o "$B/san_probe" "$B/san_probe.c" 2>/dev/null && "$B/san_probe"; then
+    echo "--- sgpu_test under -fsanitize=address,undefined"
+    gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -I../../src -o "$B/sgpu_test_asan" $SGSRCS -lm || { echo "FAIL sgpu asan build"; echo "passed=0 failed=1"; exit 1; }
+    "$B/sgpu_test_asan" | tee "$B/sgpu_test_asan.log"
+    grep -q 'failed=0$' "$B/sgpu_test_asan.log" || exit 1
+fi
